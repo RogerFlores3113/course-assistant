@@ -1,6 +1,7 @@
 """Search a course's chunks: FTS5 with bm25 ranking, a LIKE fallback, and neighbouring-chunk context."""
 from __future__ import annotations
 
+import math
 import re
 from datetime import date
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 from . import locations
 
 Source = dict[str, Any]
+DEBUG: list | None = None
+BASE_W, COV_W, HEAD_W = 2.2, 2.4, 2.0  # weights of: the FTS rank, how many of the question's words are in a passage, in its heading
 
 STOPWORDS = frozenset("""
 a about above after again all also am an and any are as at be because been before being below between both but by
@@ -19,13 +22,15 @@ show describe define mean means nothing anything something
 """.split())
 
 _TOKEN = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*")
+# 'A^TA' is A-transpose times A, not the word 'TA': split it so a search for TA (teaching assistant) cannot match it
+_GLUE = re.compile(r"\^\s*\{?\s*T\s*\}?(?=[A-Za-z])")
 
 
 def query_terms(question: str, max_terms: int = 14) -> list[str]:
     """Words worth searching for: no punctuation, no FTS operators, no stopwords, unique, in order."""
     out: list[str] = []
     seen: set[str] = set()
-    for raw in _TOKEN.findall(question or ""):
+    for raw in _TOKEN.findall(_GLUE.sub("^T ", question or "")):
         for t in re.split(r"[-']", raw):
             t = t.lower()
             if not t or t in seen or t in STOPWORDS or t in {"and", "or", "not", "near"}:
@@ -102,7 +107,7 @@ def normalize_query(question: str) -> dict[str, Any]:
     A^100 becomes 'power powers diagonalization hundred'; [[4,1],[2,3]] becomes 'matrix' plus the numbers 4 1 2 3 for
     worked-example matching. Generic verbs (compute, find, quickly) are kept but never decide the ranking.
     """
-    q = question or ""
+    q = _GLUE.sub("^T ", question or "")
     boost: list[str] = []  # terms implied by notation: as important as the words typed
     pm = _POWER.search(q)
     if pm:
@@ -186,7 +191,7 @@ def is_manifest_noise(text: str) -> bool:
 
 
 def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", (text or "").lower())
+    return re.findall(r"[a-z0-9]+", _GLUE.sub("^T ", text or "").lower())
 
 
 def _shingles(text: str) -> set[str]:
@@ -321,6 +326,36 @@ _WANTS_HEADER = re.compile(r"\b(who wrote|author|authors|written by|published|pu
                            r"subtitle|byline|newspaper)\b", re.I)
 
 
+_PAST_RX = re.compile(r"\b(past|previous|previously|earlier|prior|old|last\s+(?:year|term|semester|time)|"
+                      r"offerings?|(?:in|from)\s+20\d\d)\b", re.I)
+_TERM_RX = re.compile(r"\b(fall|autumn|spring|summer|winter)[\s\-_']*((?:20)?\d{2})\b", re.I)
+_SEASONS_WORDS = frozenset("fall autumn spring summer winter".split())
+
+
+def _term_key(text: str) -> str:
+    m = _TERM_RX.search(text or "")
+    if not m:
+        return ""
+    year = m.group(2)
+    return f"{m.group(1).lower().replace('autumn', 'fall')} {year if len(year) == 4 else '20' + year}"
+
+
+def _named_offerings(store, query: str, extra: str, fparams: list[Any]) -> dict[int, str]:
+    """{material id: 'fall 2018'} for every material whose title or file name carries a term the question names
+    ('the Fall 2018 offering', 'the syllabus for Fall 2026'). {} when the question names no term."""
+    terms = {_term_key(m.group(0)) for m in _TERM_RX.finditer(query or "")}
+    terms.discard("")
+    if not terms:
+        return {}
+    out: dict[int, str] = {}
+    for m in store._rows("SELECT DISTINCT m.id, m.title, m.original_name FROM materials m JOIN chunks c "
+                         "ON c.material_id = m.id WHERE 1=1" + extra, fparams):
+        t = _term_key(f"{m['title']} {m.get('original_name') or ''}")
+        if t in terms:
+            out[m["id"]] = t
+    return out
+
+
 def _stems(words) -> set[str]:
     return {_stem(w) for w in words}
 
@@ -339,6 +374,7 @@ def query_intent(query: str, nq: dict[str, Any] | None = None) -> dict[str, Any]
         "define": bool(_DEFINE_Q.search(query or "")),
         "main_arg": bool(_MAIN_ARG.search(query or "")),
         "wants_header": bool(_WANTS_HEADER.search(query or "")),
+        "past": bool(_PAST_RX.search(query or "")) or bool(_TERM_RX.search(query or "")),
     }
 
 
@@ -712,6 +748,37 @@ def _lecture_pool(store, course_id: int, query: str, evs: list[dict[str, Any]], 
     return out
 
 
+# words that say what kind of answer is wanted, not what it is about: they never decide which passage is best
+_ANSWER_KIND = frozenset(_stem(w) for w in """formula formulas equation equations definition definitions example examples
+rule rules steps step method methods way ways idea ideas concept concepts meaning relationship relation difference
+differences compare comparison differ""".split())
+
+
+def _term_weights(store, terms: list[str], extra: str, fparams: list[Any]) -> dict[str, float]:
+    """How telling each question word is in this course: a word found in few passages ('projection') counts more than
+    one found nearly everywhere ('matrix', 'formula'). 1.0 for the rarest, down to 0.25 for a word in every passage."""
+    n = store._row("SELECT count(*) AS n FROM chunks c JOIN materials m ON m.id = c.material_id WHERE 1=1" + extra,
+                   fparams)
+    total = max(1, int((n or {}).get("n", 1)))
+    out: dict[str, float] = {}
+    for t in terms:
+        try:
+            row = store._row(
+                "SELECT count(*) AS n FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid "
+                "JOIN materials m ON m.id = c.material_id WHERE chunks_fts MATCH ?" + extra, [_fts_term(t), *fparams])
+            df = int((row or {}).get("n", 0))
+        except Exception:
+            df = 0
+        out[t] = max(0.25, min(1.0, math.log((total + 1) / (df + 1)) / math.log(total + 1) * 1.6)) if df else 1.0
+        if _stem(t) in _ANSWER_KIND or _stem(t) in _WEAK:
+            out[t] = min(out[t], 0.3)
+    return out
+
+
+def _has_term(t: str, words: set[str], stems: set[str]) -> bool:
+    return _stem(t) in stems or (len(t) >= 4 and any(w.startswith(t) for w in words))
+
+
 def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extra: str, fparams: list[Any],
                  limit: int) -> list[Source]:
     """One question, scored: words, titles, definitions, and what kind of chunk it is."""
@@ -754,42 +821,55 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
         rows = store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id "
                            f"WHERE c.material_id = ?{extra} ORDER BY c.ord LIMIT 40", [mid, *fparams])
         add([(r, 0.0) for r in rows])
-    if intent["date"]:
+    offerings = _named_offerings(store, query, extra, fparams)  # {material id: 'fall 2018'} for a term the question names
+    if intent["date"] or (intent["admin"] and offerings):
         # a named offering's dates: every chunk of it that carries a date (and the topic, if the question has one)
-        topic = {_stem(t) for t in core if t not in _DATE_WORDS and t not in _GENERIC_TOPIC and not t.isdigit()}
-        for mid, tsc in titles.items():
-            if tsc <= 0:
-                continue
+        topic = {_stem(t) for t in core if t not in _DATE_WORDS and t not in _GENERIC_TOPIC and not t.isdigit()
+                 and t not in _SEASONS_WORDS}
+        for mid in {*offerings, *(m for m, tsc in titles.items() if tsc > 0)}:
             for r in store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id "
                                  f"WHERE c.material_id = ?{extra} ORDER BY c.ord", [mid, *fparams]):
-                words = {_stem(w) for w in _words(r["heading"] + " " + r["text"])}
+                head = {_stem(w) for w in _words(r["heading"])}
+                words = head | {_stem(w) for w in _words(r["text"])}
                 if has_date(r["text"] + " " + r["heading"]) and (not topic or topic & words):
                     add([(r, 0.0)])
-                    boost[r["id"]] = 2.0
+                    boost[r["id"]] = max(boost.get(r["id"], 0.0), 3.5 if topic & head else 2.0)
     if not pool:
         return []
     top = max(base.values()) or 1.0
-    defterms = [t for t in core if t not in _GENERIC_TOPIC] if intent["define"] else []
+    weights = _term_weights(store, core, extra, fparams)
+    # a definition is wanted of the question's telling words ('projection'), not of 'matrix' or 'formula'
+    maxw = max((weights[t] for t in core if t not in _GENERIC_TOPIC), default=1.0)
+    defterms = [t for t in core if t not in _GENERIC_TOPIC and weights.get(t, 1.0) >= 0.6 * maxw] if intent["define"] else []
     scored: list[tuple[float, dict[str, Any]]] = []
     for cid, r in pool.items():
         if is_manifest_noise(r["text"]):
             continue
-        body = {_stem(w) for w in _words(r["text"])}
+        bwords = _words(r["text"])
+        body = {_stem(w) for w in bwords}
         head = {_stem(w) for w in _words(r["heading"])}
         titl = {_stem(w) for w in _words(r["material_title"])}
         cs = [_stem(t) for t in core]
         present = sum(1 for t in cs if t in body or t in head or t in titl)
-        in_head = sum(1 for t in cs if t in head)
-        score = 3.0 * (base.get(cid, 0.0) / top)
-        score += (1.0 if present == len(cs) else 0.6 * present / len(cs))
-        score += 1.5 * in_head / len(cs)
+        wsum = sum(weights[t] for t in core) or 1.0
+        wpresent = sum(weights[t] for t, c in zip(core, cs) if c in body or c in head or c in titl) / wsum
+        whead = sum(weights[t] for t, c in zip(core, cs) if c in head) / wsum
+        if (present == 0 and not titles.get(r["material_id"]) and cid not in boost and r["material_id"] not in named
+                and not any(_has_term(t, set(bwords), body) for t in [*core, *related])):
+            continue  # found by a stray token (the 'ta' in A^TA), not by a word of the question
+        score = BASE_W * (base.get(cid, 0.0) / top)
+        score += (COV_W if present == len(cs) else 0.6 * COV_W * wpresent)
+        score += HEAD_W * whead
         score += 4.5 * titles.get(r["material_id"], 0.0)
         score += _number_score(qnums, r["text"])
         score += boost.get(cid, 0.0)
         if defterms:
             score += 1.5 * _definition_score(defterms, r)
-        if r["material_kind"] == "past_offering":
-            score -= 0.3 if titles.get(r["material_id"]) else 1.0
+        if r["material_kind"] == "past_offering" and r["material_id"] not in offerings:
+            if not intent["past"]:
+                score -= 4.0  # an earlier term's lecture, exam or policy is not this term's, unless it was asked for
+            else:
+                score -= 0.3 if titles.get(r["material_id"]) else 1.0
         if present == 0 and not titles.get(r["material_id"]):
             score -= 1.0  # only a related word matched
         if not intent["admin"] and _is_admin_chunk(r):
@@ -804,6 +884,8 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
             score -= 1.0
         if not intent["wants_header"] and is_header_chunk(r["text"], r["material_title"]):
             score -= 6.0 if (intent["main_arg"] or r["material_id"] in named) else 1.5
+        if DEBUG is not None:
+            DEBUG.append((cid, round(score, 2), round(3.0 * (base.get(cid, 0.0) / top), 2), round(wpresent, 2), round(whead, 2)))
         scored.append((score, r))
     scored.sort(key=lambda x: (-x[0], x[1]["id"]))
     ranked = _dedupe(scored, max(limit, 1) * 3)
