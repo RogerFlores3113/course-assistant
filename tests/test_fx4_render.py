@@ -23,11 +23,7 @@ def test_numbering_carries_across_details_and_split_blocks():
     a = str(web_md.render("1. a\n2. b", numbering=shared))
     b = str(web_md.render("1. c", numbering=shared))
     assert "start" not in a and 'start="3"' in b
-    assert "start" not in str(web_md.render("1. a
-
-A paragraph.
-
-1. c", numbering={}))
+    assert "start" not in str(web_md.render("1. a\n\nA paragraph.\n\n1. c", numbering={}))
 
 
 def test_twin_steps_split_by_uncited_items_stay_one_numbered_list(ready):
