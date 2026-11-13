@@ -28,9 +28,10 @@ row two.
 """
 LECTURE2 = """# Lecture 18: Eigenvectors
 
-## An example
+## Worked case
 
-The matrix with rows (3, 1) and (2, 2) has eigenvalues 4 and 1. Its eigenvector for 4 is (1, 1) and for 1 is (1, -2).
+Take the array with first row (3, 1) and second row (2, 2). Its eigenvalues are 4 and 1. The eigenvector for 4 is (1, 1) while the
+eigenvector for 1 is (1, -2).
 """
 BOOK = """# Chapter 2: Solutions
 
@@ -59,3 +60,27 @@ def world(tmp_path):
         mid = importers.import_file(s, c, f)
         mats[name] = [ch["id"] for ch in s.chunks_of(mid)]
     return {"s": s, "c": c, "ids": ids, "chunks": mats}
+
+
+QONLY = """# Lab 6 handout: Conductivity
+
+## Pre-lab questions
+
+A 0.500 L sample of brine holds 14.6 g of sodium chloride. Compute its molarity and say whether the conductivity should rise or fall when it is diluted to 1.00 L.
+
+## Equipment
+
+You will need a conductivity probe, a 250 mL beaker, a squirt bottle of distilled water and a lab notebook.
+"""
+
+
+def handout_only_questions(tmp_path):
+    """A graded handout whose question paragraphs sit in a chunk of their own, so a search can hit the questions alone."""
+    s = Store(":memory:")
+    c = s.add_course("Course")
+    f = tmp_path / "lab-6-handout.md"
+    f.write_text(QONLY)
+    mid = importers.import_file(s, c, f)
+    s.update_material(mid, graded=1)
+    integrity.mark_material_graded(s, mid)
+    return s, c, mid

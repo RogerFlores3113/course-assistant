@@ -264,9 +264,9 @@ def test_d8_no_handout_note_on_content_free_or_logistics_questions(tmp_path, q):
 
 
 def test_d8_the_note_shows_when_a_left_out_paragraph_matches_the_content_words(tmp_path):
-    from fx9_world import handout_world
-    s, c, ids, mid = handout_world(tmp_path)
-    q = "Why does the pink color fade after the endpoint of a titration?"
+    import fx11_world
+    s, c, mid = fx11_world.handout_only_questions(tmp_path)  # cycle 11: never beside an "Also searched" row of the same handout
+    q = "How do I compute the molarity of a brine sample and what happens to conductivity when it is diluted?"
     assert integrity.handout_sources(s, c, q)[1] >= 1
 
 

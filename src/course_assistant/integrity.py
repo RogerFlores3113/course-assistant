@@ -3243,6 +3243,26 @@ SAFE_ESSAY = ("I can't write this one for you because it is marked as graded, an
               "- Find the readings that bear on it (the Materials tab searches your saved files).\n"
               "- Write your own thesis or first paragraph, then paste it here and ask for feedback against the rubric.")
 
+SAFE_SHORT = ("I can't write this answer for you because it is marked as graded, and a second try at safe coaching did "
+              "not come out right just now. Here is how to make progress:\n\n"
+              "- Re-read the question and list each part it asks you to answer.\n"
+              "- Find the lecture or reading that covers those ideas (the Materials tab searches your saved files).\n"
+              "- Write your own answer, then paste it here and ask for feedback on it.")
+
+
+def fallback_text(graded: dict[str, Any], kind: str, check: bool, problem_text: str = "") -> str:
+    """The fixed page after two failed tries. A short written item (define, explain, compare) is a question to answer, not
+    an essay with a thesis, so its wording talks about the question."""
+    if check and kind in ("essay", "proof"):
+        return SAFE_CHECK_WRITTEN
+    if check:
+        return SAFE_CHECK
+    if kind == "essay":
+        body = (graded.get("body") or "").strip() or problem_text
+        return SAFE_SHORT if (essay.is_short_answer({"body": body}) or written_item(body)) else SAFE_ESSAY
+    return SAFE_ESSAY if kind == "proof" else SAFE_CONCEPTS
+
+
 FEEDBACK_SYSTEM = """You are the study assistant inside Course Assistant. The student pasted their OWN draft for work \
 they marked as graded and wants feedback. Give feedback measured against the assignment's requirements and rubric: \
 quote their own words in double quotation marks when you point at something, say what the rubric rewards, which \
@@ -3307,7 +3327,7 @@ _ORIGINAL_RESULT_TAIL = re.compile(r"(?:\bis\b|\bare\b|=|\bequals\b|\bgives\b|\b
                                    r"[^\n]{0,60}?[-\u2212(]?\d|=\s*[\w(\[-]", re.I)
 _CONFIRMS = re.compile(r"\b(?:your\s+(?:answer|result|value|solution|work)\s+(?:is|looks|seems)\s+(?:right|correct|wrong|incorrect|good|fine|ok|okay)|"
                        r"(?:that|this|it)(?:'s|\s+is)\s+(?:fine|ok|okay|good|acceptable|good\s+enough)|"
-                       r"(?<![\w.])\d[\d.,]*\s*(?:[a-z]{1,4}(?:/[a-z]{1,4})?\s+)?(?:is|works|would\s+work|looks|seems)\s+(?:fine|ok|okay|good|acceptable|right|correct)|"
+                       r"(?<![\w.])\d[\d.,]*\s*(?:[a-z]{1,4}(?:/[a-z]{1,4})?\s+)?(?:(?:is|looks|seems)\s+(?:fine|ok|okay|good|acceptable|right|correct)|works(?:\s+fine)?|would\s+work)|"
                        r"yes,?\s+(?:that|this|your|it)\b[^.\n]{0,30}\b(?:fine|ok|okay|works|acceptable)|"
                        r"(?:that|this|it)(?:'s|\s+is)\s+(?:right|correct|wrong|incorrect)|"
                        r"yes,?\s+(?:that|this|your|it)\b[^.\n]{0,30}\b(?:correct|right)|"
@@ -3385,6 +3405,9 @@ def _question_paragraph(para: str, bodies: list[tuple[dict[str, Any], _Text]]) -
     return False
 
 
+_HANDOUT_NAMED = re.compile(r"\b(?:hand-?outs?|lab|labs|pre-?\s?labs?|lab\s+report|reports?|worksheet)\b", re.I)
+
+
 _HANDOUT_NOISE = frozenset("right wrong correct check checking mine thing things stuff sure okay due late submit".split())
 
 
@@ -3405,20 +3428,25 @@ def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tup
     except Exception:
         return [], 0
     out: list[dict] = []
-    left_out = 0
+    left_by_mid: dict[Any, int] = {}
+    named = bool(_HANDOUT_NAMED.search(query))
     for src in found:
         bodies = by_mid.get(src.get("material_id"))
         if not bodies:
             continue
         paras = [x for x in re.split(r"\n\s*\n", src.get("text") or "") if x.strip()]
         keep = [x for x in paras if not _question_paragraph(x, bodies)]
-        # the note is for a left-out paragraph that is about what the student asked: it shares a content word with the
-        # question (never on a content-free or logistics question)
-        left_out += sum(1 for x in paras if x not in keep and qwords & content_tokens(x))
+        # the note is for a left-out paragraph that is about what the student asked: the question names the handout, the
+        # lab, the pre-lab or the report, or the paragraph shares two content words with it (never on a content-free or
+        # logistics question)
+        n_out = sum(1 for x in paras if x not in keep and ((named and not is_logistics(query)) or len(qwords & content_tokens(x)) >= 2))
+        if n_out:
+            left_by_mid[src.get("material_id")] = left_by_mid.get(src.get("material_id"), 0) + n_out
         keep = [x for x in keep if len(x.split()) >= 4]  # a bare heading is no passage
         if keep and len(out) < limit:
             out.append(dict(src, text="\n\n".join(keep)))
-    return out, left_out
+    shown = {o.get("material_id") for o in out}  # a handout that has its own "Also searched" row needs no note beside it
+    return out, sum(v for mid, v in left_by_mid.items() if mid not in shown)
 
 
 def _assignment_sources(store, graded: dict, limit_chars: int = 6000) -> list[dict]:
@@ -3589,6 +3617,16 @@ NOTE_CHECK_CONCEPTS = ("This was marked graded ({title}), so the app cannot say 
 CHECK_RULE = ("\n\nThe student is asking whether their own answer to the graded task is right. Never confirm or deny "
               "it, never state or hint at the original's result, and never say 'yes, that is correct'. Tell them to "
               "check their method on the twin and to verify their own work step by step.")
+CHECK_RULE_WRITTEN = ("\n\nThe student is asking whether their own written answer to the graded task is right or good. Never "
+                      "confirm or deny it, never state or hint at what the answer should say, and never say 'yes, that is "
+                      "correct'. Written work has nothing to practise on: tell them to compare their own words with what "
+                      "the assignment and rubric ask, quoting their wording back, and ask two or three questions they can "
+                      "answer by revising.")
+SAFE_CHECK_WRITTEN = ("I can't say whether your answer to this graded work is right or wrong, so I am not going to confirm "
+                      "or deny it. Here is how to check it yourself:\n\n"
+                      "- Re-read the assignment and its rubric, and list what each requirement asks you to do.\n"
+                      "- Compare your own words with each requirement and note which ones you have not yet addressed.\n"
+                      "- Paste your draft here and ask for feedback against the rubric.")
 NOTE_CONCEPTS = ("This was marked graded ({title}), so the app explains the concepts and an approach instead of doing "
                  "the work. The work itself is yours to do.")
 
@@ -3645,7 +3683,7 @@ def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, sr
                  f"or the topic's background from the numbered sources, and cite them; do not write the graded work):\n{question}")
     check_q = is_check_ask(question)
     if check_q:
-        user += CHECK_RULE
+        user += CHECK_RULE_WRITTEN if kind in ("essay", "proof") else CHECK_RULE
     for attempt in range(2):  # the reply and one regeneration, then the fixed fallback
         raw = provider.complete(system, [{"role": "user", "content": user}], max_tokens=4000)
         _, raw = read_marker(raw)
@@ -3658,15 +3696,27 @@ def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, sr
         user += ("\n\nYour last reply contained a worked solution or finished writing for the graded task. Write only "
                  "concepts, requirements and an approach, with no finished sentences the student could submit and no "
                  "results of the task.")
-    return [Block("text", SAFE_CHECK if check_q and kind not in ("essay",) else
-                  SAFE_ESSAY if kind in ("essay", "proof") else SAFE_CONCEPTS, [])], []
+    return [Block("text", fallback_text(graded, kind, check_q, problem_text), [])], []
+
+
+_ESSAYISH = re.compile(r"\b(?:essays?|papers?|thesis|paragraphs?|argue|argument|arguments|position|drafts?|\d+\s*words)\b", re.I)
+
+
+def written_item(body: str) -> bool:
+    """A short written item (define, explain, compare) even with a grading note under it: up to 400 words and none of the
+    words of an essay prompt. essay.is_short_answer stops at 120 words, which a rubric line or a points table passes."""
+    body = (body or "").strip()
+    return bool(body) and len(body.split()) <= 400 and not _ESSAYISH.search(body)
 
 
 def finished_answer(body: str, reply: str) -> bool:
     """The reply states, in plain declarative sentences (no advice to the student), every required part of a short written
     item: three or more such sentences that between them carry 60 percent of the item's own concept words. Coaching names
     the parts and asks the student to write them; it does not state them."""
-    want = content_tokens(body) - essay.ESSAY_GENERIC
+    # the item's own question, not its grading note ('Part 1 is worth points for a clear statement ...')
+    core = " ".join(x for x in re.split(r"(?<=[.!?])\s+|\n+", body or "") if x.strip()
+                    and not re.search(r"\b(?:grading|graded|rubric|points?|pts|marks?|credit|worth|due|late)\b", x, re.I))
+    want = content_tokens(core or body) - essay.ESSAY_GENERIC
     if len(want) < 3:
         return False
     sents = [x for x in _proof_sentences(reply) if len(x.split()) >= 6 and not essay.STRICT_COACH.search(x) and not essay.MODAL.search(x)]
@@ -3694,7 +3744,7 @@ def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_
         return 2 if _leaks_problem(_Text(reply), _Text(body), reply, True) else 0
     if kind == "essay":
         it = {"title": graded.get("title", ""), "body": body or problem_text}
-        if essay.is_short_answer(it) and finished_answer(it["body"], reply):
+        if (essay.is_short_answer(it) or written_item(it["body"])) and finished_answer(it["body"], reply):
             return 2  # a finished answer is never shown under the 'concepts and an approach' banner
         return essay_leak_level(it, raw or "", question, True, sources)
     if kind == "proof":
@@ -3848,8 +3898,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
         blocks, used = [Block("text", twin_fallback(_item_name(graded), fail_reason, check, bool(offers)), [])], []
     elif mode != "twin" and not feedback and model_calls <= 0:
         # the caller already spent the request's calls (reply plus one regeneration): fixed text, no more calls
-        blocks, used = [Block("text", SAFE_CHECK if check and kind != "essay" else
-                              SAFE_ESSAY if kind in ("essay", "proof") else SAFE_CONCEPTS, [])], []
+        blocks, used = [Block("text", fallback_text(graded, kind, check, problem_text), [])], []
     elif mode != "twin" and not feedback:
         blocks, used = _concepts_reply(provider, store, course_id, graded, kind, src_block, problem_text, question,
                                        depth_rule, len(sources), sources)
@@ -3857,6 +3906,9 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     if keep_text and keep_sources and kind == "essay" and not feedback and mode != "twin" and not fell_back:
         kept = essay.passing_sentences({"title": graded.get("title", ""), "body": body or problem_text}, keep_text, question,
                                        keep_sources[:6])
+        if kept and (essay.is_short_answer({"body": body or problem_text}) or written_item(body or problem_text)) and (
+                finished_answer(body or problem_text, keep_text) or finished_answer(body or problem_text, " ".join(kept))):
+            kept = []  # a short written item: the cited sentences of a finished answer together ARE the answer, none stays
         if kept:  # the replaced answer's cited reading notes that passed on their own stay on the page
             kb, ku = grounding.parse_blocks("From my first answer, these parts stay close to your materials:\n\n" + " ".join(kept),
                                             len(sources))
