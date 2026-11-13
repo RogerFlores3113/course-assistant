@@ -211,7 +211,19 @@ _WRAP = re.compile(
     r"\b(?:what|how)\s+(?:if|about)\s+(?:you\s+)?(?:argued|argue|arguing|claimed|claiming|said|saying|say|took|taking)\s+(?:that\s+)?|"
     r"\b(?:why\s+not|how\s+about|have\s+you\s+(?:considered|thought\s+about))\s+(?:argu\w+|say\w*|claim\w*)\s+(?:that\s+)?|"
     r"\b(?:could|would|can)\s+you\s+(?:argue|say|claim)\s+(?:that\s+)?|"
-    r"\bwhat\s+if\s+(?:your|the)\s+(?:thesis|claim|argument)\s+(?:were|was|is)\s+(?:that\s+)?|"
+    r"\bwhat\s+if\s+(?:your|the)\s+(?:thesis|claim|argument)\s+(?:were|was|is|said|stated|read|argued|claimed|suggested)\s+(?:that\s+)?|"
+    r"\b(?:perhaps|maybe)\s+(?:your|the)\s+(?:thesis|claim|argument|point)\s+(?:is|could\s+be|might\s+be|would\s+be|should\s+be|were|was)\s+(?:that\s+)?|"
+    r"\b(?:perhaps|maybe)\s+(?:you\s+(?:could|might|can|should)\s+)?(?:argue|say|claim|suggest|propose|contend)\s+(?:that\s+)?|"
+    r"\b(?:a|an|one|another|your|the|possible|sample|example)\s+(?:\w+\s+){0,2}(?:thesis|claim|position|argument|take|stance|angle|"
+    r"reading|framing|statement|answer)\s+(?:(?:you|a\s+student|students|one|someone)\s+(?:could|can|might|may|would)\s+(?:also\s+)?"
+    r"(?:use|make|take|try|defend|argue|adopt|consider|write|say|build\s+on)|(?:worth|to)\s+(?:considering|trying|using|defending|"
+    r"adopting|consider|try|use|defend|adopt)|along\s+(?:these|those)\s+lines|in\s+this\s+direction)\s*(?:is|would\s+be)?\s*[:,]\s+|"
+    r"\bhere(?:'s|\s+is|\s+are)\s+(?:a|an|one|the|some|my)\s+(?:\w+\s+){0,3}(?:thesis|claim|position|argument|take|stance|angle|"
+    r"reading|framing|statement|answer)\s*[:,]\s+|"
+    r"\b(?:one|another|a|an)\s+(?:possible\s+|simple\s+|good\s+|quick\s+)?(?:position|claim|thesis|take|stance|angle|reading|"
+    r"framing|answer)\s*:\s+|"
+    r"\btry\s+(?:this|that|something(?:\s+like(?:\s+this)?|\s+along\s+the\s+lines\s+of)?|saying|arguing)\s*[:,]\s+|"
+    r"\b(?:something\s+)?along\s+the\s+lines\s+of\s*[:,]\s+|"
     r"\bwhat\s+if\s+(?:the\s+)?(?:real\s+|true\s+|main\s+|key\s+)?(?:point|lesson|story|answer|issue|takeaway|idea)\s+"
     r"(?:is|were|was)\s+(?:that\s+)?|"
     r"\b(?:by|for\s+example\s+by|e\.g\.\s+by)\s+(?:arguing|claiming|saying|showing|stating|noting|concluding)\s+(?:that\s+)?|"
@@ -445,6 +457,8 @@ def imperative_coaching(s: str, topic: set[str], ents: set[str] | None = None) -
     'that' clause in it carries a judgement of the subject."""
     if not _IMPER.match(s or ""):
         return False
+    if re.match(r"^\W*(?:please\s+)?try\s+(?:this|that|something|saying|arguing)\b", s, re.I) and _WRAP.search(s):
+        return False  # 'Try this: <finished claim>' is a frame in front of a claim; the wrapper test judges the claim
     for part in re.split(r"\bthat\b", s)[1:]:
         if not re.match(r"\s*(?:(?:the|an?|his|her|their|its|these|those|some|many|most|all|no|one|both)\b|[A-Z])", part):
             continue  # 'ask what that shows': no subject of its own, so no claim
@@ -480,9 +494,20 @@ _TAIL = re.compile(
 
 def trim_tail(s: str) -> str:
     """The sentence without a trailing coaching clause ('..., which a student should note'): appending one never turns
-    finished prose into coaching."""
-    out = _TAIL.sub("", s or "").strip()
-    return out if len(out.split()) >= 4 else (s or "")
+    finished prose into coaching. Order-independent with strip_frames: a leading frame ('As you can see, ...') is set
+    aside first, so its own words ('you can ...') are never read as the start of a tail."""
+    s = s or ""
+    rest, pre = s, ""
+    for _ in range(4):
+        m = _FRAME.match(rest)
+        if not m or len(rest[m.end():].strip().split()) < 3:
+            break
+        pre += rest[:m.end()]
+        rest = rest[m.end():]
+    out = _TAIL.sub("", rest).strip()
+    if len(out.split()) < 4:
+        return s
+    return pre + out
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -514,6 +539,11 @@ def _frame_only(sentence: str) -> bool:
     return framed and not _WRAP.search(raw) and not _rhetorical_core(s)
 
 
+# 'Try this: write one sentence that takes a side', 'Perhaps your thesis is too broad, so name the side you take': an instruction
+_COACH_IMP = re.compile(r"(?:^|[,;]\s*(?:so|then)\s+)(?:write|name|take|make|add|put|say|state|show|give|tell|revise|tighten|narrow|"
+                        r"rewrite|explain|include|keep|avoid|limit|focus|choose|decide|stick)\b", re.I)
+
+
 def _wrapped_position(core: str, topic: set[str], ents: set[str] | None, source: str = "", strict: bool = False) -> bool:
     """A position the writer was invited to take ('A strong essay would say that X', 'You could argue that X', 'Your thesis:
     X', 'What if you argued that X?'): the claim X itself. On an open prompt (no proper names) any claim of eight words or
@@ -523,7 +553,8 @@ def _wrapped_position(core: str, topic: set[str], ents: set[str] | None, source:
     if words < 4 or re.search(r"^whether\b|\bon\s+whether\b|\bwhether\s+or\s+not\b|\bright\s+or\s+wrong\b|\bwrong\s+or\s+right\b|"
                               r"\bfor\s+or\s+against\b", c, re.I):
         return False
-    if _about_writing(c) or (source and quote_ratio(c, source) >= 0.5):
+    if _about_writing(c) or (source and quote_ratio(c, source) >= 0.5) or imperative_coaching(c, topic, ents) \
+            or _COACH_IMP.search(c):
         return False
     if is_position(c + ".", topic, ents):
         return True
@@ -548,12 +579,28 @@ def _foreign_claim(s: str, topic: set[str], ents: set[str] | None, source: str =
     return words >= 10 or bool(shared) or bool(_YEAR.search(c))
 
 
+_BARE_VERDICT = re.compile(
+    r"^\W*(?:my\s+|the\s+|short\s+|quick\s+)?(?:verdict|answer|short\s+answer|bottom\s+line)\s*:\s*(?:\w+\s+){0,2}?"
+    r"(?:right|wrong|correct|incorrect|partly|partially|half|mostly|largely|mistaken|vindicated)\b[\w\s,'-]{0,30}[.!]?\W*$", re.I)
+_SPEAKER = re.compile(r"(?:^|(?<=\s))(student|tutor|teacher|professor|prof|ta|coach|assistant)\s*:\s+", re.I)
+
+
+def transcript_turns(line: str) -> list[str]:
+    """The turns of a 'Student: ... Tutor: ...' transcript (two different speakers), else []."""
+    ms = list(_SPEAKER.finditer(line or ""))
+    if len({m.group(1).lower() for m in ms}) < 2:
+        return []
+    return [line[m.end():(ms[i + 1].start() if i + 1 < len(ms) else len(line))].strip() for i, m in enumerate(ms)]
+
+
 def _position_level(s: str, topic: set[str], ents: set[str] | None, source: str = "", foreign: bool = True) -> tuple[int, str]:
     """Level and reason of one sentence that takes a position on the essay's own question, in any wrapper, language or
     sentence form; (0, "") when it does not."""
     core, wrapped = unwrap(s)
     if wrapped and _wrapped_position(core, topic, ents, source, _frame_only(s)):
         return 2, "position"
+    if _BARE_VERDICT.match(_CITE_STRIP.sub("", s).strip().strip("\"“”'*_ ")):
+        return 2, "verdict"  # 'Verdict: partly right.' answers the essay's own question in two words
     if not wrapped and not attributed(s) and not STRICT_COACH.search(s) and is_position(s, topic, ents):
         return 1, "position"
     if not wrapped and quote_analysis(s, topic, ents):
@@ -654,6 +701,12 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip() if not _LABEL.match(line) else line.strip()
         if not line:
             continue
+        if ents is not None:  # 'Student: ... Tutor: ...': a dialogue is prose; any claim in any turn is a hard hit
+            for turn in transcript_turns(_CITE_STRIP.sub("", line)):
+                for sent in _split_sentences(turn):
+                    lvl, why = _position_level(trim_tail(sent), topic, ents, source, foreign)
+                    if lvl:
+                        return 2, "transcript " + why, sent
         for sent, span in _spans(line):
             lvl, why = _classify(sent, span, topic, source, asked, sources, loose, ents, foreign)
             if lvl > best[0]:

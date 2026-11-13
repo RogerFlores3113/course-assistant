@@ -650,7 +650,17 @@ _SIGNPOST_STEPS = re.compile(
     r"\b(?:argument|chapter|reading|essay|proof|lecture|section)\s+(?:has|is\s+in|runs|proceeds|unfolds)\b", re.I)
 _SIGNPOST_TOPIC = re.compile(
     r"^\W*(?:on|about|regarding|for|as\s+for|when\s+it\s+comes\s+to)\b[^.!?]{1,40},\s*(?:the|your)\s+(?:\w+\s+){1,2}?"
-    r"(?:says?|states?|explains?|covers?|describes?|notes?|lists?|gives?|spells?\s+out|puts?\s+it)\b[^.!?]{0,40}[.:]?\s*$", re.I)
+    r"(?:says?|states?|explains?|covers?|describes?|notes?|lists?|gives?|spells?\s+out|puts?\s+it)\b[^.!?]{0,80}[.:]?\s*$", re.I)
+# "Measured against the rubric, here is what I see." / "Here is my read of the draft.": a lead-in that states no fact
+_SIGNPOST_HERE = re.compile(
+    r"^\W*(?:(?:measured|judged|read|looking)\s+(?:against|at|with)\b[^.!?,]{1,40},\s*|overall,\s*|so,?\s*)?here(?:'s|\s+is|\s+are)\s+"
+    r"(?:what|how|my|the|a|some)\b[^.!?]{0,40}\b(?:see|saw|found|notice|noticed|think|read|take|feedback|summary|view|comments?)\b[^.!?]{0,20}[.:]?\s*$",
+    re.I)
+# "In short, first decide whether a tool is writing or only checking.": a recap that is advice, not a fact
+_SIGNPOST_RECAP = re.compile(
+    r"^\W*(?:in\s+short|in\s+brief|to\s+sum\s+up|to\s+summari[sz]e|put\s+simply|the\s+takeaway)\s*[,:]\s*"
+    r"(?:first,?\s+|then,?\s+|always\s+|just\s+)?(?:decide|check|ask|use|pick|make\s+sure|keep|remember|cite|read|start|begin|"
+    r"look|compare|plan|try|write\s+down)\b", re.I)
 
 
 _STRUCT_VERB = re.compile(
@@ -663,8 +673,12 @@ _STRUCT_VERB = re.compile(
 def _signpost(plain: str, next_cited: bool) -> bool:
     """A short sentence with no number or equation that orders or introduces what follows. The topic lead-in
     ("On AI, the syllabus says ...") counts only right before a cited sentence."""
-    if len(plain.split()) > 16 or re.search(r"[0-9=$]", plain):
+    if len(plain.split()) > 20 or re.search(r"[0-9=$]", plain):
         return False
+    if _SIGNPOST_HERE.match(plain) or _SIGNPOST_RECAP.match(plain):
+        return True
+    if len(plain.split()) > 16:
+        return next_cited and bool(_SIGNPOST_TOPIC.match(plain))
     if (_SIGNPOST_ORDINAL.match(plain) and _STRUCT_VERB.search(plain)) or _SIGNPOST_STEPS.search(plain):
         return True
     return next_cited and bool(_SIGNPOST_TOPIC.match(plain))
@@ -686,7 +700,7 @@ def _split_sentences(cleaned: str, found: list[int], calc: bool = False) -> list
         later = any(cites[i + 1:])
         flag = (not cites[i] and (any(cites[:i]) or later) and REMOVED_MARK not in x
                 and len(plain.split()) >= 5 and not _is_meta(plain)[0] and not _makes_no_claim(plain)
-                and not is_non_claim(plain, calc=calc) and not _signpost(plain, bool(cites[i + 1:i + 2] and cites[i + 1]))
+                and not is_non_claim(plain, calc=calc) and not _signpost(plain, any(cites[i + 1:i + 3]))
                 and (any(cites[:i]) or not _lead_in(plain)))  # before a cite only a short lead-in stating no fact stays plain
         flags.append(flag)
     if not any(flags):

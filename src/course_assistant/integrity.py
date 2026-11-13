@@ -1332,7 +1332,8 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
     if keys_only:
         return None
     for fi in force_map(items, force_item).values():
-        if _leaks_forced(fi, reply, question or "", sources):
+        # an essay reply is judged WITH its cites: a cited restatement of a source is only excused when its [n] is present
+        if _leaks_forced(fi, with_cites if (fi.get("kind") or _item_kind(fi)) == "essay" else reply, question or "", sources):
             return _hit(fi, "sticky")
     for fi in force_map(items, force_item).values():
         if question and is_check_ask(question) and confirms_answer(reply) \
@@ -2903,6 +2904,23 @@ def _verify_twin(provider, original: str, twin_problem: str, solution: str, n_so
     return twin_problem, solution
 
 
+def _soft_essay_ok(graded: dict, kind: str, level: int, raw: str, question: str, problem_text: str,
+                   sources: list[Any] | None) -> bool:
+    """In concepts mode a soft essay hit is accepted when it is one on-topic sentence that carries its own cite (a 'X matters
+    because the chapter ties it to ...' lead-in in a cited coaching reply). A soft hit that is an uncited sentence or a whole
+    body paragraph is still retried."""
+    if kind != "essay" or level != 1:
+        return False
+    it = {"title": graded.get("title", ""), "body": (graded.get("body") or "").strip() or problem_text}
+    _, why, sent = essay.find(it, raw or "", question, True, sources)
+    if why == "body paragraph" or not sent:
+        return False
+    for x in essay._split_sentences(essay._CITE_SPLIT.sub(r" \2\1", raw or "")):
+        if sent in _CITE_STRIP.sub("", x).strip():
+            return bool(essay._cite_numbers(x))
+    return False
+
+
 def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, src_block: str, problem_text: str,
                     question: str, depth_rule: str, n_sources: int, sources: list[Any] | None = None
                     ) -> tuple[list[Block], list[int]]:
@@ -2918,7 +2936,7 @@ def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, sr
         raw = provider.complete(system, [{"role": "user", "content": user}], max_tokens=4000)
         _, raw = read_marker(raw)
         level = _reply_leak_level(graded, kind, raw, question, problem_text, sources)
-        if level == 0 and not (is_check_ask(question) and confirms_answer(raw)):
+        if (level == 0 or _soft_essay_ok(graded, kind, level, raw, question, problem_text, sources)) and not (is_check_ask(question) and confirms_answer(raw)):
             blocks, used = grounding.parse_blocks(raw, n_sources)
             if blocks:
                 return blocks, used
