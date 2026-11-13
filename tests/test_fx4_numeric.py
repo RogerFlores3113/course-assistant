@@ -175,7 +175,7 @@ def test_practice_on_a_bare_topic_returns_questions_and_offers_a_button():
     assert g["data"]["graded_offers"] and g["data"]["graded_offers"][0]["label"].startswith("Problem")
     cl = client_for(s, p)
     html = cl.get(f"/guides/{g['id']}").text
-    assert "Practice on a problem like graded Problem" in html
+    assert "Practice on a problem like Problem" in html
 
 
 def test_practice_naming_the_item_gets_a_twin_and_explain_bare_topic_does_not():

@@ -748,6 +748,9 @@ _CHECK_ASK = re.compile(
     r"my\s+(?:answer|solution|result|work|attempt|value))\b", re.I)
 
 
+_GENERIC_CHECK = re.compile(r"\bin general\b|\bhow\s+(?:do|can|should|would|to)\b[^.?!]{0,12}\b(?:check|verify|confirm)\b", re.I)
+
+
 def is_check_ask(text: str) -> bool:
     """'Check my answer', 'I got 5.11 g, right?', 'is x = (1,1,2) correct': a request to confirm or deny an answer."""
     t = text or ""
@@ -844,6 +847,8 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     q = _Text(question)
     wants_prose = writing_request(question)
     check = is_check_ask(question)
+    if check and _GENERIC_CHECK.search(question) and not any(has_candidate(question, i) for i in items):
+        check = False  # "how do I check an LU factorization in general" is a method question, not an answer to check
     logi = is_logistics(question)
     scored: list[tuple[float, dict[str, Any]]] = []
     keyed = key_leak_any(store, course_id, question, items, {"lone": True})  # the message carries a final value: a check ask
@@ -2161,7 +2166,7 @@ def _solution_leaks(original: str, solution: str, item: dict[str, Any] | None = 
     a whole value or distinctive values of its answer key."""
     if reveals_original(solution):
         return True
-    if item and key_leak(_CITE_STRIP.sub("", solution), item, _TWIN_CTX):
+    if item and (key_leak(_CITE_STRIP.sub("", solution), item, _TWIN_CTX) or key_leak(solution, item, _TWIN_CTX)):
         return True
     rows_o = _row_set(original)
     if len(rows_o) >= 2 and len(rows_o & _row_set(_CITE_STRIP.sub("", solution))) * 2 >= len(rows_o):
