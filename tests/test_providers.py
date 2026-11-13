@@ -121,7 +121,8 @@ def test_local_not_running():
         raise httpx.ConnectError("refused")
     with pytest.raises(P.ProviderError) as e:
         local(h).complete("s", [])
-    assert "Start LM Studio" in str(e.value)
+    assert "couldn't reach your local model at http://127.0.0.1:1234" in str(e.value)
+    assert "LM Studio running with a model loaded" in str(e.value)
 
 
 def test_local_timeout_http_error_and_bad_json():
@@ -131,9 +132,9 @@ def test_local_timeout_http_error_and_bad_json():
         local(t).complete("s", [])
     with pytest.raises(P.ProviderError, match="500"):
         local(lambda r: httpx.Response(500)).complete("s", [])
-    with pytest.raises(P.ProviderError, match="could not read"):
+    with pytest.raises(P.ProviderError, match="did not look like a model server"):
         local(lambda r: httpx.Response(200, json={"oops": 1})).complete("s", [])
-    with pytest.raises(P.ProviderError, match="could not read"):
+    with pytest.raises(P.ProviderError, match="did not look like a model server"):
         local(lambda r: httpx.Response(200, text="not json")).complete("s", [])
 
 
@@ -179,3 +180,71 @@ def test_get_provider(monkeypatch):
     assert isinstance(lp, P.LocalProvider) and lp.model == "qwen" and lp.base_url == "http://127.0.0.1:1234"
     s.set_setting("local_base_url", "http://10.0.0.5:8080")
     assert P.get_provider(s).base_url == "http://10.0.0.5:8080"
+
+
+def test_local_502_blames_the_path_not_the_model():
+    with pytest.raises(P.ProviderError) as e:
+        local(lambda r: httpx.Response(502)).complete("s", [])
+    msg = str(e.value)
+    assert "502" in msg and "proxy" in msg and "http://127.0.0.1:1234" in msg
+    assert "model name" not in msg.lower().split("proxy")[0]
+
+
+@pytest.mark.parametrize("code,word", [(401, "refused"), (403, "refused"), (404, "404"), (400, "model name"), (503, "proxy")])
+def test_local_status_messages_are_specific(code, word):
+    with pytest.raises(P.ProviderError, match=word):
+        local(lambda r: httpx.Response(code)).complete("s", [])
+
+
+def test_is_loopback_url():
+    for u in ("http://127.0.0.1:1234", "http://localhost:1234/v1", "http://[::1]:8000", "127.0.0.1:5", "http://127.5.5.5"):
+        assert P.is_loopback_url(u), u
+    for u in ("http://example.com", "http://192.168.1.5:1234", "https://api.anthropic.com", ""):
+        assert not P.is_loopback_url(u), u
+
+
+def test_local_loopback_ignores_proxy_env_but_remote_keeps_it(monkeypatch):
+    seen = []
+    real = httpx.Client
+
+    def spy(*a, **kw):
+        seen.append(kw.get("trust_env", True))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(P.httpx, "Client", spy)
+    ok = lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})  # noqa: E731
+    P.LocalProvider("http://127.0.0.1:1234", transport=httpx.MockTransport(ok)).complete("s", [])
+    P.LocalProvider("http://localhost:1234", transport=httpx.MockTransport(ok)).complete("s", [])
+    P.LocalProvider("http://lab-pc.local:1234", transport=httpx.MockTransport(ok)).complete("s", [])
+    assert seen == [False, False, True]
+
+
+def test_local_really_bypasses_a_proxy_on_loopback(monkeypatch):
+    """A real loopback server, with HTTP(S)_PROXY pointed at a dead port and NO_PROXY unset: the call must still work."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            body = json.dumps({"choices": [{"message": {"content": "pong"}}]}).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    for k in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(k, "http://127.0.0.1:9")
+    try:
+        out = P.LocalProvider(f"http://127.0.0.1:{srv.server_port}", "m").complete("s", [{"role": "user", "content": "hi"}])
+    finally:
+        srv.shutdown()
+    assert out == "pong"

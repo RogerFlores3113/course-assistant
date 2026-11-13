@@ -20,17 +20,22 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__, disclaimer, paths
 from .store import EVENT_KINDS, GUIDE_KINDS, MATERIAL_KINDS, Store, now_iso
 from .web_md import render as render_md
-from .web_helpers import (chunk_range_label, DEPTHS, MODELS, PALETTE, TABS, THEMES, answer_view, clean_color, concept_graph,
-                          course_color, day_label, guide_view, parse_day, time_label, week_label, week_start)
+from .web_helpers import (DEPTHS, MODELS, PALETTE, TABS, THEMES, accent_style, answer_view, chunk_range_label, clean_color,
+                          clean_event_title, concept_graph, course_color, day_label, group_guides, guide_view,
+                          merge_events, parse_day, time_label, week_label, week_start)
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -45,6 +50,8 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 MEDIA_EXT = {".mp3": "audio", ".m4a": "audio", ".wav": "audio", ".mp4": "video", ".mov": "video", ".webm": "video"}
 INLINE_TYPES = ("application/pdf", "audio/", "video/", "image/png", "image/jpeg", "image/gif", "image/webp", "text/plain")
+GRADED_KINDS = {"problem": "Problem", "proof": "Proof", "essay": "Essay or paper"}
+FLASH_DRAFT_MAX = 800
 log = logging.getLogger(__name__)
 
 
@@ -84,17 +91,35 @@ def _friendly(e: Exception) -> str:
     return text if len(text) <= 400 else text[:397] + "..."
 
 
-def create_app(store: Store, *, key: str | None = None, provider_factory=None) -> FastAPI:
+def create_app(store: Store, *, key: str | None = None, provider_factory=None, start_jobs: bool = False) -> FastAPI:
+    """start_jobs=False (the default, so tests never spawn threads); `course-assistant serve` passes True and the app
+    then runs the background worker that reads photos of notes and transcribes recordings."""
     key = key or paths.app_key()
     res = paths.resource_dir()
-    app = FastAPI(title="Course Assistant", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if start_jobs:
+            try:
+                starter = getattr(_mod("transcribe"), "start_worker", None)
+                _app.state.worker = starter(store) if callable(starter) else None
+            except Exception:  # a broken worker must never stop the app from opening
+                log.exception("Could not start the background worker")
+        yield
+
+    app = FastAPI(title="Course Assistant", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.state.worker = None
+    app.state.start_jobs = start_jobs
     templates = Jinja2Templates(directory=str(res / "templates"))
     env = templates.env
     env.globals.update(version=__version__, disclaimer_full=disclaimer.FULL, tabs=TABS, depths=DEPTHS, models=MODELS,
                        palette=PALETTE, material_kinds=MATERIAL_KINDS, event_kinds=EVENT_KINDS,
-                       guide_kinds=GUIDE_KINDS, course_color=course_color)
+                       guide_kinds=GUIDE_KINDS, course_color=course_color, accent_style=accent_style,
+                       graded_kinds=GRADED_KINDS, page_title="")
+    env.globals["shortcuts_enabled"] = lambda: store.get_setting("card_shortcuts", "1") != "0"
     env.globals["theme"] = lambda: (store.get_setting("theme", "system") if store.get_setting("theme", "system") in THEMES else "system")
     env.filters["day"] = day_label
+    env.filters["clean"] = clean_event_title
     env.filters["clock"] = time_label
     env.filters["quote"] = lambda s: quote(str(s), safe="")
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
@@ -138,16 +163,19 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
                 flash = {}
         ctx.setdefault("notice", flash.get("notice", ""))
         ctx.setdefault("error", flash.get("error", ""))
+        ctx.setdefault("draft", flash.get("draft", ""))
         resp = templates.TemplateResponse(request, name, ctx, status_code=status_code)
         if raw:
             resp.delete_cookie(FLASH, path="/")
         return resp
 
-    def redirect(url: str, notice: str = "", error: str = "") -> RedirectResponse:
+    def redirect(url: str, notice: str = "", error: str = "", draft: str = "") -> RedirectResponse:
         resp = RedirectResponse(url, status_code=303)
         if notice or error:
-            resp.set_cookie(FLASH, quote(json.dumps({"notice": notice[:500], "error": error[:500]})), max_age=120,
-                            httponly=True, samesite="strict", path="/")
+            data = {"notice": notice[:500], "error": error[:500]}
+            if draft:  # so a plain (no JavaScript) form post does not lose what the student typed
+                data["draft"] = draft[:FLASH_DRAFT_MAX]
+            resp.set_cookie(FLASH, quote(json.dumps(data)), max_age=120, httponly=True, samesite="strict", path="/")
         return resp
 
     def require_course(course_id: int) -> dict[str, Any]:
@@ -159,9 +187,37 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
     class _NotFound(Exception):
         pass
 
+    def friendly_page(request: Request, status: int, title: str, message: str, headers: dict | None = None):
+        resp = templates.TemplateResponse(request, "message.html", {"title": title, "message": message}, status_code=status,
+                                          headers=headers)
+        return secure(resp)
+
     @app.exception_handler(_NotFound)
     async def not_found(request: Request, exc: _NotFound):
-        return templates.TemplateResponse(request, "message.html", {"title": "Not found", "message": str(exc)}, status_code=404)
+        return friendly_page(request, 404, "Not found", str(exc))
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        text = {404: ("Page not found", "That page does not exist. It may have been deleted, or the address may be mistyped."),
+                405: ("Not allowed", "That address does not accept this kind of request."),
+                403: ("Not allowed", "That request was not allowed.")}.get(
+            exc.status_code, ("Something went wrong", "The app could not show that page."))
+        return friendly_page(request, exc.status_code, *text, headers=getattr(exc, "headers", None))
+
+    @app.exception_handler(RequestValidationError)
+    async def bad_request(request: Request, exc: RequestValidationError):
+        if any(e.get("loc") and e["loc"][0] == "path" for e in exc.errors()):
+            return friendly_page(request, 404, "Page not found", "That page does not exist. Check the address.")
+        return friendly_page(request, 422, "That could not be read",
+                             "Something in that request was missing or not in the right form. Go back, check the "
+                             "form and try again.")
+
+    @app.exception_handler(Exception)
+    async def crashed(request: Request, exc: Exception):
+        log.exception("Unhandled error on %s", request.url.path)
+        return friendly_page(request, 500, "Something went wrong",
+                             "The app hit an unexpected problem. Your saved materials are safe. Go back and try again; "
+                             "if it keeps happening, restart Course Assistant.")
 
     def course_url(cid: int, tab: str = "materials") -> str:
         return f"/courses/{cid}" if tab == "materials" else f"/courses/{cid}/{tab}"
@@ -226,6 +282,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
     @app.post("/welcome")
     def welcome_ack():
         store.set_setting(disclaimer.ACK_SETTING, now_iso())
+        # first run: offer the "Connect an AI" step once, unless an AI is already set up
+        if not store.get_setting("setup_done", "") and not provider_state()["connected"]:
+            return redirect("/setup?first=1")
         return redirect("/")
 
     @app.get("/privacy", response_class=HTMLResponse)
@@ -268,7 +327,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
         courses = [course_card(c) for c in store.courses()]
-        return page(request, "dashboard.html", courses=courses, upcoming=upcoming_rows(), has_ai=provider_state()["connected"])
+        upcoming = merge_events(upcoming_rows())
+        return page(request, "dashboard.html", courses=courses, upcoming=upcoming, has_ai=provider_state()["connected"])
 
     # ------------------------------------------------------------------ course create / edit / delete
     def course_values(name, code, university, term, instructor, color, website_url="") -> dict[str, str]:
@@ -286,8 +346,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
                       term: str = Form(""), instructor: str = Form(""), color: str = Form(""), website_url: str = Form("")):
         vals = course_values(name, code, university, term, instructor, color, website_url)
         if not vals["name"]:
-            return page(request, "course_form.html", status_code=400, course=vals, editing=False,
-                        error="Give the course a name, like Linear Algebra.")
+            msg = "Give the course a name, like Linear Algebra."
+            return page(request, "course_form.html", status_code=400, course=vals, editing=False, error=msg,
+                        field_error={"form": "course", "field": "name", "message": msg})
         cid = store.add_course(**vals)
         return redirect(course_url(cid), notice="Course added. Add your syllabus and lecture slides to get started.")
 
@@ -302,8 +363,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         c = require_course(course_id)
         vals = course_values(name, code, university, term, instructor, color, website_url)
         if not vals["name"]:
-            return page(request, "course_form.html", status_code=400, course={**c, **vals}, editing=True,
-                        error="The course needs a name.")
+            msg = "The course needs a name."
+            return page(request, "course_form.html", status_code=400, course={**c, **vals}, editing=True, error=msg,
+                        field_error={"form": "course", "field": "name", "message": msg})
         store.update_course(course_id, **vals)
         return redirect(course_url(course_id), notice="Course saved.")
 
@@ -323,23 +385,75 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         return redirect("/", notice="Course deleted.")
 
     # ------------------------------------------------------------------ course page and tabs
+    def worker_alive() -> bool:
+        w = getattr(app.state, "worker", None)
+        return bool(w is not None and getattr(w, "is_alive", lambda: False)())
+
+    def whisper_available() -> bool:
+        try:
+            import importlib.util
+            return importlib.util.find_spec("faster_whisper") is not None
+        except (ImportError, ValueError):
+            return False
+
+    def job_info(m: dict[str, Any], j: dict[str, Any] | None, is_media: bool, ai_connected: bool) -> dict[str, Any]:
+        """What is happening with a recording or photo, and what the student can do next."""
+        waiting = m["status"] == "needs_transcription" or (j is not None and j["status"] in ("queued", "running", "error"))
+        if not waiting and not (j and j["status"] == "done"):
+            return {"text": "", "next": "", "retry": False}
+        noun = "transcription" if is_media else "reading"
+        if j is None:
+            text = "Waiting to be transcribed" if is_media else "Photo of notes: waiting to be read"
+            nxt = "Press Start now to begin. It can take a few minutes for a long recording." if is_media else (
+                "Press Start now to read it." if ai_connected else "Connect an AI first, then press Start now.")
+            return {"text": text, "next": nxt, "retry": True}
+        status = j["status"]
+        pct = int(float(j.get("progress") or 0) * 100)
+        if status == "queued":
+            if worker_alive():
+                nxt = "It starts by itself. You can keep using the app; this page does not update on its own, so reload it to check."
+            else:
+                nxt = "Press Start now to run it right away."
+            if not is_media and not ai_connected:
+                nxt = "Next step: connect an AI so the app can read this photo, then press Start now."
+            elif is_media and not whisper_available():
+                nxt = ("Next step: this computer cannot transcribe yet. Add a captions file (.vtt or .srt) for this "
+                       "recording, or install the transcribe extra.")
+            return {"text": f"Waiting in line for {noun}", "next": nxt, "retry": True}
+        if status == "running":
+            text = f"Transcribing, {pct}% done" if is_media else "Reading the photo"
+            return {"text": text, "next": "Keep the app open. Reload this page to see progress.", "retry": False}
+        if status == "done":
+            return {"text": "Transcription finished" if is_media else "Photo read", "next": "", "retry": False}
+        note = (j.get("note") or "").strip()
+        return {"text": f"{noun.capitalize()} did not finish" + (f": {note}" if note else ""),
+                "next": "Fix what the message says, then press Try again.", "retry": True}
+
     def material_rows(cid: int) -> list[dict[str, Any]]:
         jobs: dict[int, dict[str, Any]] = {}
         for j in store._rows("SELECT * FROM jobs WHERE material_id IN (SELECT id FROM materials WHERE course_id = ?) ORDER BY id", (cid,)):
             jobs[int(j["material_id"])] = j
+        mats = store.materials(cid)
+        by_id = {m["id"]: m for m in mats}
+        ai_connected = provider_state()["connected"]
         rows = []
-        for m in store.materials(cid):
-            j = jobs.get(m["id"])
-            job_text = ""
-            if j:
-                pct = int(float(j.get("progress") or 0) * 100)
-                job_text = {"queued": "Waiting in line for transcription", "running": f"Transcribing, {pct}% done",
-                            "done": "Transcription finished", "error": "Transcription failed"}.get(j["status"], j["status"])
-                if j.get("note") and j["status"] == "error":
-                    job_text += f": {j['note']}"
-            rows.append({**m, "kind_label": MATERIAL_KINDS.get(m["kind"], m["kind"]), "job_text": job_text,
-                         "is_media": Path(m.get("filename") or "").suffix.lower() in MEDIA_EXT})
+        for m in mats:
+            is_media = Path(m.get("filename") or "").suffix.lower() in MEDIA_EXT
+            info = job_info(m, jobs.get(m["id"]), is_media, ai_connected)
+            orig = by_id.get(m.get("duplicate_of")) if m.get("duplicate_of") else None
+            rows.append({**m, "kind_label": MATERIAL_KINDS.get(m["kind"], m["kind"]), "job_text": info["text"],
+                         "job_next": info["next"], "job_retry": info["retry"], "is_media": is_media,
+                         "copy_of": {"id": orig["id"], "title": orig["title"]} if orig else None})
         return rows
+
+    def graded_panel(cid: int) -> dict[str, Any]:
+        """The graded items the app protects, so the student can check what was detected."""
+        items = store.graded_items(cid)
+        titles = {m["id"]: m["title"] for m in store.materials(cid)}
+        rows = [{**i, "kind_label": GRADED_KINDS.get(i.get("kind") or "problem", "Problem"),
+                 "material_title": titles.get(i.get("material_id") or 0, ""),
+                 "excerpt": " ".join((i.get("body") or "").split())[:160]} for i in items]
+        return {"items": rows, "count": len(rows)}
 
     def tab_context(cid: int, tab: str, extra: dict[str, Any]) -> dict[str, Any]:
         ctx: dict[str, Any] = {}
@@ -347,8 +461,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         if tab == "materials":
             ctx["materials"] = material_rows(cid)
             ctx["supported"] = _supported_formats()
+            ctx["graded"] = graded_panel(cid)
         elif tab == "calendar":
-            events = store.events(cid)
+            events = merge_events(store.events(cid))
             earlier = [e for e in events if e["date"] < today.isoformat()]
             weeks: dict[date, list[dict[str, Any]]] = {}
             for e in events:
@@ -359,17 +474,22 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
             ctx["earlier"] = list(reversed(earlier))
             ctx["today"] = today.isoformat()
         elif tab == "study":
-            ctx["events"] = [e for e in store.events(cid, today.isoformat()) if e["kind"] in ("lecture", "exam", "quiz")][:30]
-            ctx["past_lectures"] = [e for e in store.events(cid) if e["kind"] == "lecture" and e["date"] <= today.isoformat()][-15:]
+            ctx["events"] = [e for e in merge_events(store.events(cid, today.isoformat())) if e["kind"] in ("lecture", "exam", "quiz")][:30]
+            ctx["past_lectures"] = [e for e in merge_events(store.events(cid)) if e["kind"] == "lecture" and e["date"] <= today.isoformat()][-15:]
             ctx["has_materials"] = bool(store.materials(cid))
             ctx["due_cards"] = len(store.flashcards(cid, due_only=True))
             ctx["all_cards"] = len(store.flashcards(cid))
         elif tab == "guides":
-            ctx["guides"] = store.guides(cid)
+            guides = store.guides(cid)
+            ctx["guides"] = guides
+            ctx["guide_groups"] = group_guides(guides)
         elif tab == "ask":
             history = []
+            last_q = ""
             for m in store.chat_messages(cid, 40):
                 item: dict[str, Any] = {"role": m["role"], "content": m["content"]}
+                if m["role"] == "user":
+                    last_q = m["content"]
                 if m["role"] == "assistant":
                     g = store.guide(m["guide_id"]) if m.get("guide_id") else None
                     saved = ((g or {}).get("data") or {}).get("blocks")
@@ -378,6 +498,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
                                                twin=bool(g and g["kind"] == "twin"),
                                                mode=((g or {}).get("data") or {}).get("mode"),
                                                data=(g or {}).get("data"))
+                    item["question"] = last_q
                 history.append(item)
             ctx["history"] = history
             ctx["graded_count"] = len(store.graded_items(cid)) + len([m for m in store.materials(cid) if m.get("graded")])
@@ -395,9 +516,13 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         except Exception:
             return ".pdf, .pptx, .docx, .epub, .md, .txt, .html, .vtt, .srt, .mp3, .m4a, .wav, .mp4, .mov, .webm, .png, .jpg, .jpeg, .heic"
 
+    TAB_LABELS = dict(TABS)
+
     def course_page(request: Request, cid: int, tab: str, status_code: int = 200, notice: str = "", error: str = "", **extra):
         course = require_course(cid)
         ctx = {"course": course, "accent": course_color(course), "tab": tab, "ai": provider_state(),
+               "tab_label": TAB_LABELS.get(tab, tab.capitalize()),
+               "page_title": f"{TAB_LABELS.get(tab, tab.capitalize())} - {course['name']}",
                **tab_context(cid, tab, extra)}
         if notice:
             ctx["notice"] = notice
@@ -409,11 +534,15 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
             resp.headers["HX-Push-Url"] = course_url(cid, tab)
         return resp
 
-    def after(request: Request, cid: int, tab: str, notice: str = "", error: str = "", **extra):
-        """Answer a form: htmx swaps the tab in place; a plain post goes back to the tab."""
+    def after(request: Request, cid: int, tab: str, notice: str = "", error: str = "", field: tuple[str, str] | None = None,
+              **extra):
+        """Answer a form: htmx swaps the tab in place; a plain post goes back to the tab. `field` is (form, field name)
+        for an error that belongs to one input, so the page can tie the message to it."""
         if is_htmx(request):
+            if field and error:
+                extra["field_error"] = {"form": field[0], "field": field[1], "message": error}
             return course_page(request, cid, tab, 400 if error and not notice else 200, notice, error, **extra)
-        return redirect(course_url(cid, tab), notice=notice, error=error)
+        return redirect(course_url(cid, tab), notice=notice, error=error, draft=str(extra.get("draft") or ""))
 
     @app.get("/courses/{course_id}", response_class=HTMLResponse)
     def course_materials(request: Request, course_id: int):
@@ -432,15 +561,16 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         require_course(course_id)
         files = [f for f in files if f.filename]
         if not files:
-            return after(request, course_id, "materials", error="Choose at least one file to add.")
+            return after(request, course_id, "materials", error="Choose at least one file to add.", field=("upload", "files"))
         if lecture_date and not parse_day(lecture_date):
-            return after(request, course_id, "materials", error="The lecture date should look like 2026-09-14.")
+            return after(request, course_id, "materials", error="The lecture date should look like 2026-09-14.",
+                         field=("upload", "lecture_date"))
         kind = kind if kind in MATERIAL_KINDS else ""
 
-        def run() -> tuple[list[str], list[str]]:
+        def run() -> tuple[list[str], list[str], list[str]]:
             importers = _mod("importers")
             bad = getattr(importers, "ImportError_", ())
-            done, errors = [], []
+            done, errors, already = [], [], []
             for up in files:
                 name = Path(up.filename or "file").name or "file"
                 tmpdir = Path(tempfile.mkdtemp(prefix="ca-upload-"))
@@ -453,29 +583,35 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
                             if size > MAX_UPLOAD:
                                 raise ValueError("That file is too large (the limit is 2 GB).")
                             out.write(chunk)
-                    importers.import_file(store, course_id, tmp, kind=kind or None, original_name=name,
-                                          lecture_date=lecture_date)
-                    done.append(name)
+                    known = {m["id"] for m in store.materials(course_id)}
+                    mid = importers.import_file(store, course_id, tmp, kind=kind or None, original_name=name,
+                                                lecture_date=lecture_date)
+                    (already if mid in known else done).append(name)
                 except Exception as e:
                     shown = _friendly(e) if (isinstance(e, ValueError) or (bad and isinstance(e, bad))) else f"Could not read it ({_friendly(e)})"
                     errors.append(f"{name}: {shown}")
                 finally:
                     shutil.rmtree(tmpdir, ignore_errors=True)
-            return done, errors
+            return done, errors, already
 
         try:
-            done, errors = await work(run)
+            done, errors, already = await work(run)
         except _Missing:
             return after(request, course_id, "materials", error="The importer is not available yet.")
-        notice = f"Added {len(done)} file{'s' if len(done) != 1 else ''}: {', '.join(done)}." if done else ""
-        return after(request, course_id, "materials", notice=notice, error=" ".join(errors))
+        parts = []
+        if done:
+            parts.append(f"Added {len(done)} file{'s' if len(done) != 1 else ''}: {', '.join(done)}.")
+        if already:
+            parts.append(f"Already saved, nothing added: {', '.join(already)}.")
+        return after(request, course_id, "materials", notice=" ".join(parts), error=" ".join(errors))
 
     @app.post("/courses/{course_id}/materials/url")
     async def add_url(request: Request, course_id: int, url: str = Form(""), kind: str = Form("website")):
         require_course(course_id)
         url = url.strip()
         if not re.match(r"^https?://\S+$", url):
-            return after(request, course_id, "materials", error="Paste a web address that starts with http:// or https://.")
+            return after(request, course_id, "materials", error="Paste a web address that starts with http:// or https://.",
+                         field=("url", "url"))
         kind = kind if kind in MATERIAL_KINDS else "website"
         try:
             await work(lambda: _mod("importers").import_url(store, course_id, url, kind=kind))
@@ -488,7 +624,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
                        kind: str = Form("notes")):
         require_course(course_id)
         if not text.strip():
-            return after(request, course_id, "materials", error="Type or paste some text for the note.")
+            return after(request, course_id, "materials", error="Type or paste some text for the note.", field=("note", "text"))
         kind = kind if kind in MATERIAL_KINDS else "notes"
         try:
             await work(lambda: _mod("importers").import_text(store, course_id, title.strip() or "My note", text, kind=kind))
@@ -496,16 +632,84 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
             return after(request, course_id, "materials", error=f"Could not save the note: {_friendly(e)}")
         return after(request, course_id, "materials", notice="Note saved.")
 
+    def mark_graded(m: dict[str, Any]) -> list[dict[str, Any]]:
+        """Mark a material as graded work. The integrity module finds the individual problems or essay prompts;
+        without it, only the whole-material flag is set. Returns the graded items found for this material."""
+        mark = getattr(_safe_mod("integrity"), "mark_material_graded", None)
+        if callable(mark):
+            mark(store, m["id"])
+        store.update_material(m["id"], graded=1)
+        return [i for i in store.graded_items(m["course_id"]) if i.get("material_id") == m["id"]]
+
+    def _safe_mod(name: str):
+        try:
+            return _mod(name)
+        except _Missing:
+            return None
+
     @app.post("/materials/{material_id}/graded")
     def toggle_graded(request: Request, material_id: int, graded: str = Form("1")):
         m = store.material(material_id)
         if not m:
             raise _NotFound("That material was not found.")
-        on = graded == "1"
-        store.update_material(material_id, graded=1 if on else 0)
-        note = (f"Marked {m['title']} as graded work. The app will explain and write twin problems, never solve it."
-                if on else f"{m['title']} is no longer marked as graded.")
+        if graded == "1":
+            items = mark_graded(m)
+            if items:
+                labels = ", ".join(i.get("label") or i.get("title") or "item" for i in items[:8])
+                more = f" and {len(items) - 8} more" if len(items) > 8 else ""
+                note = (f"Marked {m['title']} as graded work. The app found {len(items)} graded "
+                        f"item{'s' if len(items) != 1 else ''} to protect: {labels}{more}. Check the list below the "
+                        "materials and fix anything it got wrong. The app will explain and write twin problems, never solve it.")
+            else:
+                note = (f"Marked {m['title']} as graded work. The app will explain and write twin problems, never solve it.")
+        else:
+            store.update_material(material_id, graded=0)
+            removed = 0
+            for i in store.graded_items(m["course_id"]):
+                if i.get("material_id") == material_id:
+                    store.delete_graded_item(i["id"])
+                    removed += 1
+            note = f"{m['title']} is no longer marked as graded." + (f" Its {removed} protected item{'s' if removed != 1 else ''} were removed." if removed else "")
         return after(request, m["course_id"], "materials", notice=note)
+
+    def graded_or_404(item_id: int) -> dict[str, Any]:
+        it = store.graded_item(item_id)
+        if not it:
+            raise _NotFound("That graded item was not found.")
+        return it
+
+    @app.get("/graded/{item_id}/edit", response_class=HTMLResponse)
+    def graded_edit(request: Request, item_id: int):
+        it = graded_or_404(item_id)
+        return page(request, "graded_form.html", item=it, course=require_course(it["course_id"]), page_title="Edit graded item")
+
+    @app.post("/graded/{item_id}/edit")
+    def graded_update(request: Request, item_id: int, kind: str = Form("problem"), label: str = Form(""),
+                      title: str = Form(""), body: str = Form("")):
+        it = graded_or_404(item_id)
+        vals = {"kind": kind if kind in GRADED_KINDS else "problem", "label": label.strip(), "title": title.strip(),
+                "body": body.strip()}
+        if not vals["title"]:
+            msg = "Give the item a title, like Problem Set 2."
+            return page(request, "graded_form.html", status_code=400, item={**it, **vals}, course=require_course(it["course_id"]),
+                        error=msg, field_error={"form": "graded", "field": "title", "message": msg}, page_title="Edit graded item")
+        store.update_graded_item(item_id, **vals)
+        return redirect(course_url(it["course_id"]), notice=f"Saved {vals['label'] or vals['title']}.")
+
+    @app.get("/graded/{item_id}/delete", response_class=HTMLResponse)
+    def graded_delete_confirm(request: Request, item_id: int):
+        it = graded_or_404(item_id)
+        name = it.get("label") or it["title"]
+        return page(request, "confirm.html", title=f"Stop protecting {name}?", back=course_url(it["course_id"]),
+                    action=f"/graded/{item_id}/delete", button="Remove it",
+                    message="The app will no longer treat this as graded work, so it may answer questions about it "
+                            "directly. The material itself is not deleted.")
+
+    @app.post("/graded/{item_id}/delete")
+    def graded_delete(item_id: int):
+        it = graded_or_404(item_id)
+        store.delete_graded_item(item_id)
+        return redirect(course_url(it["course_id"]), notice=f"Removed {it.get('label') or it['title']} from the graded list.")
 
     def file_of(m: dict[str, Any]) -> Path | None:
         """The saved original, only if it really sits inside the files folder."""
@@ -518,6 +722,76 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
             return target
         return None
 
+    # -- edit a material
+    def lecture_choices(cid: int) -> list[dict[str, Any]]:
+        return [e for e in merge_events(store.events(cid)) if e["kind"] == "lecture"]
+
+    def material_form(request: Request, m: dict[str, Any], *, status_code: int = 200, **ctx: Any):
+        orig = store.material(m["duplicate_of"]) if m.get("duplicate_of") else None
+        return page(request, "material_form.html", status_code=status_code, m=m, course=require_course(m["course_id"]),
+                    lectures=lecture_choices(m["course_id"]), copy_of=orig, page_title=f"Edit {m['title']}", **ctx)
+
+    @app.get("/materials/{material_id}/edit", response_class=HTMLResponse)
+    def material_edit(request: Request, material_id: int):
+        m = store.material(material_id)
+        if not m:
+            raise _NotFound("That material was not found.")
+        return material_form(request, m)
+
+    @app.post("/materials/{material_id}/edit")
+    def material_update(request: Request, material_id: int, title: str = Form(""), kind: str = Form(""),
+                        lecture_date: str = Form(""), event_id: str = Form("")):
+        m = store.material(material_id)
+        if not m:
+            raise _NotFound("That material was not found.")
+        shown = {**m, "title": title, "kind": kind, "lecture_date": lecture_date,
+                 "event_id": int(event_id) if event_id.strip().isdigit() else None}
+
+        def bad(field: str, msg: str):
+            return material_form(request, shown, status_code=400, error=msg,
+                                 field_error={"form": "material", "field": field, "message": msg})
+        if not title.strip():
+            return bad("title", "Give the material a title.")
+        if kind not in MATERIAL_KINDS:
+            return bad("kind", "Choose what this material is.")
+        day = lecture_date.strip()
+        if day and not parse_day(day):
+            return bad("lecture_date", "The lecture date should look like 2026-09-14.")
+        ev = store.event(int(event_id)) if event_id.strip().isdigit() else None
+        if event_id.strip() and (not ev or ev["course_id"] != m["course_id"]):
+            return bad("event_id", "That lecture is not in this course. Pick one from the list.")
+        if ev and not day:
+            day = ev["date"]  # a lecture was picked: the material belongs to its date
+        store.update_material(material_id, title=title.strip(), kind=kind, lecture_date=day,
+                              event_id=ev["id"] if ev else None)
+        extra = f" It now belongs to {clean_event_title(ev['title'])}." if ev else ""
+        return redirect(course_url(m["course_id"]), notice=f"Saved {title.strip()}.{extra}")
+
+    @app.post("/materials/{material_id}/process")
+    async def material_process(request: Request, material_id: int):
+        """Start (or retry) reading a photo or transcribing a recording now."""
+        m = store.material(material_id)
+        if not m:
+            raise _NotFound("That material was not found.")
+        is_media = Path(m.get("filename") or "").suffix.lower() in MEDIA_EXT
+        kind = "transcribe" if is_media else "ocr"
+        job = next((j for j in reversed(store._rows("SELECT * FROM jobs WHERE material_id = ?", (material_id,)))), None)
+        if job is None:
+            jid = store.add_job(kind, material_id)
+        else:
+            jid = job["id"]
+            store.update_job(jid, status="queued", progress=0, note="")
+        store.update_material(material_id, status="needs_transcription", status_note="")
+        if worker_alive():
+            return after(request, m["course_id"], "materials", notice=f"{m['title']} is queued. It starts by itself.")
+        try:
+            result = await work(lambda: _mod("transcribe").run_job(store, jid, provider=provider()))
+        except Exception as e:
+            return after(request, m["course_id"], "materials", error=f"Could not start it: {_friendly(e)}")
+        if result.get("status") == "error":
+            return after(request, m["course_id"], "materials", error=f"{m['title']}: {result.get('note') or 'it did not finish'}")
+        return after(request, m["course_id"], "materials", notice=f"{m['title']} is ready to search.")
+
     @app.get("/materials/{material_id}/delete", response_class=HTMLResponse)
     def material_delete_confirm(request: Request, material_id: int):
         m = store.material(material_id)
@@ -526,7 +800,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         return page(request, "confirm.html", title=f"Delete {m['title']}?", back=course_url(m["course_id"]),
                     action=f"/materials/{material_id}/delete", button="Delete it",
                     message="This removes the material, its searchable text and the saved original file from this "
-                            "computer. Guides you already made stay. It cannot be undone.")
+                            "computer. Guides and answers you already made stay, but their links to this material "
+                            "will show \"source deleted\" instead of opening it. It cannot be undone.")
 
     @app.post("/materials/{material_id}/delete")
     def material_delete(request: Request, material_id: int):
@@ -540,25 +815,32 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         return redirect(course_url(m["course_id"]), notice=f"Deleted {m['title']}.")
 
     # ------------------------------------------------------------------ calendar
-    def event_fields(kind: str, title: str, day: str, time_: str, topics: str) -> tuple[dict[str, str], str]:
+    def event_fields(kind: str, title: str, day: str, time_: str, topics: str) -> tuple[dict[str, str], str, str]:
+        """The cleaned values, an error message and the name of the field it belongs to."""
         vals = {"kind": kind if kind in EVENT_KINDS else "other", "title": title.strip(), "date": day.strip(),
                 "time": time_.strip(), "topics": topics.strip()}
-        err = ""
+        err, field = "", ""
         if not vals["title"]:
-            err = "Give the event a title."
+            err, field = "Give the event a title.", "title"
         elif not parse_day(vals["date"]):
-            err = "The date should look like 2026-10-21."
+            err, field = "The date should look like 2026-10-21.", "date"
         elif vals["time"] and not re.match(r"^\d{1,2}:\d{2}$", vals["time"]):
-            err = "The time should look like 14:30."
-        return vals, err
+            err, field = "The time should look like 14:30.", "time"
+        return vals, err, field
+
+    def event_copies(e: dict[str, Any]) -> list[int]:
+        """Other events in the course with the same date and (cleaned) title: the same event listed twice."""
+        key = clean_event_title(e["title"]).lower()
+        return [o["id"] for o in store.events(e["course_id"], e["date"], e["date"])
+                if o["id"] != e["id"] and clean_event_title(o["title"]).lower() == key]
 
     @app.post("/courses/{course_id}/events")
     def event_add(request: Request, course_id: int, kind: str = Form("lecture"), title: str = Form(""),
                   date_: str = Form("", alias="date"), time_: str = Form("", alias="time"), topics: str = Form("")):
         require_course(course_id)
-        vals, err = event_fields(kind, title, date_, time_, topics)
+        vals, err, field = event_fields(kind, title, date_, time_, topics)
         if err:
-            return after(request, course_id, "calendar", error=err)
+            return after(request, course_id, "calendar", error=err, field=("event", field))
         store.add_event(course_id, vals.pop("kind"), vals.pop("title"), vals.pop("date"), **vals)
         return after(request, course_id, "calendar", notice="Event added.")
 
@@ -575,11 +857,15 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         e = store.event(event_id)
         if not e:
             raise _NotFound("That event was not found.")
-        vals, err = event_fields(kind, title, date_, time_, topics)
+        vals, err, field = event_fields(kind, title, date_, time_, topics)
         if err:
-            return page(request, "event_form.html", status_code=400, event={**e, **vals}, course=require_course(e["course_id"]), error=err)
+            return page(request, "event_form.html", status_code=400, event={**e, **vals}, course=require_course(e["course_id"]),
+                        error=err, field_error={"form": "event", "field": field, "message": err})
+        copies = event_copies(e)  # found before the edit changes the date or title
         store.update_event(event_id, **vals)
-        return redirect(course_url(e["course_id"], "calendar"), notice="Event saved.")
+        for cid_ in copies:  # the same event listed twice becomes one
+            store.delete_event(cid_)
+        return redirect(course_url(e["course_id"], "calendar"), notice="Event saved." + (" Duplicate copies were merged." if copies else ""))
 
     @app.get("/events/{event_id}/delete", response_class=HTMLResponse)
     def event_delete_confirm(request: Request, event_id: int):
@@ -588,13 +874,16 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
             raise _NotFound("That event was not found.")
         return page(request, "confirm.html", title=f"Delete {e['title']}?", back=course_url(e["course_id"], "calendar"),
                     action=f"/events/{event_id}/delete", button="Delete the event",
-                    message="This removes the event from the course calendar.")
+                    message="This removes the event from the course calendar. If the same event is listed more than once, "
+                            "every copy is removed.")
 
     @app.post("/events/{event_id}/delete")
     def event_delete(event_id: int):
         e = store.event(event_id)
         if not e:
             raise _NotFound("That event was not found.")
+        for cid_ in event_copies(e):
+            store.delete_event(cid_)
         store.delete_event(event_id)
         return redirect(course_url(e["course_id"], "calendar"), notice="Event deleted.")
 
@@ -615,9 +904,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         depth = depth if depth in {d for d, _ in DEPTHS} else "standard"
         topic = topic.strip()
         if action in ("explain",) and not topic:
-            return after(request, course_id, "study", error="Type the topic you want explained.")
+            return after(request, course_id, "study", error="Type the topic you want explained.", field=(action, "topic"))
         if action == "practice" and not topic:
-            return after(request, course_id, "study", error="Type the topic you want practice questions on.")
+            return after(request, course_id, "study", error="Type the topic you want practice questions on.", field=(action, "topic"))
 
         def run():
             study = _mod("study")
@@ -656,7 +945,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         require_course(course_id)
         q = question.strip()
         if not q:
-            return after(request, course_id, "ask", error="Type a question first.")
+            return after(request, course_id, "ask", error="Type a question first.", field=("ask", "question"))
         p = provider()
         if p is None:
             return after(request, course_id, "ask", error="Connect an AI first. See the panel below.", draft=q)
@@ -669,7 +958,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
             if _is_no_provider(e):
                 return after(request, course_id, "ask", error="Connect an AI first. See the panel below.", draft=q)
             return after(request, course_id, "ask", error=f"The answer did not work: {_friendly(e)}", draft=q)
-        return after(request, course_id, "ask")
+        return after(request, course_id, "ask", notice="Answer ready. It is the last message below.")
 
     # ------------------------------------------------------------------ past offerings
     @app.post("/courses/{course_id}/offerings/paste")
@@ -749,7 +1038,10 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
     def reader(request: Request, material_id: int, at: str | None = None):
         m = store.material(material_id)
         if not m:
-            raise _NotFound("That material was not found.")
+            return friendly_page(request, 410, "Source deleted",
+                                 "This passage came from a material that has been deleted, so it can no longer be "
+                                 "opened. Answers and guides that cited it are still saved, but their link to it is "
+                                 "gone. Add the material again if you still need it.")
         course = store.course(m["course_id"])
         chunks = store.chunks_of(material_id)
         media = MEDIA_EXT.get(Path(m.get("filename") or "").suffix.lower(), "") if file_of(m) else ""
@@ -829,7 +1121,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         course = require_course(course_id)
         due = store.flashcards(course_id, due_only=True)
         return page(request, "flashcards.html", course=course, accent=course_color(course), card=due[0] if due else None,
-                    due=len(due), total=len(store.flashcards(course_id)))
+                    due=len(due), total=len(store.flashcards(course_id)),
+                    page_title=f"Flashcards - {course['name']}")
 
     @app.post("/flashcards/{course_id}/review")
     def flashcard_review(course_id: int, card_id: int = Form(...), grade: str = Form(...)):
@@ -843,16 +1136,28 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
             return redirect(f"/flashcards/{course_id}", error="Flashcard review is not available yet.")
         return redirect(f"/flashcards/{course_id}")
 
-    # ------------------------------------------------------------------ settings
+    def safe_next(value: str, default: str = "/settings") -> str:
+        """Only addresses inside this app (a path, never another site)."""
+        return value if re.match(r"^/[A-Za-z0-9_\-./]*$", value or "") and not value.startswith("//") else default
+
+    @app.post("/settings/shortcuts")
+    def shortcuts_toggle(on: str = Form(""), next: str = Form("/settings")):
+        store.set_setting("card_shortcuts", "1" if on == "1" else "0")
+        note = ("Flashcard keyboard shortcuts are on: Space shows the answer, 1 to 4 grades it."
+                if on == "1" else "Flashcard keyboard shortcuts are off. Use the buttons on the card.")
+        return redirect(safe_next(next), notice=note)
+
+    # ------------------------------------------------------------------ settings and setup
     def settings_ctx() -> dict[str, Any]:
         model = store.get_setting("anthropic_model", "") or MODELS[0][0]
         return {"ai_kind": (store.get_setting("ai_provider", "") or "none").lower(), "has_key": bool(store.get_setting("anthropic_api_key", "")),
                 "model": model, "local_url": store.get_setting("local_base_url", ""), "local_model": store.get_setting("local_model", ""),
-                "current_theme": store.get_setting("theme", "system")}
+                "current_theme": store.get_setting("theme", "system"),
+                "shortcuts_on": store.get_setting("card_shortcuts", "1") != "0"}
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings(request: Request):
-        return page(request, "settings.html", **settings_ctx())
+        return page(request, "settings.html", page_title="Settings", **settings_ctx())
 
     @app.post("/settings")
     def settings_save(request: Request, ai_provider: str = Form("none"), anthropic_api_key: str = Form(""),
@@ -860,41 +1165,99 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
                       local_model: str = Form(""), theme: str = Form("system")):
         if ai_provider not in ("none", "anthropic", "local"):
             ai_provider = "none"
+        url = local_base_url.strip()
+        if url and not re.match(r"^https?://\S+$", url):
+            msg = "The local server address should start with http:// or https://, like http://127.0.0.1:1234."
+            return page(request, "settings.html", status_code=400, page_title="Settings", **{**settings_ctx(), "local_url": url}, error=msg,
+                        field_error={"form": "settings", "field": "local_base_url", "message": msg})
         if anthropic_api_key.strip():
             store.set_setting("anthropic_api_key", anthropic_api_key.strip())
         if clear_key:
             store.set_setting("anthropic_api_key", "")
         if anthropic_model in {m for m, _ in MODELS}:
             store.set_setting("anthropic_model", anthropic_model)
-        url = local_base_url.strip()
-        if url and not re.match(r"^https?://\S+$", url):
-            return page(request, "settings.html", status_code=400, **{**settings_ctx(), "local_url": url},
-                        error="The local server address should start with http:// or https://, like http://127.0.0.1:1234.")
         store.set_setting("local_base_url", url)
         store.set_setting("local_model", local_model.strip())
         store.set_setting("theme", theme if theme in THEMES else "system")
         store.set_setting("ai_provider", ai_provider)
         if ai_provider == "anthropic" and not store.get_setting("anthropic_api_key", ""):
             return redirect("/settings", notice="Saved. Add your Anthropic API key to finish connecting.")
-        return redirect("/settings", notice="Settings saved.")
+        return redirect("/settings", notice="Settings saved. Press Test connection to check that the AI answers.")
 
-    @app.post("/settings/test")
-    async def settings_test(request: Request):
+    async def connection_test() -> tuple[bool, str]:
+        """Ask the saved AI one tiny question. Returns (worked, a plain sentence about what happened)."""
+        kind = (store.get_setting("ai_provider", "") or "none").lower()
         try:
             p = provider()
         except Exception as e:
-            p, err = None, _friendly(e)
-        else:
-            err = ""
+            return False, f"The AI settings could not be used: {_friendly(e)}"
         if p is None:
-            return page(request, "settings.html", status_code=200, **settings_ctx(),
-                        error=err or "No AI is set up yet. Choose a provider, save, then test again.")
+            if kind == "anthropic":
+                return False, "Anthropic is selected but no API key is saved. Paste your key, save, then test again."
+            return False, ("No AI is set up yet. Choose Anthropic API key or Local model server in Settings, save, then test "
+                           "again. (Claude Desktop and Codex are connected from the Connect an AI page and need no test here.)")
         try:
-            reply = await work(p.complete, "You are a connection test.", [{"role": "user", "content": "Reply with the single word: ok"}], max_tokens=20)
+            await work(p.complete, "You are a connection test.", [{"role": "user", "content": "Reply with the single word: ok"}], max_tokens=20)
         except Exception as e:
-            return page(request, "settings.html", **settings_ctx(), error=f"The test did not work: {_friendly(e)}")
-        return page(request, "settings.html", **settings_ctx(),
-                    notice=f"Connected. {getattr(p, 'name', 'The AI')} ({getattr(p, 'model', '') or 'default model'}) answered.")
+            return False, f"The test did not work. {_friendly(e)}"
+        who = getattr(p, "name", "") or "AI"
+        if who == "local":
+            return True, f"Connected. Your local model at {getattr(p, 'base_url', 'your computer')} ({getattr(p, 'model', '')}) answered."
+        return True, f"Connected. {who.capitalize()} ({getattr(p, 'model', '') or 'default model'}) answered."
+
+    @app.post("/settings/test")
+    async def settings_test(request: Request):
+        ok, message = await connection_test()
+        extra = {"notice": message} if ok else {"error": message}
+        return page(request, "settings.html", status_code=200, page_title="Settings", **settings_ctx(), **extra)
+
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup(request: Request, first: str = ""):
+        return page(request, "setup.html", first=bool(first), status=connect_status(), **settings_ctx(),
+                    page_title="Connect an AI")
+
+    @app.post("/setup/skip")
+    def setup_skip():
+        store.set_setting("setup_done", now_iso())
+        return redirect("/", notice="No problem. You can connect an AI any time from Connect an AI at the top of the page.")
+
+    @app.post("/setup/anthropic")
+    async def setup_anthropic(request: Request, anthropic_api_key: str = Form(""), anthropic_model: str = Form("")):
+        key_ = anthropic_api_key.strip()
+        if not key_ and not store.get_setting("anthropic_api_key", ""):
+            msg = "Paste your API key first. It starts with sk-ant-."
+            return page(request, "setup.html", status_code=400, first=False, status=connect_status(), **settings_ctx(),
+                        page_title="Connect an AI", error=msg,
+                        field_error={"form": "anthropic", "field": "anthropic_api_key", "message": msg})
+        if key_:
+            store.set_setting("anthropic_api_key", key_)
+        if anthropic_model in {m for m, _ in MODELS}:
+            store.set_setting("anthropic_model", anthropic_model)
+        store.set_setting("ai_provider", "anthropic")
+        ok, message = await connection_test()
+        if ok:
+            store.set_setting("setup_done", now_iso())
+            return redirect("/", notice=message)
+        return page(request, "setup.html", first=False, status=connect_status(), **settings_ctx(), page_title="Connect an AI",
+                    error=f"Your key was saved, but {message[0].lower() + message[1:]}")
+
+    @app.post("/setup/local")
+    async def setup_local(request: Request, local_base_url: str = Form(""), local_model: str = Form("")):
+        url = local_base_url.strip() or "http://127.0.0.1:1234"
+        if not re.match(r"^https?://\S+$", url):
+            msg = "The address should start with http:// or https://, like http://127.0.0.1:1234."
+            return page(request, "setup.html", status_code=400, first=False, status=connect_status(),
+                        **{**settings_ctx(), "local_url": url}, page_title="Connect an AI", error=msg,
+                        field_error={"form": "local", "field": "local_base_url", "message": msg})
+        store.set_setting("local_base_url", url)
+        store.set_setting("local_model", local_model.strip())
+        store.set_setting("ai_provider", "local")
+        ok, message = await connection_test()
+        if ok:
+            store.set_setting("setup_done", now_iso())
+            return redirect("/", notice=message)
+        return page(request, "setup.html", first=False, status=connect_status(), **settings_ctx(), page_title="Connect an AI",
+                    error=f"Your settings were saved, but {message[0].lower() + message[1:]}")
 
     # ------------------------------------------------------------------ connect
     def connect_status() -> dict[str, Any]:
@@ -910,7 +1273,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
 
     @app.get("/connect", response_class=HTMLResponse)
     def connect_page(request: Request):
-        return page(request, "connect.html", status=connect_status(), results=[])
+        return page(request, "connect.html", status=connect_status(), results=[], page_title="Claude Desktop or Codex")
 
     @app.post("/connect/{target}", response_class=HTMLResponse)
     async def connect_run(request: Request, target: str):
@@ -923,6 +1286,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
             ok = all(r.get("ok", True) for r in raw if r.get("app") != "Skills")
         except Exception as e:
             lines, ok = [f"Could not connect: {_friendly(e)}"], False
-        return page(request, "connect.html", status=connect_status(), results=lines, results_ok=ok)
+        return page(request, "connect.html", status=connect_status(), results=lines, results_ok=ok,
+                    page_title="Claude Desktop or Codex")
 
     return app

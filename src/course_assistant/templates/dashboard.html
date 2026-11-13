@@ -5,26 +5,27 @@
 <section class="card empty"><h2>Add your first course</h2>
 <p>A course is a home for its syllabus, slides, readings, notes and recordings. Start with the name, then drop in the syllabus and the app will fill in your exam and assignment dates.</p>
 <p><a class="btn" href="/courses/new">Add a course</a></p></section>
+{% if not has_ai %}<p class="flash warn">Answers and study guides need an AI. <a href="/setup">Connect an AI</a> when you are ready; it takes about a minute.</p>{% endif %}
 {% else %}
 <section aria-labelledby="up-h"><h2 id="up-h">Coming up in the next 14 days</h2>
 {% if upcoming %}<ul class="plain list">
-{% for e in upcoming %}<li class="row-item" style="--accent-c: {{ e.accent }}"><span class="dot" aria-hidden="true"></span>
+{% for e in upcoming %}<li class="row-item" style="{{ accent_style(e.accent) }}"><span class="dot" aria-hidden="true"></span>
   <div class="grow"><strong>{{ e.title }}</strong> <span class="badge">{{ event_kinds.get(e.kind, e.kind) }}</span><br>
-  <span class="muted">{{ e.date | day }}{% if e.time %}, {{ e.time | clock }}{% endif %} &middot; <a href="/courses/{{ e.course_id }}">{{ e.course_name }}</a></span></div>
+  <span class="muted">{{ e.date | day }}{% if e.time %}, {{ e.time | clock }}{% endif %} &middot; <a class="course-link" href="/courses/{{ e.course_id }}">{{ e.course_name }}</a></span></div>
   <div class="actions">
-  {% if e.kind == 'lecture' %}<form method="post" action="/courses/{{ e.course_id }}/study/primer"><input type="hidden" name="event_id" value="{{ e.id }}"><button class="btn small" type="submit">Make a primer</button></form>
-  {% elif e.kind in ('exam', 'quiz') %}<form method="post" action="/courses/{{ e.course_id }}/study/exam"><input type="hidden" name="event_id" value="{{ e.id }}"><button class="btn small" type="submit">Make an exam guide</button></form>{% endif %}
-  <a class="btn small ghost" href="/courses/{{ e.course_id }}/ask">Ask a question</a></div></li>{% endfor %}</ul>
+  {% if e.kind == 'lecture' %}<form method="post" action="/courses/{{ e.course_id }}/study/primer" data-busy="Writing your primer. This can take up to a minute. Please wait on this page."><input type="hidden" name="event_id" value="{{ e.id }}"><button class="btn small" type="submit">Make a primer<span class="visually-hidden"> for {{ e.title }}</span></button></form>
+  {% elif e.kind in ('exam', 'quiz') %}<form method="post" action="/courses/{{ e.course_id }}/study/exam" data-busy="Writing your exam guide. This can take up to a minute. Please wait on this page."><input type="hidden" name="event_id" value="{{ e.id }}"><button class="btn small" type="submit">Make an exam guide<span class="visually-hidden"> for {{ e.title }}</span></button></form>{% endif %}
+  <a class="btn small ghost" href="/courses/{{ e.course_id }}/ask">Ask a question<span class="visually-hidden"> about {{ e.title }}</span></a></div></li>{% endfor %}</ul>
 {% else %}<p class="muted">Nothing is scheduled yet. Add a syllabus to a course and its dates appear here, or add events on a course's Calendar tab.</p>{% endif %}
-{% if not has_ai %}<p class="flash warn">Primers and study guides need an AI. <a href="/settings">Add a key</a> or <a href="/connect">connect Claude Desktop or Codex</a>.</p>{% endif %}
+{% if not has_ai %}<p class="flash warn">Primers and study guides need an AI. <a href="/setup">Connect an AI</a>: use Claude Desktop or Codex, an API key, or a local model.</p>{% endif %}
 </section>
 <section aria-labelledby="c-h"><h2 id="c-h">Courses</h2>
 <div class="grid">
-{% for c in courses %}<article class="card course-card" style="--accent-c: {{ c.accent }}">
+{% for c in courses %}<article class="card course-card" style="{{ accent_style(c.accent) }}">
   <h3><a href="/courses/{{ c.id }}">{{ c.name }}</a></h3>
   <p class="muted">{{ [c.code, c.term, c.university] | select | join(', ') }}</p>
-  <p class="counts">{{ c.material_count }} material{{ '' if c.material_count == 1 else 's' }} &middot; {{ c.guide_count }} guide{{ '' if c.guide_count == 1 else 's' }}{% if c.due_cards %} &middot; <a href="/flashcards/{{ c.id }}">{{ c.due_cards }} card{{ '' if c.due_cards == 1 else 's' }} due</a>{% endif %}</p>
-  <p class="next">{% if c.next_event %}Next: <strong>{{ c.next_event.title }}</strong>, {{ c.next_event.date | day }}{% else %}<span class="muted">No upcoming events{% if not c.material_count %}. Add your syllabus.{% endif %}</span>{% endif %}</p>
+  <p class="counts">{{ c.material_count }} material{{ '' if c.material_count == 1 else 's' }} &middot; {{ c.guide_count }} guide{{ '' if c.guide_count == 1 else 's' }}{% if c.due_cards %} &middot; <a href="/flashcards/{{ c.id }}">{{ c.due_cards }} card{{ '' if c.due_cards == 1 else 's' }} due<span class="visually-hidden"> in {{ c.name }}</span></a>{% endif %}</p>
+  <p class="next">{% if c.next_event %}Next: <strong>{{ c.next_event.title | clean }}</strong>, {{ c.next_event.date | day }}{% else %}<span class="muted">No upcoming events{% if not c.material_count %}. Add your syllabus.{% endif %}</span>{% endif %}</p>
 </article>{% endfor %}
 </div><p><a class="btn ghost" href="/courses/new">Add another course</a></p></section>
 {% endif %}

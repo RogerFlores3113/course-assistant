@@ -1,16 +1,17 @@
+{% from "_fields.html" import fa, fe with context %}
 <h2>Calendar</h2>
 <div class="card"><h3>Add an event</h3>
-<form method="post" action="/courses/{{ course.id }}/events" hx-post="/courses/{{ course.id }}/events" hx-target="#course-body" hx-swap="outerHTML" class="form">
+<form method="post" action="/courses/{{ course.id }}/events" hx-post="/courses/{{ course.id }}/events" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" class="form">
   <div class="two"><label>Type <select name="kind">{% for k, l in event_kinds.items() %}<option value="{{ k }}">{{ l }}</option>{% endfor %}</select></label>
-  <label>Title <input name="title" required placeholder="Midterm 1"></label></div>
-  <div class="two"><label>Date <input type="date" name="date" required></label><label>Time (optional) <input type="time" name="time"></label></div>
+  <div><label>Title <input name="title" required placeholder="Midterm 1" {{ fa('event', 'title') }}></label>{{ fe('event', 'title') }}</div></div>
+  <div class="two"><div><label>Date <input type="date" name="date" required {{ fa('event', 'date') }}></label>{{ fe('event', 'date') }}</div><div><label>Time (optional) <input type="time" name="time" {{ fa('event', 'time') }}></label>{{ fe('event', 'time') }}</div></div>
   <label>Topics (optional) <input name="topics" placeholder="Chapters 1 to 4"></label>
   <button class="btn" type="submit">Add event</button></form></div>
 {% if not weeks and not earlier %}<div class="card empty"><p><strong>No dates yet.</strong> Add your syllabus on the Materials tab and its exam and assignment dates appear here, or add events above.</p></div>{% endif %}
 {% for w in weeks %}<h3>{{ w.label }}</h3><ul class="plain list">
 {% for e in w.events %}<li class="row-item"><span class="dot" aria-hidden="true"></span><div class="grow"><strong>{{ e.title }}</strong> <span class="badge">{{ event_kinds.get(e.kind, e.kind) }}</span>
-  {% if e.added_by == 'syllabus' %}<span class="badge syl">From syllabus</span>{% endif %}<br><span class="muted">{{ e.date | day }}{% if e.time %}, {{ e.time | clock }}{% endif %}{% if e.topics %} &middot; {{ e.topics }}{% endif %}</span></div>
-  <div class="actions"><a class="btn small ghost" href="/events/{{ e.id }}/edit" aria-label="Edit {{ e.title }}">Edit</a> <a class="btn small ghost" href="/events/{{ e.id }}/delete" aria-label="Delete {{ e.title }}">Delete</a></div></li>{% endfor %}</ul>{% endfor %}
+  {% if e.added_by == 'syllabus' %}<span class="badge syl">From syllabus</span>{% endif %}{% if e.listed > 1 %} <span class="badge">Listed {{ e.listed }} times, shown once</span>{% endif %}<br><span class="muted">{{ e.date | day }}{% if e.time %}, {{ e.time | clock }}{% endif %}{% if e.topics %} &middot; {{ e.topics }}{% endif %}</span></div>
+  <div class="actions"><a class="btn small ghost" href="/events/{{ e.id }}/edit">Edit<span class="visually-hidden"> {{ e.title }}</span></a> <a class="btn small ghost" href="/events/{{ e.id }}/delete">Delete<span class="visually-hidden"> {{ e.title }}</span></a></div></li>{% endfor %}</ul>{% endfor %}
 {% if earlier %}<details><summary>Earlier events ({{ earlier | length }})</summary><ul class="plain list">
-{% for e in earlier %}<li class="row-item"><div class="grow">{{ e.title }} <span class="badge">{{ event_kinds.get(e.kind, e.kind) }}</span>{% if e.added_by == 'syllabus' %} <span class="badge syl">From syllabus</span>{% endif %}<br><span class="muted">{{ e.date }}</span></div>
- <div class="actions"><a class="btn small ghost" href="/events/{{ e.id }}/edit">Edit</a></div></li>{% endfor %}</ul></details>{% endif %}
+{% for e in earlier %}<li class="row-item"><div class="grow">{{ e.title }} <span class="badge">{{ event_kinds.get(e.kind, e.kind) }}</span>{% if e.added_by == 'syllabus' %} <span class="badge syl">From syllabus</span>{% endif %}{% if e.listed > 1 %} <span class="badge">Listed {{ e.listed }} times, shown once</span>{% endif %}<br><span class="muted">{{ e.date }}</span></div>
+ <div class="actions"><a class="btn small ghost" href="/events/{{ e.id }}/edit">Edit<span class="visually-hidden"> {{ e.title }}</span></a></div></li>{% endfor %}</ul></details>{% endif %}

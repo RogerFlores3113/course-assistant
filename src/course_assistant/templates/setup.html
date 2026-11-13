@@ -1,0 +1,43 @@
+{% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}Connect an AI - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>Connect an AI</h1>
+{% if first %}<p class="muted">One last step. You can skip it and come back any time from "Connect an AI" at the top of the page.</p>{% endif %}
+<p>Course Assistant finds the right passages in your own materials. It needs an AI to turn them into answers and study guides. Pick one of the three ways below.</p>
+{% if ai_kind in ('anthropic', 'local') %}<p class="flash ok">You already have an AI chosen ({{ 'Anthropic API key' if ai_kind == 'anthropic' else 'local model' }}). Saving a choice below replaces it. <a href="/settings">Open Settings</a> to test it.</p>{% endif %}
+
+<section class="card" aria-labelledby="opt-a"><h2 id="opt-a">Option 1: Claude Desktop or Codex (no API key)</h2>
+<p>Choose this if you already have the Claude Desktop app or Codex on this computer. Nothing to buy or copy: the button below adds Course Assistant to the app you pick.</p>
+<div class="row">
+<form method="post" action="/connect/claude"><button class="btn" type="submit">Connect Claude Desktop{% if status.claude %}<span class="visually-hidden"> (already connected)</span>{% endif %}</button></form>
+<form method="post" action="/connect/codex"><button class="btn ghost" type="submit">Connect Codex{% if status.codex %}<span class="visually-hidden"> (already connected)</span>{% endif %}</button></form></div>
+<p class="muted small">{% if status.claude %}Claude Desktop is connected. {% endif %}{% if status.codex %}Codex is connected.{% endif %}</p>
+<p>Afterwards, quit the app completely and open it again. Then start a chat and ask it about your course, for example "Use Course Assistant to make me a primer for my next lecture" or "Ask Course Assistant what Midterm 1 covers". The answers it writes are saved on the course's Guides tab here.</p></section>
+
+<section class="card" aria-labelledby="opt-b"><h2 id="opt-b">Option 2: An Anthropic API key</h2>
+<p>An API key is a long password that lets this app use Claude directly, from your own Anthropic account.</p>
+<ol>
+<li>Go to console.anthropic.com in your browser and sign in, or create an account.</li>
+<li>Open the API keys page and choose Create key. Give it any name, like Course Assistant.</li>
+<li>Copy the key. It starts with sk-ant-. Anthropic shows it only once, so copy it right away.</li>
+<li>Paste it below and press Save and test.</li></ol>
+<p><strong>What it costs.</strong> Using the API is billed by Anthropic to your account, based on how much text is sent and received. This app only asks the AI when you ask a question or press a study button. Current rates are on the pricing page at console.anthropic.com, where you can also add a spending limit. The faster models cost less.</p>
+<form method="post" action="/setup/anthropic" class="form" data-busy="Saving your key and checking that it works. This takes a few seconds.">
+  <label>API key <input type="password" name="anthropic_api_key" autocomplete="off" {{ fa('anthropic', 'anthropic_api_key', 'key-help') }}></label>{{ fe('anthropic', 'anthropic_api_key') }}
+  <p id="key-help" class="muted small">{{ 'A key is already saved. Leave this empty to keep it, or paste a new one to replace it.' if has_key else 'The key stays on this computer and is never shown again after you save it.' }}</p>
+  <label>Model <select name="anthropic_model">{% for v, l in models %}<option value="{{ v }}" {% if model == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+  <div><button class="btn" type="submit">Save and test</button></div></form></section>
+
+<section class="card" aria-labelledby="opt-c"><h2 id="opt-c">Option 3: A local model on this computer</h2>
+<p>Choose this to keep everything on your computer and pay nothing per question. You need a reasonably recent computer; smaller models write simpler answers.</p>
+<ol>
+<li>Install LM Studio (lmstudio.ai) and open it.</li>
+<li>Download a model from its Discover page, then load it.</li>
+<li>In LM Studio's Developer tab, start the local server. It shows an address, usually http://127.0.0.1:1234.</li>
+<li>Check the address and model name below, then press Save and test.</li></ol>
+<form method="post" action="/setup/local" class="form" data-busy="Saving and checking that your local model answers. This can take a minute.">
+  <label>Server address <input name="local_base_url" value="{{ local_url or 'http://127.0.0.1:1234' }}" {{ fa('local', 'local_base_url') }}></label>{{ fe('local', 'local_base_url') }}
+  <label>Model name (optional) <input name="local_model" value="{{ local_model }}" placeholder="The model loaded in LM Studio"></label>
+  <div><button class="btn" type="submit">Save and test</button></div></form></section>
+
+<form method="post" action="/setup/skip" class="row"><button class="btn ghost" type="submit">{{ 'Skip for now' if first else 'Not now' }}</button>
+<span class="muted small">You can still add materials and read them without an AI.</span></form>
+</section>{% endblock %}

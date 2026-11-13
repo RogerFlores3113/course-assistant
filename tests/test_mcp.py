@@ -46,10 +46,6 @@ def env(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "course_assistant.retrieval", types.SimpleNamespace(search=search, around=around))
 
-    def match_graded(store, course_id, question):
-        return {"title": "Problem set 2"} if "[[2,1],[1,2]]" in question else None
-
-    monkeypatch.setitem(sys.modules, "course_assistant.integrity", types.SimpleNamespace(match_graded=match_graded))
     yield s, cid, mid, gmid, chunks
     m.set_store(None)
 

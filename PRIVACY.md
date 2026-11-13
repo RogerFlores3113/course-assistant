@@ -7,7 +7,7 @@ Course Assistant keeps your data on your computer.
 - **No telemetry.** The app does not send usage data, crash reports or analytics anywhere.
 - **When it uses the network.** Only when you ask: fetching pages you chose for past offerings (it follows robots.txt,
   goes slowly, sends no cookies and never signs in anywhere), and sending your question plus the matching passages from
-  your materials to the AI service you set up. Transcription of lecture recordings happens on your computer.
+  your materials to the AI service you set up. Transcription of lecture recordings happens on your computer; the first time you use it, the speech model is downloaded once from the internet.
 - **Your AI provider.** In-app chat uses your own Anthropic API key or a local model server. If you use Anthropic,
   your questions and the passages sent with them are handled under Anthropic's terms. With a local model server
   nothing leaves your computer. If you connect Claude Desktop or Codex, what they see is governed by those apps.

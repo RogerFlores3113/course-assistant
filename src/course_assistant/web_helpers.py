@@ -34,6 +34,59 @@ def course_color(course: dict[str, Any] | None) -> str:
     return PALETTE[PALETTE_NAMES[int((course or {}).get("id") or 0) % len(PALETTE_NAMES)]]
 
 
+# ---------------------------------------------------------------- contrast
+LIGHT_SURFACES = ("#ffffff", "#efefeb", "#f7f7f5")  # --surface, --surface-2, --bg (light theme)
+DARK_SURFACES = ("#161615", "#1f1f1d", "#2a2a27")    # --bg, --surface, --surface-2 (dark theme)
+
+
+def _rgb(hex_: str) -> tuple[int, int, int]:
+    h = hex_.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def luminance(hex_: str) -> float:
+    def chan(v: int) -> float:
+        c = v / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (chan(v) for v in _rgb(hex_))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a: str, b: str) -> float:
+    la, lb = luminance(a), luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _mix(hex_: str, target: str, t: float) -> str:
+    a, b = _rgb(hex_), _rgb(target)
+    return "#%02x%02x%02x" % tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def ensure_contrast(hex_: str, surfaces: tuple[str, ...], ratio: float, toward: str) -> str:
+    """The colour closest to hex_ (mixing toward black or white) that reaches `ratio` on every surface."""
+    for step in range(0, 51):
+        c = _mix(hex_, toward, step / 50)
+        if all(contrast(c, bg) >= ratio for bg in surfaces):
+            return c
+    return toward
+
+
+def accent_colors(hex_: str) -> dict[str, str]:
+    """A course accent in four roles: the bar or dot (3:1 against each theme's surfaces, WCAG 1.4.11) and the
+    text colour (4.5:1, WCAG 1.4.3), each for the light and for the dark theme."""
+    return {"bar": ensure_contrast(hex_, LIGHT_SURFACES, 3.0, "#000000"),
+            "bar_dark": ensure_contrast(hex_, DARK_SURFACES, 3.0, "#ffffff"),
+            "text": ensure_contrast(hex_, LIGHT_SURFACES, 4.5, "#000000"),
+            "text_dark": ensure_contrast(hex_, DARK_SURFACES, 4.5, "#ffffff")}
+
+
+def accent_style(hex_: str) -> str:
+    """Inline custom properties for an element that carries a course's accent colour."""
+    c = accent_colors(hex_ if HEX_RE.match(hex_ or "") else PALETTE["blue"])
+    return f"--accent-c: {c['bar']}; --accent-c-d: {c['bar_dark']}; --accent-t: {c['text']}; --accent-t-d: {c['text_dark']}"
+
+
 def clean_color(value: str) -> str:
     value = (value or "").strip()
     return value if value in PALETTE or HEX_RE.match(value) else ""
@@ -77,6 +130,80 @@ def time_label(value: str) -> str:
     except ValueError:
         return value or ""
     return f"{t.hour % 12 or 12}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'}"
+
+
+# ---------------------------------------------------------------- calendar and guides lists
+_EVENT_LEAD = re.compile(r"^\s*\d{1,3}\s*[|:]\s*")
+
+
+def clean_event_title(title: str) -> str:
+    """Syllabus tables leak their first column into titles ('17 | Lecture 20'). Show the readable part."""
+    t = re.sub(r"[*_`]+", "", title or "")
+    t = re.sub(r"\s*\|\s*$", "", t)
+    stripped = _EVENT_LEAD.sub("", t)
+    if stripped.strip():
+        t = stripped
+    t = re.sub(r"\s*\|\s*", " - ", t)
+    t = re.sub(r"\s+", " ", t).strip(" -:")
+    return t or (title or "").strip()
+
+
+def merge_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The same event listed twice (two copies of a syllabus) shows once, with a count. The first copy keeps its
+    id so edit and delete still work; the others are listed in `copies`."""
+    out: list[dict[str, Any]] = []
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for e in events:
+        key = (e.get("date", ""), clean_event_title(e.get("title", "")).lower())
+        row = by_key.get(key)
+        if row is None:
+            row = {**e, "title": clean_event_title(e.get("title", "")), "copies": [], "listed": 1}
+            by_key[key] = row
+            out.append(row)
+            continue
+        row["listed"] += 1
+        row["copies"].append(e["id"])
+        if row.get("kind") == "other" and e.get("kind") not in (None, "other"):
+            row["kind"] = e["kind"]
+        for field in ("time", "topics"):
+            if not row.get(field) and e.get(field):
+                row[field] = e[field]
+    return out
+
+
+GUIDE_ORDER = ("primer", "exam_guide", "concept_map", "explain", "practice", "missed")
+ASK_KINDS = ("answer", "twin")
+
+
+def group_guides(guides: list[dict[str, Any]]) -> dict[str, Any]:
+    """Guides grouped by kind (newest first inside a group), with Q&A answers kept apart as 'ask history'.
+    Titles that repeat inside a group get their date (and time, when the date repeats too)."""
+    def label(g: dict[str, Any], dup_titles: dict[str, int], by_date: dict[tuple[str, str], int]) -> str:
+        title = (g.get("title") or "Untitled").strip()
+        if dup_titles.get(title, 0) < 2:
+            return title
+        day = (g.get("created_at") or "")[:10]
+        if by_date.get((title, day), 0) > 1:
+            return f"{title} ({day} {(g.get('created_at') or '')[11:16]})"
+        return f"{title} ({day})"
+
+    def prepare(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        dup: dict[str, int] = {}
+        by_date: dict[tuple[str, str], int] = {}
+        for g in items:
+            t = (g.get("title") or "Untitled").strip()
+            dup[t] = dup.get(t, 0) + 1
+            by_date[(t, (g.get("created_at") or "")[:10])] = by_date.get((t, (g.get("created_at") or "")[:10]), 0) + 1
+        return [{**g, "display_title": label(g, dup, by_date)} for g in items]
+
+    ordered = sorted(guides, key=lambda g: (g.get("created_at") or "", g.get("id") or 0), reverse=True)
+    groups: list[dict[str, Any]] = []
+    kinds = [k for k in GUIDE_ORDER if any(g["kind"] == k for g in ordered)]
+    kinds += sorted({g["kind"] for g in ordered} - set(GUIDE_ORDER) - set(ASK_KINDS))
+    for k in kinds:
+        groups.append({"kind": k, "items": prepare([g for g in ordered if g["kind"] == k])})
+    ask = prepare([g for g in ordered if g["kind"] in ASK_KINDS])
+    return {"groups": groups, "ask_history": ask, "total": len(ordered)}
 
 
 def chunk_range_label(chunk: dict[str, Any]) -> str:

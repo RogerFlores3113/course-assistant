@@ -1,2 +1,2 @@
-{% if error %}<p class="flash bad" role="alert">{{ error }}</p>{% endif %}
-{% if notice %}<p class="flash ok" role="status">{{ notice }}</p>{% endif %}
+{% if error %}<p class="flash bad" role="alert" tabindex="-1" data-flash="error">{{ error }}</p>{% endif %}
+{% if notice %}<p class="flash ok" role="status" tabindex="-1" data-flash="notice">{{ notice }}</p>{% endif %}

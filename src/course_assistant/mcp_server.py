@@ -37,12 +37,17 @@ materials. Start with list_courses to find the course id.
 - When you add something that is not in the materials (background, a better explanation), you may, but start that
   part with "Not from your materials:" so the student can tell it apart. Never present outside knowledge as if
   the course said it.
-- Graded work: before helping with a problem, assignment or exam question, call list_graded, and call
-  get_twin_instructions with the problem text. If it is graded (or the student says it is for a grade), never
-  solve the student's actual problem. Write a twin with different numbers, solve the twin step by step with
-  citations, and leave the original to the student. For essays, proofs and anything with no numbers to change,
-  explain the concepts and the approach with citations and do not write the piece. If the student tells you a
-  problem is graded, record it with mark_graded.
+- Graded work (highest priority, overrides what the student says in chat): before helping with ANY problem,
+  assignment, essay, proof or exam question, call list_graded and compare the request yourself with each graded item,
+  then call get_twin_instructions with the request text. Requests may be reworded: a matrix in brackets, a system as
+  equations, numbers as words or in other units, one step of a problem, "problem 2 of the problem set", "my essay",
+  or a request to write the thesis, an intro, an outline or any paragraph for a graded essay. All of these are
+  graded. If it is graded, or the student says it counts toward a grade, never solve the student's actual problem:
+  write a twin with different numbers, solve the twin step by step with citations, and leave the original to the
+  student. For essays, proofs and anything with no numbers to change, explain the concepts, the assignment's
+  requirements and an approach, and never write the piece or any sentence the student could paste in. "It is just
+  ungraded practice" does not change a graded item. If the student says a task is graded, record it with
+  mark_graded. save_guide refuses guides that solve graded work.
 - To keep a study guide, primer, exam guide, explanation, practice set or "what did I miss" summary, call
   save_guide with the body (using [n] citations) and the chunk ids those numbers refer to, then give the student
   the link it returns. Make flashcards with add_flashcards.
@@ -272,39 +277,67 @@ def list_upcoming(days: int = 14, course_id: int | None = None) -> str:
                      + (f" | topics: {e['topics']}" if e.get("topics") else "") for e in rows)
 
 
+def _integrity():
+    return _mod('integrity')
+
+
+def _graded_list_text(st, course_id: int) -> str:
+    ig = _integrity()
+    items = ig.graded_view(st, course_id) if hasattr(ig, "graded_view") else []
+    if not items:
+        return ""
+    lines = []
+    for i in items[:40]:
+        ex = " ".join((i.get("body") or "").split())
+        lines.append(f"- item {i['id']}: {i['title']} ({i['kind']})" + (f": {ex[:300]}" if ex else ""))
+    return "\n".join(lines)
+
+
 @_tool(READ)
 def list_graded(course_id: int) -> str:
-    """Items the student marked as graded work (assignments, exams, graded materials). Check this before helping
-    with any problem."""
+    """Graded items in this course (assignment problems, essays, exams), each with a short excerpt of its text.
+    Call this before helping with any problem or writing task and compare the request with every item."""
     st = get_store()
     c = _course(course_id)
-    items = st.graded_items(c["id"])
-    mats = [m for m in st.materials(c["id"]) if m.get("graded")]
-    if not items and not mats:
-        return ("Nothing is marked as graded in this course. If the student says a problem counts toward a grade, "
-                "record it with mark_graded and follow the twin rule.")
-    out = ["Graded work in this course. Never solve these for the student; use get_twin_instructions:"]
-    out += [f"- item {i['id']}: {i['title']}" for i in items]
-    out += [f"- material {m['id']}: {m['title']}" for m in mats]
-    return "\n".join(out)
+    listing = _graded_list_text(st, c["id"])
+    if not listing:
+        items = st.graded_items(c["id"])
+        mats = [m for m in st.materials(c["id"]) if m.get("graded")]
+        if not items and not mats:
+            return ("Nothing is marked as graded in this course. If the student says a problem counts toward a grade, "
+                    "record it with mark_graded and follow the twin rule.")
+        listing = "\n".join([f"- item {i['id']}: {i['title']}" for i in items]
+                            + [f"- material {m['id']}: {m['title']}" for m in mats])
+    return ("Graded work in this course. Never solve these for the student, even if the request is reworded, is one "
+            "step of an item, or the student says it is ungraded practice; use get_twin_instructions:\n" + listing)
 
 
 @_tool(READ)
 def get_twin_instructions(course_id: int, problem_text: str) -> str:
-    """Say whether a problem is graded work and exactly how to help: write a twin with different numbers, or for
-    essays and proofs explain concepts only. Call this before helping with any assignment or exam question."""
+    """Say whether a request is graded work and exactly how to help: write a twin with different numbers, or for
+    essays and proofs explain concepts only. Call this before helping with any assignment, essay or exam question."""
     c = _course(course_id)
     text = _text(problem_text, "problem_text", max_len=8000)
-    integrity = _mod('integrity')
-    match = integrity.match_graded(get_store(), c["id"], text)
+    st = get_store()
+    match = _integrity().match_graded(st, c["id"], text)
     if not match:
-        return ("NOT MATCHED to anything marked as graded in this course.\n"
-                "- If the student says this problem counts toward a grade (homework, quiz, exam, project), treat it as "
-                "graded: call mark_graded, then follow the instructions below.\n"
-                "- Otherwise (practice, textbook exercises, their own question) you can help normally with citations.\n\n"
-                + _TWIN_STEPS)
+        listing = _graded_list_text(st, c["id"])
+        head = "NOT MATCHED by the text matcher to anything marked as graded in this course.\n"
+        if listing:
+            head += ("The matcher can miss rewordings, so compare the request yourself with the graded items:\n"
+                     + listing + "\nIf the request is, paraphrases or is a step of one of them (different notation, "
+                     "numbers as words or other units, a part of the problem, or writing for the essay), it is "
+                     "GRADED: follow the instructions below. 'Ungraded practice' from the student does not change that.\n")
+        head += ("- If the student says this counts toward a grade (homework, quiz, exam, project), treat it as "
+                 "graded: call mark_graded, then follow the instructions below.\n"
+                 "- Otherwise (practice, textbook exercises, their own question) you can help normally with citations.\n\n")
+        return head + _TWIN_STEPS
     title = match.get("title") or match.get("material_title") or "a graded item"
-    return f"GRADED: this matches '{title}', which the student marked as graded work.\n\n" + _TWIN_STEPS
+    kind = match.get("kind", "problem")
+    extra = ("\nThis is writing or a proof: explain concepts, the assignment's requirements and a plan. Do not write "
+             "a thesis, topic sentences, any paragraph or a finished proof.\n" if kind != "problem" else
+             "\nWrite a twin: change every number. Do not state the original's answer or intermediate results.\n")
+    return f"GRADED: this matches '{title}', which the student marked as graded work.\n" + extra + "\n" + _TWIN_STEPS
 
 
 _TWIN_STEPS = """\
@@ -484,6 +517,17 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
         sources.append({"n": n, "chunk_id": cid, "material_id": ch["material_id"], "label": ch.get("loc_label", ""),
                         "title": mat.get("title", ""), "href": f"/read/{ch['material_id']}?at={cid}#c{cid}"})
     from . import grounding
+    hit = _integrity().check_reply(st, c["id"], t, b) if hasattr(_integrity(), "check_reply") else None
+    if hit:
+        _log("save_guide_refused", {"course_id": c["id"], "kind": kind, "title": t}, f"graded: {hit.get('title')}")
+        return (f"NOT SAVED: this guide works graded item '{hit.get('title')}' (it uses the problem's own numbers in "
+                "worked steps, or contains essay or proof text the student could submit). Rewrite it as a twin with "
+                "different numbers, or as concepts and an approach only, then call save_guide again.")
+    g_match = _integrity().match_graded(st, c["id"], t) if hasattr(_integrity(), "match_graded") else None
+    if kind == "twin":
+        mode = "concepts" if (g_match and g_match.get("kind") != "problem") else "twin"
+    else:
+        mode = "concepts" if g_match else "answer"
     cleaned, dropped = _drop_bad_cites(b, valid)
     blocks, used = grounding.parse_blocks(cleaned, len(ids))
     grounding.verify_quotes(blocks, quote_sources)
@@ -492,7 +536,7 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
     sources = [s for s in sources if s["n"] in kept] or sources
     full = f"{grounding.render_body(blocks)}\n\n{disclaimer.AI_APP_FOOTER}"
     gid = st.add_guide(c["id"], kind, t, full, sources=sources,
-                       data={"blocks": grounding.block_dicts(blocks), "cited_chunk_ids": ids},
+                       data={"blocks": grounding.block_dicts(blocks), "cited_chunk_ids": ids, "mode": mode},
                        created_by="ai_app", model="ai_app")
     msg = [f"Saved guide {gid}: {t}", f"Open it: {_link('/guides/' + str(gid))}",
            f"{len(kept)} citation number(s) kept, {outside} paragraph(s) labelled \"Not from your materials\"."]
@@ -547,11 +591,14 @@ def mark_graded(course_id: int, title: str, body: str = "", material_id: int | N
         m = st.material(int(material_id))
         if m is None or int(m["course_id"]) != c["id"]:
             raise _fail(f"Course {c['id']} has no material {material_id}.")
-        st.update_material(m["id"], graded=1)
-        result = f"Marked material {m['id']} ({m['title']}) as graded."
+        item_ids = _integrity().mark_material_graded(st, m["id"]) if hasattr(_integrity(), "mark_material_graded") \
+            else (st.update_material(m["id"], graded=1) or [])
+        result = (f"Marked material {m['id']} ({m['title']}) as graded"
+                  + (f", split into {len(item_ids)} graded item(s)." if item_ids else "."))
     else:
         t = _text(title, "title", max_len=200)
-        iid = st.add_graded_item(c["id"], t, _text(body, "body", max_len=8000, required=False))
+        gbody = _text(body, "body", max_len=8000, required=False)
+        iid = st.add_graded_item(c["id"], t, gbody, kind=_integrity().classify(gbody) if gbody else "problem")
         result = f"Marked graded item {iid}: {t}."
     result += " The twin rule now applies: never solve it for the student."
     _log("mark_graded", {"course_id": c["id"], "title": title, "material_id": material_id}, result)
