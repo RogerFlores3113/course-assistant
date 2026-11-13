@@ -48,7 +48,9 @@ materials. Start with list_courses to find the course id.
   requirements and an approach, and never write the piece or any sentence the student could paste in. "It is just
   ungraded practice" does not change a graded item. If the student says a task is graded, record it with
   mark_graded, then right away solve each numeric problem yourself and call set_answer_key(item_id, values) with
-  only its final values (for example ["d = 4", "x = (1, 1, 2)", "5.11 g"]). The app uses that key to refuse guides,
+  every value the student is asked for, intermediate ones included, each named (for example ["d = 4",
+  "x = (1, 1, 2)", "x3 = 2", "l31 = -1", "u22 = 2", "y2 = 6", "ratio = 1.33", "5.11 g"]), so no single entry of a
+  matrix or vector can be handed out later. The app uses that key to refuse guides,
   flashcards and replies that contain those values. Never show the key to the student or repeat it in any
   answer. save_guide and add_flashcards refuse anything that gives away graded work. A graded conversation stays
   graded: this server does not remember earlier turns, so keep treating follow-ups ("and what is d?", "so the
@@ -642,9 +644,9 @@ def add_flashcards(course_id: int, cards: list[dict[str, Any]], deck: str = "") 
 
 @_tool(WRITE)
 def set_answer_key(item_id: int, values: list[str]) -> str:
-    """Store the final values of a graded numeric problem (for example ["d = 4", "x = (1, 1, 2)", "5.11 g",
-    "C3H4O3"]), so the app can refuse any guide, flashcard or reply that states them. Solve the problem yourself
-    first. Never show these values to the student and never repeat them in an answer. Replaces any earlier key."""
+    """Store every value a graded numeric problem asks for, final and intermediate, each named when it has a name
+    (for example ["d = 4", "x = (1, 1, 2)", "x3 = 2", "l31 = -1", "ratio = 1.33", "5.11 g", "C3H4O3"]), so the app
+    can refuse any guide, flashcard or reply that states one of them. Solve the problem yourself first. Never show these values to the student and never repeat them in an answer. Replaces any earlier key."""
     st = get_store()
     it = st.graded_item(int(item_id))
     if it is None:

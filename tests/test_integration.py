@@ -226,7 +226,7 @@ def test_graded_problem_gets_a_twin_never_the_original(world):
     assert g["kind"] == "twin" and g["data"]["mode"] == "twin" and g["data"]["blocks"]
     assert "19" in g["data"]["twin_problem"] and "7" not in g["data"]["twin_problem"].replace("17", "")
     assert GRADED_PROBLEM not in ans.body_md
-    assert "The original is yours to do" in ans.body_md
+    assert "different numbers" in ans.routing_note
     assert [m["role"] for m in store.chat_messages(cid)] == ["user", "assistant"]  # one chat record, from ask()
     # a graded material works too
     gm = store.add_material(cid, "assignment", "Problem set 7", graded=1)

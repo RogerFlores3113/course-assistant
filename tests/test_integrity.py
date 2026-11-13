@@ -103,7 +103,7 @@ def test_twin_numeric_happy_path():
     p = FakeProvider([GOOD])
     a = integrity.twin(s, c, ORIG, p, g)
     assert a.twin and a.guide_id and len(p.calls) == 1
-    assert a.blocks[0].md.startswith("This was marked graded (HW 1 Problem 1)")
+    assert a.blocks[0].md.startswith("**Twin problem**") and "graded" in a.routing_note
     assert "7 kg cart" in a.body_md and "[9]" not in a.body_md and a.used == [1]
     assert a.body_md.rstrip("_").endswith(disclaimer.FOOTER)
     guide = s.guide(a.guide_id)
@@ -124,18 +124,18 @@ def test_twin_retry_once_then_succeeds():
     assert "every number is different" in p.calls[1]["messages"][0]["content"]
 
 
-def test_twin_falls_back_to_concepts_after_two_bad_twins():
+def test_twin_falls_back_after_two_bad_twins_with_two_calls_and_a_real_reason():
     s, c, m = make()
     s.add_graded_item(c, "HW 1 Problem 1", ORIG)
     g = integrity.match_graded(s, c, ORIG)
     p = FakeProvider([BAD, BAD, "Newton's second law links force, mass and acceleration [1]."])
     a = integrity.twin(s, c, ORIG, p, g)
-    assert len(p.calls) == 3 and a.mode == "concepts" and not a.twin
+    assert len(p.calls) == 2 and a.mode == "concepts" and not a.twin  # contract 4: at most two sequential calls
     guide = s.guide(a.guide_id)
     assert guide["data"]["mode"] == "concepts" and guide["data"]["twin_problem"] == ""
-    assert "could not write a safe twin" in a.blocks[0].md
+    assert "tried twice" in a.blocks[0].md and "too close" in a.blocks[0].md
     assert "a = 20/5" not in a.body_md  # the bad twin's solution is never shown
-    assert "do not complete it" in p.calls[2]["messages"][0]["content"]
+    assert "similar problem is shown" not in a.body_md and "here is a similar problem" not in a.body_md
 
 
 def test_twin_malformed_output_counts_as_bad():

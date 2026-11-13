@@ -417,7 +417,7 @@ def test_check_my_draft_gives_rubric_feedback_that_quotes_the_student():
     a = grounding.ask(s, c, DRAFT_Q, p)
     g = s.guide(a.guide_id)
     assert g["data"]["feedback"] is True and a.mode == "concepts"
-    assert "Madison was wrong about faction" in a.body_md and "never writes or rewrites" in a.body_md
+    assert "Madison was wrong about faction" in a.body_md and "feedback, not a rewrite" in a.routing_note
     assert "Similar problem" not in g["title"] and g["title"].startswith("Feedback on your draft")
 
 
