@@ -672,6 +672,9 @@ def set_answer_key(item_id: int, values: list[str]) -> str:
     vals = [str(v).strip()[:200] for v in values if str(v).strip()][:30]
     if not vals:
         raise _fail("values must hold at least one non-empty string.")
+    if not _integrity().parse_key(vals):
+        raise _fail("Every value in the key needs a number or a formula, such as \"x = (1, 1, 2)\" or \"5.11 g\". "
+                    "A lone letter or word (\"x\", \"linear = yes\") cannot be checked, so nothing was stored.")
     st.update_graded_item(it["id"], answer_key=json.dumps(vals))
     result = (f"Stored an answer key of {len(vals)} value(s) for '{it['title']}'. It is hidden from the student and "
               "checks future guides, flashcards and replies. Do not show it to the student.")
