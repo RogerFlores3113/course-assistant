@@ -638,6 +638,38 @@ def _lead_in(plain: str) -> bool:
     return len(plain.split()) <= 8 and not re.search(r"[0-9=$]", plain) and bool(_LEAD_IN.match(plain))
 
 
+# A signpost says where the argument or the answer is going, not what is true: "First, he defines the problem.",
+# "Madison builds the argument in three steps.", "On AI, the syllabus says this:" before the cited sentence on it.
+_SIGNPOST_ORDINAL = re.compile(
+    r"^\W*(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|fourth|fifth|next|then|after\s+that|finally|lastly|last|"
+    r"to\s+(?:start|begin)|in\s+the\s+(?:first|second|third|last|final)\s+(?:step|part|stage|move))\b\W", re.I)
+_SIGNPOST_STEPS = re.compile(
+    r"\b(?:in|into|across|over|through)\s+(?:\w+\s+){0,2}(?:steps|parts|stages|phases|moves|sections|stages|points)\b|"
+    r"\b(?:walks?|works?|moves?|goes)\s+(?:us\s+|the\s+reader\s+)?through\b|"
+    r"\b(?:has|have|makes?|offers?|gives?)\s+(?:\w+\s+){0,2}(?:steps|parts|stages|moves|points)\b|"
+    r"\b(?:argument|chapter|reading|essay|proof|lecture|section)\s+(?:has|is\s+in|runs|proceeds|unfolds)\b", re.I)
+_SIGNPOST_TOPIC = re.compile(
+    r"^\W*(?:on|about|regarding|for|as\s+for|when\s+it\s+comes\s+to)\b[^.!?]{1,40},\s*(?:the|your)\s+(?:\w+\s+){1,2}?"
+    r"(?:says?|states?|explains?|covers?|describes?|notes?|lists?|gives?|spells?\s+out|puts?\s+it)\b[^.!?]{0,40}[.:]?\s*$", re.I)
+
+
+_STRUCT_VERB = re.compile(
+    r"\b(?:defines?|introduces?|argues?|shows?|turns?|moves?|compares?|explains?|addresses?|lays?|states?|describes?|"
+    r"presents?|considers?|examines?|proposes?|answers?|notes?|sets?|names?|raises?|builds?|develops?|makes?|gives?|"
+    r"offers?|looks?|asks?|begins?|opens?|closes?|ends?|concludes?|lists?|walks?|outlines?|covers?|discusses?|"
+    r"identifies?|sets\s+out|draws?|returns?|applies|applied|replies|responds?)\b", re.I)
+
+
+def _signpost(plain: str, next_cited: bool) -> bool:
+    """A short sentence with no number or equation that orders or introduces what follows. The topic lead-in
+    ("On AI, the syllabus says ...") counts only right before a cited sentence."""
+    if len(plain.split()) > 16 or re.search(r"[0-9=$]", plain):
+        return False
+    if (_SIGNPOST_ORDINAL.match(plain) and _STRUCT_VERB.search(plain)) or _SIGNPOST_STEPS.search(plain):
+        return True
+    return next_cited and bool(_SIGNPOST_TOPIC.match(plain))
+
+
 def _split_sentences(cleaned: str, found: list[int], calc: bool = False) -> list[Block]:
     """A cited prose paragraph. A sentence that makes a claim and has no citation of its own is cut out and labelled,
     whether it comes after a cited sentence or before one; a lead-in that states no fact stays with its cited sentence."""
@@ -654,7 +686,7 @@ def _split_sentences(cleaned: str, found: list[int], calc: bool = False) -> list
         later = any(cites[i + 1:])
         flag = (not cites[i] and (any(cites[:i]) or later) and REMOVED_MARK not in x
                 and len(plain.split()) >= 5 and not _is_meta(plain)[0] and not _makes_no_claim(plain)
-                and not is_non_claim(plain, calc=calc)
+                and not is_non_claim(plain, calc=calc) and not _signpost(plain, bool(cites[i + 1:i + 2] and cites[i + 1]))
                 and (any(cites[:i]) or not _lead_in(plain)))  # before a cite only a short lead-in stating no fact stays plain
         flags.append(flag)
     if not any(flags):
@@ -884,6 +916,11 @@ _ABOUT_DRAFT_LOOSE = re.compile(
     r"^\W*(?:the|this|that|each|every|one\s+of\s+the)\s+(?:\w+\s+){0,2}?(?:essay|thesis|paragraph|introduction|intro|"
     r"conclusion|proof|argument|claim|evidence|step|sentence|lemma|case|base\s+case|induction|draft|reasoning|"
     r"structure|rubric|point)s?\b", re.I)
+# a comment on the student's own draft ("The Markov example is a good one to expand.") judges or advises the writing
+_FEEDBACK_EVAL = re.compile(
+    r"\b(?:good|great|strong|stronger|weak|weaker|clear|clearer|unclear|vague|solid|nice|worth|expand|develop|clarify|"
+    r"tighten|sharpen|cut|trim|move|support|back\s+up|should|could|might|would|needs?|try|consider|stronger|helpful|"
+    r"effective|convincing|missing|lacks?|misses|repeats?|rambl\w+|specific|concrete|too\s+\w+)\b", re.I)
 _PLAN_LINE = re.compile(
     r"^\W*(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:/\d{2,4})?|(?:mon|tues?|wednes|thurs?|fri|satur|sun)(?:day)?|"
     r"day\s*\d+|week\s*\d+)\b\W*[:\-\u2013]\s*(?:(?:light|short|quick|final|full|first|second|one)\s+)?"
@@ -972,6 +1009,8 @@ def _claimless_sentence(x: str, calc: bool, coach: bool = False, feedback: bool 
         return True
     if feedback and _ABOUT_DRAFT_LOOSE.match(plain):
         return True
+    if feedback and no_fact and _FEEDBACK_EVAL.search(plain):
+        return True  # a judgement or a suggestion about the student's writing is not a claim about the subject
     if coach and _RUBRIC_LABEL.match(plain):
         return True  # a rubric line inside a block of coaching questions
     if calc and words <= 8 and no_fact:
@@ -1140,6 +1179,26 @@ def parse_answer(raw: str, sources: list[Source]) -> Answer:
 
 
 # --------------------------------------------------------------------------- saving
+_TOPIC_STOP = frozenset("""about above after again also another because before being between could does doing each from have having here
+into just like make many more most much must only other over same should some such than that their them then there these
+they this those through under until very what when where which while with would your you are can how why who whom was were
+will its has had not and but for the""".split())
+
+
+def topic_stems(text: str, limit: int = 0) -> list[str]:
+    """Distinct 5-letter word stems of text (most frequent first when limit is set), without filler words. Used to tell
+    whether a passage that was searched but not cited has anything to do with the question."""
+    counts: dict[str, int] = {}
+    for w in re.findall(r"[A-Za-z][A-Za-z']{2,}|\d+", text or ""):
+        w = w.lower().strip("'")
+        if w in _TOPIC_STOP or len(w) < 3:
+            continue
+        k = w[:5]
+        counts[k] = counts.get(k, 0) + 1
+    ordered = sorted(counts, key=lambda k: -counts[k])
+    return ordered[:limit] if limit else ordered
+
+
 def source_rows(sources: list[Source], used: list[int] | None = None) -> list[dict[str, Any]]:
     used_set = set(used or [])
     rows = []
@@ -1148,6 +1207,9 @@ def source_rows(sources: list[Source], used: list[int] | None = None) -> list[di
                "title": s.get("material_title", ""), "href": s.get("href", ""), "used": i in used_set}
         if isinstance(s.get("score"), (int, float)):
             row["score"] = round(float(s["score"]), 4)  # kept so the page can fold away the passages that scored low
+        words = topic_stems(" ".join(str(s.get(k) or "") for k in ("material_title", "loc_label", "heading", "text"))[:2500], 40)
+        if words:
+            row["words"] = " ".join(words)  # what the passage is about, so a page can drop an unrelated "also searched" row
         if (past := _past_label(s)):
             row["past"] = past  # "Past offering: Fall 2018", shown on the Sources row and in the chip's label
         rows.append(row)

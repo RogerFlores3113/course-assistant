@@ -61,7 +61,8 @@ def source_map(sources: list[dict[str, Any]] | None) -> dict[int, dict[str, Any]
         title = strip_past_words(title, has_tag)
         label = strip_past_words(s.get("label") or s.get("loc_label") or "", has_tag)  # the label may repeat the title and "(past offering)"
         out[n] = {"n": n, "title": title, "label": clean_label(title, label),
-                  "href": s.get("href") or "", "past": s.get("past") or "", "score": s.get("score")}
+                  "href": s.get("href") or "", "past": s.get("past") or "", "score": s.get("score"),
+                  "words": s.get("words") or ""}
     return out
 
 
@@ -283,7 +284,8 @@ def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1, state: d
             i += 1
             lang = re.sub(r"[^\w+#.-]", "", lang)
             cls = f' class="language-{escape(lang)}"' if lang else ""
-            out.append(f'<pre tabindex="0"{(" data-lang=" + chr(34) + escape(lang) + chr(34)) if lang else ""}>'
+            name = f"{lang} code" if lang else "Code"
+            out.append(f'<pre tabindex="0" role="group" aria-label="{escape(name)}"{(" data-lang=" + chr(34) + escape(lang) + chr(34)) if lang else ""}>'
                        f"<code{cls}>{escape(chr(10).join(code))}</code></pre>")
             continue
         if DETAILS_OPEN_RE.match(line) and depth < 4:

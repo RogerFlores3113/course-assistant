@@ -293,6 +293,18 @@
       } catch (err) { no(err); }
     });
   }
+  // Every code block gets its own name ("julia code block 2 of 3") on the block and on its Copy button, so a screen
+  // reader's list of buttons or regions can tell them apart. Numbers run over the answer the block sits in.
+  function nameCodeBlocks(scope) {
+    var pres = scope.querySelectorAll("pre[data-copy-ready]");
+    Array.prototype.forEach.call(pres, function (pre, i) {
+      var lang = pre.getAttribute("data-lang") || "";
+      var what = (lang ? lang + " code" : "Code") + (pres.length > 1 ? " block " + (i + 1) + " of " + pres.length : "");
+      pre.setAttribute("role", "group"); pre.setAttribute("aria-label", what);
+      var b = pre.parentNode && pre.parentNode.querySelector(".copy-btn");
+      if (b) { b.setAttribute("aria-label", "Copy " + what.charAt(0).toLowerCase() + what.slice(1)); }
+    });
+  }
   function addCopyButtons(root) {
     var pres = (root || document).querySelectorAll("pre");
     Array.prototype.forEach.call(pres, function (pre) {
@@ -301,7 +313,7 @@
       var wrap = document.createElement("div"); wrap.className = "copy-wrap";
       pre.parentNode.insertBefore(wrap, pre); wrap.appendChild(pre);
       var b = document.createElement("button"); b.type = "button"; b.className = "btn small ghost copy-btn";
-      b.textContent = "Copy"; b.setAttribute("aria-label", "Copy this code");
+      b.textContent = "Copy"; b.setAttribute("aria-label", "Copy code");
       b.addEventListener("click", function () {
         var code = pre.querySelector("code") || pre;
         copyText(code.textContent).then(function () {
@@ -311,6 +323,12 @@
       });
       wrap.appendChild(b);
     });
+    var scopes = [];
+    Array.prototype.forEach.call((root || document).querySelectorAll("pre[data-copy-ready]"), function (pre) {
+      var sc = pre.closest("[data-latest-answer], .msg, article, main") || document.body;
+      if (scopes.indexOf(sc) < 0) { scopes.push(sc); }
+    });
+    scopes.forEach(nameCodeBlocks);
   }
   addCopyButtons(document);
   document.body.addEventListener("htmx:afterSwap", function (e) { addCopyButtons(e.target || document); });
