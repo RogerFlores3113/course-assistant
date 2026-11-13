@@ -1,24 +1,25 @@
+{% from "_fields.html" import fa, fe with context %}
 <h2>Materials</h2>
 {% if not materials %}<div class="card empty"><p><strong>Nothing saved yet.</strong> Start with the syllabus: add it below with the kind set to Syllabus and the app pulls your exam and assignment dates into the Calendar. Then add lecture slides, readings and notes.</p></div>{% endif %}
 <div class="card">
 <h3>Add files</h3>
-<form method="post" action="/courses/{{ course.id }}/materials/upload" enctype="multipart/form-data" hx-post="/courses/{{ course.id }}/materials/upload" hx-encoding="multipart/form-data" hx-target="#course-body" hx-swap="outerHTML" data-busy="Reading your files. Big PDFs can take a moment." class="form">
-  <label>Files <input type="file" name="files" multiple required aria-describedby="fmts"></label>
+<form method="post" action="/courses/{{ course.id }}/materials/upload" enctype="multipart/form-data" hx-post="/courses/{{ course.id }}/materials/upload" hx-encoding="multipart/form-data" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" data-busy="Reading your files. Big PDFs can take a moment." class="form">
+  <label>Files <input type="file" name="files" multiple required {{ fa('upload', 'files', 'fmts') }}></label>{{ fe('upload', 'files') }}
   <p id="fmts" class="muted small">Supported: {{ supported }}</p>
   <div class="two"><label>What are they? <select name="kind"><option value="">Let the app guess</option>{% for k, l in material_kinds.items() %}<option value="{{ k }}">{{ l }}</option>{% endfor %}</select></label>
-  <label>Lecture date (optional) <input type="date" name="lecture_date"></label></div>
+  <div><label>Lecture date (optional) <input type="date" name="lecture_date" {{ fa('upload', 'lecture_date') }}></label>{{ fe('upload', 'lecture_date') }}</div></div>
   <button class="btn" type="submit">Add files</button>
 </form></div>
 <div class="two">
 <div class="card"><h3>Save a web page</h3>
-<form method="post" action="/courses/{{ course.id }}/materials/url" hx-post="/courses/{{ course.id }}/materials/url" hx-target="#course-body" hx-swap="outerHTML" data-busy="Saving the page. The app goes slowly on purpose." class="form">
-  <label>Web address <input type="url" name="url" required placeholder="https://..."></label>
+<form method="post" action="/courses/{{ course.id }}/materials/url" hx-post="/courses/{{ course.id }}/materials/url" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" data-busy="Saving the page. The app goes slowly on purpose." class="form">
+  <label>Web address <input type="url" name="url" required placeholder="https://..." {{ fa('url', 'url') }}></label>{{ fe('url', 'url') }}
   <label>Kind <select name="kind"><option value="website">Course website</option><option value="handout">Handout</option><option value="textbook">Textbook</option></select></label>
   <button class="btn" type="submit">Save page</button></form></div>
 <div class="card"><h3>Type a note</h3>
-<form method="post" action="/courses/{{ course.id }}/materials/note" hx-post="/courses/{{ course.id }}/materials/note" hx-target="#course-body" hx-swap="outerHTML" class="form">
+<form method="post" action="/courses/{{ course.id }}/materials/note" hx-post="/courses/{{ course.id }}/materials/note" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" class="form">
   <label>Title <input name="title" placeholder="Lecture 4 notes"></label>
-  <label>Your notes <textarea name="text" rows="4" required></textarea></label>
+  <label>Your notes <textarea name="text" rows="4" required {{ fa('note', 'text') }}></textarea></label>{{ fe('note', 'text') }}
   <button class="btn" type="submit">Save note</button></form></div>
 </div>
 {% if materials %}<h3>Saved materials</h3>
@@ -29,9 +30,15 @@
   {% if m.graded %}<span class="badge warn-b">Graded work</span>{% endif %}
   {% if m.added_by == 'ai_app' %}<span class="badge">Added by your AI app</span>{% endif %}<br>
   <span class="muted small">{{ m.chunk_count }} passage{{ '' if m.chunk_count == 1 else 's' }}{% if m.lecture_date %} &middot; lecture {{ m.lecture_date | day }}{% endif %}</span>
-  {% if m.status == 'needs_transcription' %}<br><span class="status-note">{{ m.job_text or ('Waiting to be transcribed' if m.is_media else 'Photo of notes: waiting to be read') }}{% if m.status_note %}. {{ m.status_note }}{% endif %}</span>
-  {% elif m.status == 'error' %}<br><span class="status-note bad-t">Problem: {{ m.status_note or 'could not be read' }}</span>
-  {% elif m.job_text %}<br><span class="status-note">{{ m.job_text }}</span>{% endif %}</div>
+  {% if m.copy_of %}<br><span class="status-note">Looks like a copy of <a href="/read/{{ m.copy_of.id }}">{{ m.copy_of.title }}</a>. Both are searched, so answers may repeat the same passage. If you do not need both, delete one.</span>{% endif %}
+  {% if m.status == 'error' and not m.job_text %}<br><span class="status-note bad-t">Problem: {{ m.status_note or 'could not be read' }}</span>
+  {% elif m.job_text %}<br><span class="status-note">{{ m.job_text }}</span>{% if m.job_next %}<br><span class="muted small">{{ m.job_next }}</span>{% endif %}{% if m.status_note and m.status == 'needs_transcription' %}<br><span class="muted small">{{ m.status_note }}</span>{% endif %}{% endif %}</div>
   <div class="actions">
-    <form method="post" action="/materials/{{ m.id }}/graded" hx-post="/materials/{{ m.id }}/graded" hx-target="#course-body" hx-swap="outerHTML"><input type="hidden" name="graded" value="{{ 0 if m.graded else 1 }}"><button class="btn small ghost" type="submit">{{ 'Unmark graded' if m.graded else 'Mark as graded' }}</button></form>
-    <a class="btn small ghost" href="/materials/{{ m.id }}/delete" aria-label="Delete {{ m.title }}">Delete</a></div></li>{% endfor %}</ul>{% endif %}
+    {% if m.job_retry %}<form method="post" action="/materials/{{ m.id }}/process" hx-post="/materials/{{ m.id }}/process" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" data-busy="Working on {{ m.title }}. A long recording can take several minutes."><button class="btn small" type="submit">{{ 'Try again' if m.job_text.endswith('finish') or 'did not finish' in m.job_text else 'Start now' }}<span class="visually-hidden"> {{ m.title }}</span></button></form>{% endif %}
+    <a class="btn small ghost" href="/materials/{{ m.id }}/edit">Edit<span class="visually-hidden"> {{ m.title }}</span></a>
+    <form method="post" action="/materials/{{ m.id }}/graded" hx-post="/materials/{{ m.id }}/graded" hx-target="#course-body" hx-swap="outerHTML"><input type="hidden" name="graded" value="{{ 0 if m.graded else 1 }}"><button class="btn small ghost" type="submit">{{ 'Unmark graded' if m.graded else 'Mark as graded' }}<span class="visually-hidden"> {{ m.title }}</span></button></form>
+    <a class="btn small ghost" href="/materials/{{ m.id }}/delete">Delete<span class="visually-hidden"> {{ m.title }}</span></a></div></li>{% endfor %}</ul>{% endif %}
+{% if graded and graded.items %}<section aria-labelledby="graded-h"><h3 id="graded-h">Graded work the app protects ({{ graded.count }})</h3>
+<p class="muted small">The app found these in the materials you marked as graded. It will explain the ideas and write similar problems for them, never solve them. Check that the list is right: fix a label or kind, or remove anything that is not graded.</p>
+<ul class="plain list">{% for i in graded['items'] %}<li class="row-item"><div class="grow"><strong>{{ i.label or i.title }}</strong> <span class="badge">{{ i.kind_label }}</span>{% if i.material_title %} <span class="muted small">in {{ i.material_title }}</span>{% endif %}{% if i.excerpt %}<br><span class="muted small">{{ i.excerpt }}</span>{% endif %}</div>
+  <div class="actions"><a class="btn small ghost" href="/graded/{{ i.id }}/edit">Edit<span class="visually-hidden"> {{ i.label or i.title }}</span></a> <a class="btn small ghost" href="/graded/{{ i.id }}/delete">Remove<span class="visually-hidden"> {{ i.label or i.title }}</span></a></div></li>{% endfor %}</ul></section>{% endif %}

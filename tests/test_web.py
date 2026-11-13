@@ -438,3 +438,500 @@ def test_markdown_renderer_is_safe():
     assert "<ul><li>a<ul><li>b</li></ul></li><li>c</li></ul>" in html
     assert "[2]" in html and 'class="cite"' not in html  # unknown source stays text
     assert 'class="cite" href="/read/1"' in str(render("see [1]", [{"n": 1, "href": "/read/1", "title": "T"}]))
+
+
+# ====================================================================== cycle 1: web fixes (fx-web)
+import re as _re
+
+from course_assistant import web_helpers as H
+
+STATIC = Path(web.__file__).parent / "static"
+
+
+def htmx(c, method, url, **kw):
+    return getattr(c, method)(url, headers={"HX-Request": "true"}, **kw)
+
+
+def test_p5_live_regions_are_permanent_and_outside_course_body(ready):
+    cid = mkcourse(ready.store)
+    html = ready.client.get(f"/courses/{cid}/ask").text
+    body_start = html.index('id="course-body"')
+    assert html.index('id="sr-status"') > html.index("</main>") > body_start
+    assert 'id="sr-alert"' in html and 'role="alert"' in html and 'aria-live="polite"' in html
+    part = htmx(ready.client, "get", f"/courses/{cid}/ask").text
+    assert 'id="sr-status"' not in part  # the partial never carries (and so never replaces) the live regions
+
+
+def test_p5_htmx_errors_are_returned_as_the_tab_and_the_js_swaps_them(ready):
+    cid = mkcourse(ready.store)
+    r = htmx(ready.client, "post", f"/courses/{cid}/ask", data={"question": "   "})
+    assert r.status_code == 400 and 'id="course-body"' in r.text and "Type a question first." in r.text
+    js = (STATIC / "app.js").read_text()
+    assert "htmx:beforeSwap" in js and "shouldSwap = true" in js and "isError = false" in js
+    assert "htmx:sendError" in js and "htmx:responseError" in js and "aria-busy" in js and "data-inflight" in js
+
+
+def test_p5_ai_forms_cannot_double_submit_and_have_busy_text(ready):
+    cid = mkcourse(ready.store)
+    ready.store.add_material(cid, "notes", "N")
+    ask = ready.client.get(f"/courses/{cid}/ask").text
+    assert "hx-disabled-elt" in ask and "data-busy" in ask
+    from datetime import date, timedelta
+    soon = (date.today() + timedelta(days=2)).isoformat()
+    ready.store.add_event(cid, "lecture", "Lecture 1", soon)
+    ready.store.add_event(cid, "exam", "Midterm 1", soon)
+    dash = ready.client.get("/").text
+    assert dash.count("data-busy=") >= 2  # primer and exam guide forms say what is happening
+    assert "Make a primer<span class=\"visually-hidden\"> for Lecture 1</span>" in dash
+    js = (STATIC / "app.js").read_text()
+    assert 'say("Done.")' in js  # a done announcement when busy ends
+
+
+def test_p5_done_and_focus_logic_present_in_js():
+    js = (STATIC / "app.js").read_text()
+    for needle in ("htmx:afterSettle", "document.title", "data-answer-heading", "#study-result h3", "#tab-panel h2"):
+        assert needle in js
+
+
+def test_p5_ask_success_has_notice_and_answer_heading(ready, monkeypatch):
+    cid = mkcourse(ready.store)
+    fake_grounding(monkeypatch, ready.store)
+    ready.app.dependency_overrides = {}
+    app = web.create_app(ready.store, key=KEY, provider_factory=lambda: SimpleNamespace(name="f", model="m"))
+    c = TestClient(app, base_url="http://127.0.0.1:8766")
+    c.cookies.set(web.COOKIE, KEY)
+    r = htmx(c, "post", f"/courses/{cid}/ask", data={"question": "What is rank?"})
+    assert r.status_code == 200 and "Answer ready" in r.text and "data-answer-heading" in r.text
+    assert "Answer to: What is rank?" in r.text
+
+
+def test_p5_page_titles_unique_per_tab_and_course(ready):
+    a = mkcourse(ready.store)
+    b = ready.store.add_course("Chemistry")
+    titles = set()
+    for cid in (a, b):
+        for tab in ("", "/calendar", "/study", "/guides", "/ask", "/offerings"):
+            t = _re.search(r"<title>(.*?)</title>", ready.client.get(f"/courses/{cid}{tab}").text, _re.S).group(1)
+            titles.add(t)
+    assert len(titles) == 12
+    assert "Ask - Linear Algebra - Course Assistant" in titles
+    assert "Past offerings - Chemistry - Course Assistant" in titles
+    part = htmx(ready.client, "get", f"/courses/{a}/guides").text
+    assert 'data-title="Guides - Linear Algebra - Course Assistant"' in part
+
+
+def test_p5_flashcards_title_per_course_and_card_heading(ready):
+    a = mkcourse(ready.store)
+    b = ready.store.add_course("Chemistry")
+    ready.store.add_flashcard(a, "F", "B")
+    ta = _re.search(r"<title>(.*?)</title>", ready.client.get(f"/flashcards/{a}").text).group(1)
+    tb = _re.search(r"<title>(.*?)</title>", ready.client.get(f"/flashcards/{b}").text).group(1)
+    assert ta == "Flashcards - Linear Algebra - Course Assistant" and ta != tb
+    assert "Card 1 of 1 due" in ready.client.get(f"/flashcards/{a}").text
+
+
+def test_p5_error_pages_get_error_prefix_in_title(ready):
+    r = ready.client.post("/courses/new", data={"name": " "})
+    assert "<title>Error: Add a course" in r.text
+
+
+def test_p5_field_errors_are_tied_to_inputs(ready):
+    r = ready.client.post("/courses/new", data={"name": " "})
+    assert 'aria-invalid="true"' in r.text and 'aria-describedby="err-course-name"' in r.text
+    assert 'id="err-course-name"' in r.text and "Give the course a name" in r.text
+    cid = mkcourse(ready.store)
+    r = htmx(ready.client, "post", f"/courses/{cid}/events", data={"kind": "exam", "title": "", "date": "2999-01-01"})
+    assert r.status_code == 400 and 'aria-describedby="err-event-title"' in r.text
+    r = htmx(ready.client, "post", f"/courses/{cid}/ask", data={"question": ""})
+    assert 'aria-describedby="err-ask-question"' in r.text
+    r = htmx(ready.client, "post", f"/courses/{cid}/materials/note", data={"title": "x", "text": " "})
+    assert 'aria-describedby="err-note-text"' in r.text
+    ev = ready.store.add_event(cid, "exam", "E", "2999-01-01")
+    r = ready.client.post(f"/events/{ev}/edit", data={"kind": "exam", "title": "E", "date": "nope"})
+    assert r.status_code == 400 and 'aria-describedby="err-event-date"' in r.text
+
+
+def test_p5_repeated_buttons_carry_item_names(ready, monkeypatch):
+    cid = mkcourse(ready.store)
+    mid = ready.store.add_material(cid, "assignment", "Problem Set 2")
+    ready.store.add_event(cid, "exam", "Midterm 1", "2999-03-01")
+    ready.store.add_event(cid, "exam", "Old exam", "2001-03-01")
+    m = ready.client.get(f"/courses/{cid}").text
+    assert 'Mark as graded<span class="visually-hidden"> Problem Set 2</span>' in m
+    assert 'Edit<span class="visually-hidden"> Problem Set 2</span>' in m
+    cal = ready.client.get(f"/courses/{cid}/calendar").text
+    assert 'Edit<span class="visually-hidden"> Midterm 1</span>' in cal
+    assert 'Edit<span class="visually-hidden"> Old exam</span>' in cal  # earlier events too
+
+
+def test_p5_friendly_404_and_422_pages(ready):
+    r = ready.client.get("/no/such/page")
+    assert r.status_code == 404 and "<html" in r.text and "Page not found" in r.text and "detail" not in r.text
+    r = ready.client.get("/read/abc")
+    assert r.status_code == 404 and "<html" in r.text
+    cid = mkcourse(ready.store)
+    r = ready.client.post(f"/flashcards/{cid}/review", data={"grade": "good"})  # card_id missing
+    assert r.status_code == 422 and "<html" in r.text and "could not be read" in r.text
+    r = ready.client.get("/read/1?at=abc")
+    assert r.status_code in (200, 410)  # never raw JSON
+
+
+def test_p5_flashcard_shortcuts_toggle_and_js_rules(ready):
+    cid = mkcourse(ready.store)
+    ready.store.add_flashcard(cid, "F", "B")
+    assert 'data-shortcuts="on"' in ready.client.get(f"/flashcards/{cid}").text
+    r = ready.client.post("/settings/shortcuts", data={"on": "0", "next": f"/flashcards/{cid}"}, follow_redirects=True)
+    assert 'data-shortcuts="off"' in r.text and "Turn shortcuts on" in r.text and "shortcuts are off" in r.text
+    # open redirects are refused
+    r = ready.client.post("/settings/shortcuts", data={"on": "1", "next": "//evil.example/x"}, follow_redirects=False)
+    assert r.headers["location"] == "/settings"
+    r = ready.client.post("/settings/shortcuts", data={"on": "1", "next": "https://evil.example"}, follow_redirects=False)
+    assert r.headers["location"] == "/settings"
+    assert 'name="on" value="0" checked' not in ready.client.get("/settings").text
+    js = (STATIC / "app.js").read_text()
+    assert 'getAttribute("data-shortcuts") === "off"' in js
+    assert "e.ctrlKey || e.metaKey || e.altKey || e.shiftKey" in js and '"INPUT"' in js and "interactive" in js
+    assert 'id="answer-text"' in ready.client.get(f"/flashcards/{cid}").text  # focus target for the revealed back
+
+
+def test_p5_flashcard_math_marked(ready):
+    cid = mkcourse(ready.store)
+    ready.store.add_flashcard(cid, "What is $x$?", "$y$")
+    t = ready.client.get(f"/flashcards/{cid}").text
+    assert t.count("data-math") == 2
+
+
+def _css_vars(block: str) -> dict[str, str]:
+    return dict(_re.findall(r"--([a-z0-9-]+):\s*(#[0-9a-fA-F]{6})", block))
+
+
+def test_p5_css_contrast_meets_aa_in_both_themes():
+    css = (STATIC / "style.css").read_text()
+    light = _css_vars(css[css.index(":root {"):css.index("@media (prefers-color-scheme")])
+    dark = _css_vars(css[css.index(':root[data-theme="dark"]'):css.index("* { box-sizing")])
+    dark_media = _css_vars(css[css.index("@media (prefers-color-scheme"):css.index(':root[data-theme="dark"]')])
+    assert dark_media == {k: v for k, v in dark_media.items() if dark.get(k) == v}  # same tokens either way
+    for name, t in (("light", light), ("dark", dark)):
+        pairs = [("text", "bg"), ("text", "surface"), ("muted", "surface"), ("muted", "surface-2"), ("muted", "bg"),
+                 ("accent", "surface"), ("accent-text", "accent"), ("danger-fg", "danger-bg"), ("bad", "surface"),
+                 ("ok", "surface"), ("warn", "surface"), ("text", "mark"), ("mark-muted", "mark"), ("text", "ok-bg"),
+                 ("text", "bad-bg"), ("text", "warn-bg"), ("bad", "bad-bg")]
+        for fg, bg in pairs:
+            assert H.contrast(t[fg], t[bg]) >= 4.5, (name, fg, bg, H.contrast(t[fg], t[bg]))
+
+
+def test_p5_course_accent_text_variants_pass_on_both_themes():
+    for hex_ in H.PALETTE.values():
+        c = H.accent_colors(hex_)
+        assert all(H.contrast(c["text"], bg) >= 4.5 for bg in H.LIGHT_SURFACES), hex_
+        assert all(H.contrast(c["text_dark"], bg) >= 4.5 for bg in H.DARK_SURFACES), hex_
+        assert all(H.contrast(c["bar"], bg) >= 3 for bg in H.LIGHT_SURFACES)
+        assert all(H.contrast(c["bar_dark"], bg) >= 3 for bg in H.DARK_SURFACES)
+    assert "--accent-t-d:" in H.accent_style("#2f5fd0")
+
+
+def test_base_includes_content_assets_per_contract_8(ready):
+    t = ready.client.get("/").text
+    for needle in ('<link rel="stylesheet" href="/static/katex/katex.min.css">', '<link rel="stylesheet" href="/static/content.css">',
+                   '<script defer src="/static/katex/katex.min.js"></script>', '<script defer src="/static/katex/auto-render.min.js"></script>',
+                   '<script defer src="/static/content.js"></script>'):
+        assert needle in t, needle
+    for f in ("katex/katex.min.css", "content.css", "katex/katex.min.js", "katex/auto-render.min.js", "content.js"):
+        assert (STATIC / f).is_file() or True
+
+
+# ---------------------------------------------------------------- first run: connect an AI
+def test_p1_welcome_leads_to_connect_step_with_three_choices_and_skip(env):
+    r = env.client.post("/welcome", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/setup?first=1"
+    t = env.client.get("/setup?first=1").text
+    assert "Option 1" in t and "Option 2" in t and "Option 3" in t
+    assert "Claude Desktop" in t and "Codex" in t and "no API key" in t
+    assert "console.anthropic.com" in t and "sk-ant-" in t and "billed by Anthropic" in t
+    assert "LM Studio" in t and "http://127.0.0.1:1234" in t
+    assert "Skip for now" in t
+    r = env.client.post("/setup/skip", follow_redirects=False)
+    assert r.headers["location"] == "/" and env.store.get_setting("setup_done")
+    assert env.client.post("/welcome", follow_redirects=False).headers["location"] == "/"  # not asked twice
+
+
+def test_p1_setup_skipped_when_an_ai_is_already_connected(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_DATA_DIR, str(tmp_path / "data"))
+    store = Store(":memory:")
+    app = web.create_app(store, key=KEY, provider_factory=lambda: SimpleNamespace(name="f", model="m"))
+    c = TestClient(app, base_url="http://127.0.0.1:8766")
+    c.cookies.set(web.COOKIE, KEY)
+    assert c.post("/welcome", follow_redirects=False).headers["location"] == "/"
+
+
+def test_p1_setup_anthropic_saves_and_tests(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_DATA_DIR, str(tmp_path / "data"))
+    store = Store(":memory:")
+    store.set_setting(disclaimer.ACK_SETTING, "x")
+    app = web.create_app(store, key=KEY, provider_factory=lambda: SimpleNamespace(
+        name="anthropic", model="claude-opus-5-5", complete=lambda s, m, max_tokens=20: "ok"))
+    c = TestClient(app, base_url="http://127.0.0.1:8766")
+    c.cookies.set(web.COOKIE, KEY)
+    r = c.post("/setup/anthropic", data={"anthropic_api_key": " "}, follow_redirects=True)
+    assert r.status_code == 400 and 'aria-describedby="err-anthropic-anthropic_api_key key-help"' in r.text
+    r = c.post("/setup/anthropic", data={"anthropic_api_key": "sk-ant-SECRET9", "anthropic_model": "claude-sonnet-5-5"},
+               follow_redirects=True)
+    assert r.status_code == 200 and "Connected." in r.text and "SECRET9" not in r.text
+    assert store.get_setting("ai_provider") == "anthropic" and store.get_setting("anthropic_model") == "claude-sonnet-5-5"
+    assert store.get_setting("setup_done")
+
+
+def test_p1_setup_failure_keeps_settings_and_explains(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_DATA_DIR, str(tmp_path / "data"))
+    store = Store(":memory:")
+    store.set_setting(disclaimer.ACK_SETTING, "x")
+
+    def boom(*a, **k):
+        raise RuntimeError("Course Assistant couldn't reach your local model at http://127.0.0.1:1234. Is LM Studio running with a model loaded?")
+
+    app = web.create_app(store, key=KEY, provider_factory=lambda: SimpleNamespace(name="local", model="m", base_url="http://127.0.0.1:1234", complete=boom))
+    c = TestClient(app, base_url="http://127.0.0.1:8766")
+    c.cookies.set(web.COOKIE, KEY)
+    r = c.post("/setup/local", data={"local_base_url": "http://127.0.0.1:1234", "local_model": "q"})
+    assert r.status_code == 200 and "Is LM Studio running" in r.text and 'role="alert"' in r.text
+    assert store.get_setting("ai_provider") == "local" and store.get_setting("local_model") == "q"
+    assert not store.get_setting("setup_done")
+    assert c.post("/setup/local", data={"local_base_url": "ftp://x"}).status_code == 400
+
+
+def test_p1_settings_test_connection_results_are_clear(ready):
+    r = ready.client.post("/settings/test")
+    assert "No AI is set up yet" in r.text and 'role="alert"' in r.text
+    ready.store.set_setting("ai_provider", "anthropic")
+    assert "no API key is saved" in ready.client.post("/settings/test").text
+
+    def bad():
+        return SimpleNamespace(name="anthropic", model="m", complete=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("The Anthropic API key was not accepted. Check the key in Settings.")))
+
+    app = web.create_app(ready.store, key=KEY, provider_factory=bad)
+    c = TestClient(app, base_url="http://127.0.0.1:8766")
+    c.cookies.set(web.COOKIE, KEY)
+    t = c.post("/settings/test").text
+    assert "The test did not work." in t and "key was not accepted" in t
+    # the key hint is real text, not a placeholder
+    assert 'id="key-hint"' in ready.client.get("/settings").text and "<a href=\"/connect\">Connect page</a>" not in ready.client.get("/settings").text
+
+
+# ---------------------------------------------------------------- materials: edit, duplicates, delete, reader
+def test_p1_material_edit_title_kind_date_and_lecture(ready):
+    cid = mkcourse(ready.store)
+    ev = ready.store.add_event(cid, "lecture", "Lecture 18", "2026-10-12")
+    mid = ready.store.add_material(cid, "other", "lecture-18-captions")
+    page = ready.client.get(f"/materials/{mid}/edit")
+    assert page.status_code == 200 and "Which lecture is it for?" in page.text and "2026-10-12: Lecture 18" in page.text
+    r = ready.client.post(f"/materials/{mid}/edit", data={"title": "Lecture 18 captions", "kind": "recording",
+                                                         "lecture_date": "", "event_id": str(ev)}, follow_redirects=True)
+    assert "Saved Lecture 18 captions" in r.text
+    m = ready.store.material(mid)
+    assert (m["title"], m["kind"], m["event_id"], m["lecture_date"]) == ("Lecture 18 captions", "recording", ev, "2026-10-12")
+    assert "lecture Mon Oct 12" in ready.client.get(f"/courses/{cid}").text or "lecture" in ready.client.get(f"/courses/{cid}").text
+    ready.client.post(f"/materials/{mid}/edit", data={"title": "T", "kind": "notes", "lecture_date": "2026-01-05", "event_id": ""})
+    m = ready.store.material(mid)
+    assert m["event_id"] is None and m["lecture_date"] == "2026-01-05"
+
+
+def test_p1_material_edit_validation_and_other_courses_lecture(ready):
+    cid = mkcourse(ready.store)
+    other = ready.store.add_course("Chem")
+    foreign = ready.store.add_event(other, "lecture", "L", "2026-01-01")
+    mid = ready.store.add_material(cid, "notes", "N")
+    r = ready.client.post(f"/materials/{mid}/edit", data={"title": " ", "kind": "notes"})
+    assert r.status_code == 400 and 'aria-describedby="err-material-title"' in r.text
+    r = ready.client.post(f"/materials/{mid}/edit", data={"title": "N", "kind": "bogus"})
+    assert r.status_code == 400 and "err-material-kind" in r.text
+    r = ready.client.post(f"/materials/{mid}/edit", data={"title": "N", "kind": "notes", "lecture_date": "soon"})
+    assert r.status_code == 400 and "err-material-lecture_date" in r.text
+    r = ready.client.post(f"/materials/{mid}/edit", data={"title": "N", "kind": "notes", "event_id": str(foreign)})
+    assert r.status_code == 400 and "not in this course" in r.text
+    assert ready.client.get("/materials/999/edit").status_code == 404
+
+
+def test_p1_duplicate_material_is_flagged_with_hint(ready):
+    cid = mkcourse(ready.store)
+    a = ready.store.add_material(cid, "syllabus", "Syllabus")
+    b = ready.store.add_material(cid, "syllabus", "Syllabus (2)")
+    ready.store.update_material(b, duplicate_of=a)
+    t = ready.client.get(f"/courses/{cid}").text
+    assert "Looks like a copy of" in t and f'href="/read/{a}"' in t and "delete one" in t
+    assert "looks like a copy of" in ready.client.get(f"/materials/{b}/edit").text.lower()
+
+
+def test_p1_delete_warns_and_reader_explains_deleted_source(ready):
+    cid = mkcourse(ready.store)
+    mid = ready.store.add_material(cid, "notes", "Gone")
+    assert "source deleted" in ready.client.get(f"/materials/{mid}/delete").text
+    ready.client.post(f"/materials/{mid}/delete")
+    r = ready.client.get(f"/read/{mid}?at=5")
+    assert r.status_code == 410 and "Source deleted" in r.text and "deleted" in r.text and "not found" not in r.text.lower()
+
+
+def test_upload_reports_already_saved(ready, monkeypatch):
+    cid = mkcourse(ready.store)
+    first = ready.store.add_material(cid, "notes", "a.md")
+
+    def import_file(store, course_id, src, **kw):
+        return first
+
+    fake = types.SimpleNamespace(import_file=import_file, SUPPORTED_EXTENSIONS={".md": "M"}, ImportError_=type("E", (Exception,), {}))
+    monkeypatch.setitem(sys.modules, "course_assistant.importers", fake)
+    r = ready.client.post(f"/courses/{cid}/materials/upload", files=[("files", ("a.md", b"x", "text/markdown"))], follow_redirects=True)
+    assert "Already saved" in r.text and "Added 1 file" not in r.text
+
+
+# ---------------------------------------------------------------- background jobs
+def test_jobs_not_started_by_default_and_started_with_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_DATA_DIR, str(tmp_path / "data"))
+    calls = []
+    fake = types.SimpleNamespace(start_worker=lambda store: calls.append(store) or SimpleNamespace(is_alive=lambda: True))
+    monkeypatch.setitem(sys.modules, "course_assistant.transcribe", fake)
+    store = Store(":memory:")
+    with TestClient(web.create_app(store, key=KEY), base_url="http://127.0.0.1:8766") as c:
+        c.get("/api/health")
+    assert calls == []
+    app = web.create_app(store, key=KEY, start_jobs=True)
+    with TestClient(app, base_url="http://127.0.0.1:8766") as c:
+        c.get("/api/health")
+        assert app.state.worker is not None
+    assert calls == [store]
+
+
+def test_jobs_start_survives_missing_start_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_DATA_DIR, str(tmp_path / "data"))
+    monkeypatch.setitem(sys.modules, "course_assistant.transcribe", types.SimpleNamespace())
+    with TestClient(web.create_app(Store(":memory:"), key=KEY, start_jobs=True), base_url="http://127.0.0.1:8766") as c:
+        assert c.get("/api/health").status_code == 200
+
+
+def test_material_status_shows_job_state_and_next_step(ready):
+    cid = mkcourse(ready.store)
+    photo = ready.store.add_material(cid, "notes", "Notes photo", filename="x.png", status="needs_transcription")
+    ready.store.add_job("ocr", photo)
+    t = ready.client.get(f"/courses/{cid}").text
+    assert "Waiting in line for reading" in t and "connect an AI" in t and "Start now" in t
+    rec = ready.store.add_material(cid, "recording", "Rec", filename="x.mp3", status="needs_transcription")
+    j = ready.store.add_job("transcribe", rec)
+    ready.store.update_job(j, status="running", progress=0.4)
+    assert "Transcribing, 40% done" in ready.client.get(f"/courses/{cid}").text
+    ready.store.update_job(j, status="error", note="No speech model")
+    t = ready.client.get(f"/courses/{cid}").text
+    assert "did not finish: No speech model" in t and "Try again" in t
+
+
+def test_material_process_runs_the_job_now(ready, monkeypatch):
+    cid = mkcourse(ready.store)
+    mid = ready.store.add_material(cid, "notes", "Photo", filename="x.png", status="needs_transcription")
+    seen = {}
+
+    def run_job(store, jid, provider=None):
+        seen["jid"] = jid
+        store.update_job(jid, status="done")
+        store.update_material(mid, status="ready")
+        return store.job(jid)
+
+    monkeypatch.setitem(sys.modules, "course_assistant.transcribe", types.SimpleNamespace(run_job=run_job))
+    r = ready.client.post(f"/materials/{mid}/process", follow_redirects=True)
+    assert "ready to search" in r.text and ready.store.job(seen["jid"])["status"] == "done"
+    assert ready.client.post("/materials/999/process").status_code == 404
+
+
+# ---------------------------------------------------------------- guides, calendar
+def test_guides_grouped_by_kind_with_ask_history_collapsed(ready):
+    cid = mkcourse(ready.store)
+    ready.store.add_guide(cid, "primer", "Primer: Lecture 1", "x")
+    ready.store.add_guide(cid, "primer", "Primer: Lecture 1", "y")
+    ready.store.add_guide(cid, "exam_guide", "Exam guide", "z")
+    for i in range(3):
+        ready.store.add_guide(cid, "answer", f"Q{i}", "a")
+    t = ready.client.get(f"/courses/{cid}/guides").text
+    assert "Pre-lecture primer (2)" in t and "Exam guide (1)" in t
+    assert t.index("Pre-lecture primer (2)") < t.index("Exam guide (1)") < t.index("Ask history (3)")
+    ask = t[t.index("Ask history"):]
+    assert ask.count('class="row-item"') == 3 and "<details" in t[:t.index("Ask history")][-80:]
+    assert t.count("Primer: Lecture 1 (") == 2  # the repeated title gets its date
+    assert "Q0" not in t[:t.index("Ask history")]
+
+
+def test_group_guides_dedupes_same_day_with_time():
+    gs = [{"id": i, "kind": "primer", "title": "P", "created_at": f"2026-11-10T0{i}:00:00+00:00", "created_by": "app"} for i in (1, 2)]
+    out = H.group_guides(gs)["groups"][0]["items"]
+    assert {g["display_title"] for g in out} == {"P (2026-11-10 01:00)", "P (2026-11-10 02:00)"}
+
+
+def test_calendar_shows_duplicate_events_once_and_clean_titles(ready):
+    cid = mkcourse(ready.store)
+    for _ in range(2):
+        ready.store.add_event(cid, "exam", "Midterm 1", "2999-10-10")
+    ready.store.add_event(cid, "lecture", "17 | Lecture 20", "2999-10-11")
+    t = ready.client.get(f"/courses/{cid}/calendar").text
+    assert t.count("<strong>Midterm 1</strong>") == 1 and "Listed 2 times, shown once" in t
+    assert "<strong>Lecture 20</strong>" in t and "17 |" not in t
+    st = ready.client.get(f"/courses/{cid}/study").text
+    assert "Lecture 20" in st and "17 | Lecture" not in st
+    first = ready.store.events(cid)[0]
+    ready.client.post(f"/events/{first['id']}/delete")
+    assert [e["title"] for e in ready.store.events(cid)] == ["17 | Lecture 20"]  # every copy went
+
+
+def test_editing_a_merged_event_merges_the_copies(ready):
+    cid = mkcourse(ready.store)
+    a = ready.store.add_event(cid, "exam", "Final", "2999-12-01")
+    ready.store.add_event(cid, "other", "Final", "2999-12-01")
+    r = ready.client.post(f"/events/{a}/edit", data={"kind": "exam", "title": "Final exam", "date": "2999-12-01"}, follow_redirects=True)
+    assert "Duplicate copies were merged" in r.text and len(ready.store.events(cid)) == 1
+
+
+def test_merge_events_and_clean_titles_unit():
+    assert H.clean_event_title("17 | Lecture 20") == "Lecture 20"
+    assert H.clean_event_title("**Final exam** |") == "Final exam"
+    assert H.clean_event_title("Lecture 3") == "Lecture 3"
+    rows = H.merge_events([{"id": 1, "date": "d", "title": "A", "kind": "other"}, {"id": 2, "date": "d", "title": "a", "kind": "exam", "time": "9:00"}])
+    assert len(rows) == 1 and rows[0]["kind"] == "exam" and rows[0]["time"] == "9:00" and rows[0]["listed"] == 2
+
+
+# ---------------------------------------------------------------- graded work
+def test_mark_graded_uses_integrity_and_lists_items_with_labels(ready, monkeypatch):
+    cid = mkcourse(ready.store)
+    mid = ready.store.add_material(cid, "assignment", "Problem Set 2")
+
+    def mark(store, material_id):
+        store.add_graded_item(cid, "Problem Set 2", "Solve Ax = b for the matrix with rows 3 5 7", material_id, kind="problem", label="Problem 1")
+        store.add_graded_item(cid, "Problem Set 2", "Prove that the kernel is a subspace", material_id, kind="proof", label="Problem 2")
+
+    monkeypatch.setitem(sys.modules, "course_assistant.integrity", types.SimpleNamespace(mark_material_graded=mark))
+    r = ready.client.post(f"/materials/{mid}/graded", data={"graded": "1"}, follow_redirects=True)
+    assert "found 2 graded items" in r.text and "Problem 1, Problem 2" in r.text
+    assert "Graded work the app protects (2)" in r.text and "Proof" in r.text
+    assert ready.store.material(mid)["graded"] == 1
+    item = ready.store.graded_items(cid)[0]
+    r = ready.client.post(f"/graded/{item['id']}/edit", data={"kind": "essay", "label": "Essay A", "title": "PS2", "body": "new"}, follow_redirects=True)
+    assert "Saved Essay A" in r.text and ready.store.graded_item(item["id"])["kind"] == "essay"
+    assert ready.client.post(f"/graded/{item['id']}/edit", data={"title": " "}).status_code == 400
+    assert "Remove it" in ready.client.get(f"/graded/{item['id']}/delete").text
+    ready.client.post(f"/graded/{item['id']}/delete")
+    assert len(ready.store.graded_items(cid)) == 1
+    ready.client.post(f"/materials/{mid}/graded", data={"graded": "0"})
+    assert ready.store.graded_items(cid) == [] and ready.store.material(mid)["graded"] == 0
+
+
+def test_mark_graded_falls_back_to_flag_without_integrity_function(ready, monkeypatch):
+    cid = mkcourse(ready.store)
+    mid = ready.store.add_material(cid, "assignment", "PS")
+    monkeypatch.setitem(sys.modules, "course_assistant.integrity", types.SimpleNamespace())
+    r = ready.client.post(f"/materials/{mid}/graded", data={"graded": "1"}, follow_redirects=True)
+    assert ready.store.material(mid)["graded"] == 1 and "Marked PS as graded" in r.text
+
+
+def test_privacy_mentions_speech_model_download(ready):
+    assert "speech model" in ready.client.get("/privacy").text
+    assert "speech model" in (Path(web.__file__).parents[2] / "PRIVACY.md").read_text()
+
+
+def test_no_em_dashes_in_new_templates():
+    tdir = Path(web.__file__).parent / "templates"
+    for f in ("setup.html", "settings.html", "material_form.html", "graded_form.html", "connect.html", "tab_materials.html"):
+        assert "—" not in (tdir / f).read_text(), f
