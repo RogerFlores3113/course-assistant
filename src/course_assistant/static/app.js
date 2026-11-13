@@ -78,7 +78,7 @@
   // ---- Long AI calls through htmx -------------------------------------------------------------------------
   // htmx overwrites detail.elt with the swapped-in element before afterSettle, so the element the person
   // actually used is recorded here, when the request starts.
-  var announced = false, clicked = null, clickedPath = "";
+  var announced = false, clicked = null, clickedPath = "", pressed = null;
   function busyText(elt) {
     var holder = elt && elt.closest && elt.closest("[data-busy]");
     return holder ? holder.getAttribute("data-busy") : "";
@@ -95,6 +95,7 @@
     var form = formOf(elt);
     if (form && form.getAttribute("data-inflight")) { e.preventDefault(); return; } // never send two AI calls
     announced = false;
+    pressed = document.activeElement && document.activeElement.tagName === "BUTTON" ? document.activeElement : null;
     clicked = elt;
     clickedPath = requestPath(e);
     var msg = busyText(elt);
@@ -124,7 +125,14 @@
   });
   // Nothing is announced here. The result (or the error) is announced once, from afterSettle or from failed().
   document.body.addEventListener("htmx:afterRequest", function (e) {
-    lock(formOf(requestElt(e)), false);
+    var form = formOf(requestElt(e));
+    lock(form, false);
+    // lock() disabled the button the person pressed. If nothing was swapped in (network error, timeout, 5xx), focus
+    // would be lost with it, so put it back on that button (or the form's first submit button).
+    var btn = pressed && document.body.contains(pressed) ? pressed : (form && document.body.contains(form) ? form.querySelector("button[type='submit'], button:not([type])") : null);
+    var active = document.activeElement;
+    if (btn && (!active || active === document.body || active === pressed || active.disabled)) { btn.disabled = false; btn.focus(); }
+    pressed = null;
     var b = document.getElementById("course-body"); if (b) { b.removeAttribute("aria-busy"); }
     hideToast();
   });

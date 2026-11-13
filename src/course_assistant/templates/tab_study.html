@@ -2,13 +2,16 @@
 <h2>Study</h2>
 {% if not ai.connected %}{% include "_connect_panel.html" %}{% endif %}
 {% if not has_materials %}<p class="flash warn">Add some materials first. The study tools only use what you have saved.</p>{% endif %}
-<div id="study-result" aria-live="polite">
+{% if next_exam %}<p class="exam-line"><strong>{{ next_exam.label }}</strong>: {{ next_exam.title }}, {{ next_exam.date | day }}. <a href="/courses/{{ course.id }}/study?exam={{ next_exam.id }}#exam-form">Start an exam guide</a></p>
+{% else %}<p class="exam-line muted"><a href="/courses/{{ course.id }}/calendar">Add your exam date</a> to see how many days are left.</p>{% endif %}
+{% set pre_exam = (request.query_params.get('exam', '') if request else '') %}
+<div id="study-result">
 {% if result_view %}<div class="card result"><h3>{{ result_guide.title }}</h3>{{ answer(result_view) }}<p><a href="/guides/{{ result_guide.id }}">Open this guide on its own page</a></p></div>{% endif %}
 {% if cards_made %}<p class="flash ok">{{ cards_note or ('Made ' ~ cards_made ~ ' flashcards.') }} <a href="/flashcards/{{ course.id }}">Start reviewing</a></p>{% endif %}
 </div>
 <div class="tools">
 {% macro tool_form(action, title, blurb, busy) %}
-<form method="post" action="/courses/{{ course.id }}/study/{{ action }}" hx-post="/courses/{{ course.id }}/study/{{ action }}" hx-target="#course-body" hx-swap="outerHTML" data-busy="{{ busy }}" class="card form tool">
+<form {% if action == 'exam' %}id="exam-form" {% endif %}method="post" action="/courses/{{ course.id }}/study/{{ action }}" hx-post="/courses/{{ course.id }}/study/{{ action }}" hx-target="#course-body" hx-swap="outerHTML" data-busy="{{ busy }}" class="card form tool">
   <h3>{{ title }}</h3><p class="muted">{{ blurb }}</p>{{ caller() }}
   <button class="btn" type="submit" {% if not ai.connected %}disabled aria-disabled="true"{% endif %}>{{ title }}</button></form>
 {% endmacro %}
@@ -17,7 +20,7 @@
 {% if study_opts is defined and study_opts %}{% for e in study_opts.next_lectures %}<option value="{{ e.id }}">{{ e.date }}: {{ e.label }}</option>{% endfor %}
 {% else %}{% for e in events if e.kind == 'lecture' and e.title|length > 3 %}<option value="{{ e.id }}">{{ e.date }}: {{ e.topics if e.topics and ('|' in e.title) else e.title.split('|')[-1]|trim }}</option>{% endfor %}{% endif %}</select></label>{% endcall %}
 {% call tool_form('exam', 'Exam guide', 'Everything since the last exam, organized.', 'Writing your exam guide. This can take up to a minute.') %}
-<label>Exam <select name="event_id"><option value="">Next exam</option>{% for e in events if e.kind in ('exam', 'quiz') and e.title|length > 3 %}<option value="{{ e.id }}">{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>
+<label>Exam <select name="event_id"><option value="">Next exam</option>{% for e in events if e.kind in ('exam', 'quiz') and e.title|length > 3 %}<option value="{{ e.id }}" {% if pre_exam == e.id|string %}selected{% endif %}>{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>
 {% if study_opts is defined and study_opts and study_opts.materials %}<fieldset class="pick"><legend>Only these materials (optional)</legend>
 {% for m in study_opts.materials %}<label class="check"><input type="checkbox" name="material_ids" value="{{ m.id }}"> {{ m.title }}</label>{% endfor %}
 <p class="muted">Leave all unticked to use what you saved for the lectures since the last exam.</p></fieldset>{% endif %}{% endcall %}

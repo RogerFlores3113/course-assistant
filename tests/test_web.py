@@ -757,7 +757,7 @@ def test_p1_duplicate_material_is_flagged_with_hint(ready):
     b = ready.store.add_material(cid, "syllabus", "Syllabus (2)")
     ready.store.update_material(b, duplicate_of=a)
     t = ready.client.get(f"/courses/{cid}").text
-    assert "Looks like a copy of" in t and f'href="/read/{a}"' in t and "delete one" in t
+    assert "Copy of" in t and f'href="/read/{a}"' in t and "delete one" in t
     assert "looks like a copy of" in ready.client.get(f"/materials/{b}/edit").text.lower()
 
 

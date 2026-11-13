@@ -332,11 +332,41 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             r["accent"] = course_color(c) if c else course_color(None)
         return [r for r in rows if r.get("course_id")]
 
+    def next_exam(cid: int) -> dict[str, Any] | None:
+        """The next calendar event of kind exam, with the days left. None when no exam is on the calendar."""
+        today = date.today()
+        try:
+            junk = _mod("study").is_junk_event
+        except (_Missing, AttributeError):
+            junk = lambda e: False  # noqa: E731
+        for e in store.events(cid, today.isoformat(), kinds=["exam"]):
+            if junk(e):
+                continue
+            d = parse_day(e["date"])
+            if not d:
+                continue
+            n = (d - today).days
+            when = "today" if n == 0 else "tomorrow" if n == 1 else f"in {n} days"
+            return {"id": e["id"], "title": clean_event_title(e["title"]), "date": e["date"], "days": n,
+                    "label": f"Exam {when}"}
+        return None
+
+    def latest_past_lecture(cid: int) -> dict[str, Any] | None:
+        today = date.today().isoformat()
+        try:
+            junk = _mod("study").is_junk_event
+        except (_Missing, AttributeError):
+            junk = lambda e: False  # noqa: E731
+        past = [e for e in merge_events(store.events(cid)) if e["kind"] == "lecture" and e["date"] <= today
+                and len(e["title"]) > 3 and not junk(e)]
+        return past[-1] if past else None
+
     def course_card(c: dict[str, Any]) -> dict[str, Any]:
         cid = c["id"]
         today = date.today().isoformat()
         nxt = store.events(cid, today)[:1]
         return {**c, "accent": course_color(c), "next_event": nxt[0] if nxt else None,
+                "next_exam": next_exam(cid), "catch_up": latest_past_lecture(cid),
                 "event_count": len(store.events(cid)), "guide_count": len(store.guides(cid)),
                 "due_cards": len(store.flashcards(cid, due_only=True))}
 
@@ -491,6 +521,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         if tab == "materials":
             ctx["materials"] = material_rows(cid)
             ctx["supported"] = _supported_formats()
+            ctx["lectures"] = list(reversed(lecture_choices(cid)))
             ctx["graded"] = graded_panel(cid)
         elif tab == "calendar":
             events = merge_events(store.events(cid))
@@ -507,6 +538,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             ctx["events"] = [e for e in merge_events(store.events(cid, today.isoformat())) if e["kind"] in ("lecture", "exam", "quiz")][:30]
             ctx["past_lectures"] = [e for e in merge_events(store.events(cid)) if e["kind"] == "lecture" and e["date"] <= today.isoformat()][-15:]
             ctx["has_materials"] = bool(store.materials(cid))
+            ctx["next_exam"] = next_exam(cid)
             ctx["due_cards"] = len(store.flashcards(cid, due_only=True))
             ctx["all_cards"] = len(store.flashcards(cid))
             opts = getattr(_safe_mod("study"), "study_form_options", None)
@@ -590,7 +622,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
     # ------------------------------------------------------------------ materials
     @app.post("/courses/{course_id}/materials/upload")
     async def upload_materials(request: Request, course_id: int, files: list[UploadFile] = File(default=[]),
-                               kind: str = Form(""), lecture_date: str = Form("")):
+                               kind: str = Form(""), lecture_date: str = Form(""), event_id: str = Form("")):
         require_course(course_id)
         files = [f for f in files if f.filename]
         if not files:
@@ -599,6 +631,13 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             return after(request, course_id, "materials", error="The lecture date should look like 2026-09-14.",
                          field=("upload", "lecture_date"))
         kind = kind if kind in MATERIAL_KINDS else ""
+        lecture = None
+        if event_id.strip():
+            lecture = store.event(int(event_id)) if event_id.strip().isdigit() else None
+            if not lecture or lecture["course_id"] != course_id or lecture["kind"] != "lecture":
+                return after(request, course_id, "materials", error="That lecture is not in this course. Pick one from the list.",
+                             field=("upload", "event_id"))
+            lecture_date = lecture_date.strip() or lecture["date"]
 
         def run() -> tuple[list[str], list[str], list[str]]:
             importers = _mod("importers")
@@ -619,6 +658,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                     known = {m["id"] for m in store.materials(course_id)}
                     mid = importers.import_file(store, course_id, tmp, kind=kind or None, original_name=name,
                                                 lecture_date=lecture_date)
+                    if mid not in known and lecture:
+                        store.update_material(mid, event_id=lecture["id"])
                     (already if mid in known else done).append(name)
                 except Exception as e:
                     shown = _friendly(e) if (isinstance(e, ValueError) or (bad and isinstance(e, bad))) else f"Could not read it ({_friendly(e)})"
@@ -633,7 +674,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             return after(request, course_id, "materials", error="The importer is not available yet.")
         parts = []
         if done:
-            parts.append(f"Added {len(done)} file{'s' if len(done) != 1 else ''}: {', '.join(done)}.")
+            parts.append(f"Added {len(done)} file{'s' if len(done) != 1 else ''}: {', '.join(done)}."
+                         + (f" Linked to {clean_event_title(lecture['title'])}." if lecture else ""))
         if already:
             parts.append(f"Already saved, nothing added: {', '.join(already)}.")
         return after(request, course_id, "materials", notice=" ".join(parts), error=" ".join(errors))
@@ -963,6 +1005,26 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
     STUDY_LABELS = {"primer": "Pre-lecture primer", "exam": "Exam guide", "map": "Concept map", "explain": "Explanation",
                     "practice": "Practice questions", "flashcards": "Flashcards", "missed": "What did I miss"}
 
+    def nothing_saved(cid: int, event_id: int | None, day: str) -> str:
+        """Said in the app, before any model call, when no saved material belongs to the lecture."""
+        ev = store.event(event_id) if event_id is not None else None
+        if ev and ev["course_id"] != cid:
+            return ""
+        try:
+            study = _mod("study")
+            if ev:
+                found = study.lecture_materials(store, cid, ev)
+            else:
+                found = [m for m in store.materials(cid) if m.get("lecture_date") == day and not m.get("graded")
+                         and not m.get("duplicate_of")]
+        except (_Missing, AttributeError):
+            return ""
+        if found:
+            return ""
+        name = clean_event_title(ev["title"]) if ev else day
+        return (f"Nothing is saved for {name} yet, so there is nothing to catch up on. Add its notes, slides or captions "
+                "on the Materials tab and link them to the lecture (the Which lecture is it for? choice), then try again.")
+
     @app.post("/courses/{course_id}/study/{action}")
     async def study_run(request: Request, course_id: int, action: str, topic: str = Form(""), depth: str = Form("standard"),
                         count: int = Form(0), event_id: str = Form(""), day: str = Form(""),
@@ -982,6 +1044,11 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             return after(request, course_id, "study", error="Type the topic you want explained.", field=(action, "topic"))
         if action == "practice" and not topic:
             return after(request, course_id, "study", error="Type the topic you want practice questions on.", field=(action, "topic"))
+
+        if action in ("missed", "primer") and (ev is not None or (action == "missed" and day.strip())):
+            note = nothing_saved(course_id, ev, day.strip())
+            if note:
+                return after(request, course_id, "study", error=note, field=(action, "event_id"))
 
         def run():
             study = _mod("study")
@@ -1211,16 +1278,19 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         return redirect(course_url(g["course_id"], "guides"), notice="Guide deleted.")
 
     # ------------------------------------------------------------------ flashcards
+    def id_list(value: str) -> list[int]:
+        return [int(x) for x in str(value).split(",") if x.strip().isdigit()][-200:]
+
     def cram_args(course_id: int, cram: str, material: str, done: str) -> tuple[bool, int | None, list[int]]:
         mat = int(material) if str(material).strip().isdigit() else None
         if mat is not None:
             m = store.material(mat)
             if not m or m["course_id"] != course_id:
                 mat = None
-        ids = [int(x) for x in str(done).split(",") if x.strip().isdigit()][-200:]
-        return str(cram) == "1", mat, ids
+        return str(cram) == "1", mat, id_list(done)
 
-    def flashcard_url(course_id: int, cram: bool, material: int | None, done: list[int] | None = None) -> str:
+    def flashcard_url(course_id: int, cram: bool, material: int | None, done: list[int] | None = None,
+                      missed: list[int] | None = None, only: list[int] | None = None) -> str:
         q = []
         if cram:
             q.append("cram=1")
@@ -1228,7 +1298,22 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             q.append(f"material={material}")
         if cram and done:
             q.append("done=" + ",".join(str(i) for i in done))
+        if cram and missed:
+            q.append("missed=" + ",".join(str(i) for i in missed))
+        if cram and only:
+            q.append("only=" + ",".join(str(i) for i in only))
         return f"/flashcards/{course_id}" + ("?" + "&".join(q) if q else "")
+
+    def card_topic(c: dict[str, Any]) -> str:
+        """The material (or deck) a card belongs to, for the weak-topic list."""
+        ch = store.chunk(c["chunk_id"]) if c.get("chunk_id") else None
+        if ch:
+            return ch["material_title"]
+        return (c.get("deck") or "").strip() or "Typed or other cards"
+
+    def card_source_href(c: dict[str, Any]) -> str:
+        ch = store.chunk(c["chunk_id"]) if c.get("chunk_id") else None
+        return f"/read/{ch['material_id']}?at={ch['id']}#c{ch['id']}" if ch else ""
 
     def next_exam_date(course_id: int) -> str:
         try:
@@ -1238,9 +1323,12 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             return ""
 
     @app.get("/flashcards/{course_id}", response_class=HTMLResponse)
-    def flashcards(request: Request, course_id: int, cram: str = "", material: str = "", done: str = ""):
+    def flashcards(request: Request, course_id: int, cram: str = "", material: str = "", done: str = "",
+                   missed: str = "", only: str = ""):
         course = require_course(course_id)
         cram_on, mat, done_ids = cram_args(course_id, cram, material, done)
+        missed_ids = [i for i in id_list(missed) if i in done_ids]
+        only_ids = id_list(only)
         due = store.flashcards(course_id, due_only=True)
         total = len(store.flashcards(course_id))
         if cram_on:
@@ -1248,6 +1336,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                 queue = _mod("study").cram_queue(store, course_id, material_id=mat)
             except _Missing:
                 queue = []
+            if only_ids:
+                queue = [c for c in queue if c["id"] in only_ids]
             queue = [c for c in queue if c["id"] not in done_ids]
             shown, count, position = (queue[0] if queue else None), len(queue) + len(done_ids), len(done_ids) + 1
         else:
@@ -1258,7 +1348,27 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             shown, count, position = (due[0] if due else None), len(due), 1
         mats = [{"id": m["id"], "title": m["title"]} for m in store.materials(course_id)
                 if not m.get("duplicate_of") and not m.get("graded")]
+        material_total = None
+        if mat is not None:
+            chunk_ids = {c["id"] for c in store.chunks_of(mat)}
+            mtitle = (store.material(mat) or {}).get("title", "")
+            material_total = len([c for c in store.flashcards(course_id)
+                                  if c.get("chunk_id") in chunk_ids or (mtitle and c.get("deck") == mtitle)])
+        summary = None
+        if cram_on and shown is None and done_ids:
+            cards = {i: store.flashcard(i) for i in done_ids}
+            wrong = [cards[i] for i in missed_ids if cards.get(i)]
+            weak: dict[str, int] = {}
+            for c in wrong:
+                weak[card_topic(c)] = weak.get(card_topic(c), 0) + 1
+            summary = {"total": len([c for c in cards.values() if c]), "wrong": len(wrong),
+                       "right": len([c for c in cards.values() if c]) - len(wrong),
+                       "weak": sorted(weak.items(), key=lambda kv: (-kv[1], kv[0])),
+                       "redo_url": flashcard_url(course_id, True, mat, only=[c["id"] for c in wrong]) if wrong else "",
+                       "again_url": flashcard_url(course_id, True, mat)}
         return page(request, "flashcards.html", course=course, accent=course_color(course), card=shown,
+                    summary=summary, material_total=material_total, missed=",".join(str(i) for i in missed_ids), only=",".join(str(i) for i in only_ids),
+                    source_href=card_source_href(shown) if shown else "",
                     due=len(due), total=total, cram=cram_on, material_id=mat, done=",".join(str(i) for i in done_ids),
                     count=count, position=position, filter_materials=mats,
                     toggle_url=flashcard_url(course_id, not cram_on, mat),
@@ -1267,10 +1377,11 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
 
     @app.post("/flashcards/{course_id}/review")
     def flashcard_review(course_id: int, card_id: int = Form(...), grade: str = Form(...), cram: str = Form(""),
-                         material: str = Form(""), done: str = Form("")):
+                         material: str = Form(""), done: str = Form(""), missed: str = Form(""), only: str = Form("")):
         require_course(course_id)
         cram_on, mat, done_ids = cram_args(course_id, cram, material, done)
-        back = flashcard_url(course_id, cram_on, mat, done_ids)
+        missed_ids, only_ids = id_list(missed), id_list(only)
+        back = flashcard_url(course_id, cram_on, mat, done_ids, missed_ids, only_ids)
         card = store.flashcard(card_id)
         if not card or card["course_id"] != course_id or grade not in ("again", "hard", "good", "easy"):
             return redirect(back, error="That card could not be graded.")
@@ -1291,7 +1402,51 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             return redirect(back, error="Flashcard review is not available yet.")
         if cram_on:
             done_ids.append(card_id)
-        return redirect(flashcard_url(course_id, cram_on, mat, done_ids))
+            if grade in ("again", "hard"):
+                missed_ids.append(card_id)
+        return redirect(flashcard_url(course_id, cram_on, mat, done_ids, missed_ids, only_ids))
+
+    # -- edit and delete a card (plain pages, no script needed)
+    def card_or_404(card_id: int) -> dict[str, Any]:
+        c = store.flashcard(card_id)
+        if not c:
+            raise _NotFound("That card was not found. It may already be deleted.")
+        return c
+
+    def card_form(request: Request, c: dict[str, Any], *, status_code: int = 200, **ctx: Any):
+        course = require_course(c["course_id"])
+        return page(request, "card_form.html", status_code=status_code, card=c, course=course,
+                    accent=course_color(course), page_title="Edit flashcard", **ctx)
+
+    @app.get("/flashcards/card/{card_id}/edit", response_class=HTMLResponse)
+    def card_edit(request: Request, card_id: int):
+        return card_form(request, card_or_404(card_id))
+
+    @app.post("/flashcards/card/{card_id}/edit")
+    def card_update(request: Request, card_id: int, front: str = Form(""), back: str = Form("")):
+        c = card_or_404(card_id)
+        shown = {**c, "front": front, "back": back}
+        for field, value, label in (("front", front, "front"), ("back", back, "back")):
+            if not value.strip():
+                msg = f"The {label} of the card cannot be empty."
+                return card_form(request, shown, status_code=400, error=msg,
+                                 field_error={"form": "card", "field": field, "message": msg})
+        store.update_flashcard(card_id, front=front.strip(), back=back.strip())
+        return redirect(f"/flashcards/{c['course_id']}", notice="Card saved.")
+
+    @app.get("/flashcards/card/{card_id}/delete", response_class=HTMLResponse)
+    def card_delete_confirm(request: Request, card_id: int):
+        c = card_or_404(card_id)
+        return page(request, "confirm.html", title="Delete this flashcard?",
+                    message=f"The card \"{c['front'][:120]}\" will be deleted for good. Your materials are not touched.",
+                    action=f"/flashcards/card/{card_id}/delete", button="Delete card",
+                    back=f"/flashcards/{c['course_id']}", page_title="Delete flashcard")
+
+    @app.post("/flashcards/card/{card_id}/delete")
+    def card_delete(card_id: int):
+        c = card_or_404(card_id)
+        store.delete_flashcard(card_id)
+        return redirect(f"/flashcards/{c['course_id']}", notice="Card deleted.")
 
     def safe_next(value: str, default: str = "/settings") -> str:
         """Only addresses inside this app (a path, never another site)."""
