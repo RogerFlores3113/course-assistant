@@ -1246,7 +1246,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
     sticky = None if graded else (matched if (matched and (matched.get("id") or matched.get("members"))) else None) or \
         integrity.sticky_item(store, course_id, question)
     sources: list[Source] = []
-    fixed, caught, answer = False, None, None
+    fixed, caught, answer, reworded = False, None, None, None
     if not graded:
         sources = integrity.search_safe(store, course_id, question, limit=limit)
         if integrity.is_logistics(question):
@@ -1279,6 +1279,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
                 again = integrity.check_reply(store, course_id, question, raw2, force_item=sticky or graded, sources=sources)
                 if not again:
                     caught, graded, raw = graded, None, raw2
+                    reworded = caught
                 else:
                     answer = integrity.caught_fixed(store, course_id, question, graded, provider)
                     graded = None
@@ -1299,6 +1300,9 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
                                 **({"model_calls": 0} if why == "soft_essay" else {}))
     elif not fixed:
         answer = parse_answer(raw, sources)
+        if reworded:  # the retry was thinner than the first reply: never silently
+            answer.blocks.insert(0, Block("text", integrity.reworded_note(reworded), []))
+            answer.body_md = render_body(answer.blocks)
         title = question if len(question) <= 80 else question[:77].rstrip() + "..."
         data = {"blocks": block_dicts(answer.blocks), "used": answer.used, "outside": answer.outside, "depth": normalize_depth(depth),
                 "no_sources": not sources, "mode": "answer", "not_covered": answer.not_covered}
