@@ -28,8 +28,8 @@ def main(exe: str) -> None:
     config.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}), encoding="utf-8")
 
     for attempt in (1, 2):
-        done = subprocess.run([exe, "connect", "claude"], env=env, capture_output=True, text=True, timeout=180)
-        print(f"$ {exe} connect claude (run {attempt})\n{done.stdout}{done.stderr}")
+        done = subprocess.run([exe, "connect", "claude", "--yes"], env=env, capture_output=True, text=True, timeout=180)
+        print(f"$ {exe} connect claude --yes (run {attempt})\n{done.stdout}{done.stderr}")
         assert done.returncode == 0, f"connect claude exited with {done.returncode}"
         servers = json.loads(config.read_text(encoding="utf-8"))["mcpServers"]
         assert "other" in servers, "connect removed another server"
