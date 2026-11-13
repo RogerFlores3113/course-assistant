@@ -313,7 +313,7 @@ def test_web_end_to_end(tmp_path, monkeypatch):
     store.add_graded_item(cid, "HW 3 Problem 1", GRADED_PROBLEM)
     before = len(store.chat_messages(cid))
     r = c.post(f"/courses/{cid}/ask", data={"question": GRADED_PROBLEM})
-    assert "Worked twin problem" in r.text and len(store.chat_messages(cid)) == before + 2
+    assert "data-routing-note" in r.text and "Worked twin problem.</strong>" not in r.text and len(store.chat_messages(cid)) == before + 2
 
 
 def test_web_find_course_site_search_uses_offerings_module(tmp_path, monkeypatch):

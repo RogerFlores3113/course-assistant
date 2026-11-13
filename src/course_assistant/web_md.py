@@ -38,6 +38,15 @@ def safe_url(url: str) -> str | None:
     return url if SAFE_URL_RE.match(url) else None
 
 
+def clean_label(title: str, label: str) -> str:
+    """The location label to show after a title: empty when the title already says it ("Diagonalization" and
+    "Diagonalization"). One rule for the citation chips and the Sources list so both read the same."""
+    label, title = (label or "").strip(), (title or "").strip()
+    if label and (label == title or title.endswith(", " + label) or title.endswith(": " + label)):
+        return ""
+    return label
+
+
 def source_map(sources: list[dict[str, Any]] | None) -> dict[int, dict[str, Any]]:
     """Number -> {title, label, href}. Accepts retrieval Sources and saved guide sources."""
     out: dict[int, dict[str, Any]] = {}
@@ -46,9 +55,9 @@ def source_map(sources: list[dict[str, Any]] | None) -> dict[int, dict[str, Any]
             n = int(s.get("n") or i)
         except (TypeError, ValueError):
             n = i
-        out[n] = {"n": n, "title": s.get("title") or s.get("material_title") or "Material",
-                  "label": s.get("label") or s.get("loc_label") or "", "href": s.get("href") or "",
-                  "past": s.get("past") or ""}
+        title = s.get("title") or s.get("material_title") or "Material"
+        out[n] = {"n": n, "title": title, "label": clean_label(title, s.get("label") or s.get("loc_label") or ""),
+                  "href": s.get("href") or "", "past": s.get("past") or ""}
     return out
 
 
@@ -117,16 +126,39 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
     return text
 
 
-def _list(lines: list[str], i: int, sources) -> tuple[str, int]:
-    """Render the list starting at lines[i]; returns html and the next line index."""
+def _next_item(lines: list[str], i: int) -> int | None:
+    """Index of the next non-blank line after i when only blank lines separate it from i, else None."""
+    j = i
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    return j if j > i and j < len(lines) else None
+
+
+def _list(lines: list[str], i: int, sources, state: dict | None = None) -> tuple[str, int]:
+    """Render the list starting at lines[i]; returns html and the next line index.
+    Items of one kind separated by blank lines are one loose list. A numbered list keeps the number it starts at
+    (start="5") and, when it starts at 1 right after another numbered list (a details block in between), carries
+    the running count on through state["next"]."""
     first = ITEM_RE.match(lines[i])
     base = len(first.group(1).expandtabs(4))
     ordered = first.group(2)[0].isdigit()
     tag = "ol" if ordered else "ul"
-    out = [f"<{tag}>"]
+    start_no = 1
+    if ordered:
+        start_no = int(re.match(r"\d+", first.group(2)).group(0))
+        if state is not None and start_no == 1 and state.get("next"):
+            start_no = state["next"]
+    out = [f"<{tag}" + (f' start="{start_no}"' if ordered and start_no != 1 else "") + ">"]
+    count = 0
     while i < len(lines):
         m = ITEM_RE.match(lines[i])
         if not m:
+            nxt = _next_item(lines, i) if not lines[i].strip() else None
+            nm = ITEM_RE.match(lines[nxt]) if nxt is not None else None
+            if nm and len(nm.group(1).expandtabs(4)) >= base and \
+                    (len(nm.group(1).expandtabs(4)) > base or nm.group(2)[0].isdigit() == ordered):
+                i = nxt  # blank lines between items: still one list
+                continue
             break
         indent = len(m.group(1).expandtabs(4))
         if indent < base:
@@ -139,8 +171,11 @@ def _list(lines: list[str], i: int, sources) -> tuple[str, int]:
                 out.append(f"<li>{sub}</li>")
             continue
         out.append(f"<li>{inline(m.group(3), sources)}</li>")
+        count += 1
         i += 1
     out.append(f"</{tag}>")
+    if state is not None:
+        state["next"] = (start_no + count) if ordered else None
     return "".join(out), i
 
 
@@ -213,7 +248,9 @@ def _normalize(lines: list[str]) -> list[str]:
     return out
 
 
-def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1) -> str:
+def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1, state: dict | None = None) -> str:
+    if state is None:
+        state = {}
     out: list[str] = []
     i = 0
     para: list[str] = []
@@ -222,9 +259,13 @@ def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1) -> str:
         if para:
             out.append(_paragraph(para, sources))
             para.clear()
+            state["next"] = None
 
     while i < len(lines):
         line = lines[i]
+        if line.strip() and not ITEM_RE.match(line) and not DETAILS_OPEN_RE.match(line) \
+                and not DETAILS_CLOSE_RE.match(line) and not SUMMARY_RE.match(line):
+            state["next"] = None  # anything but a list or a details block ends the numbering run
         fm = FENCE_RE.match(line)
         if fm:
             flush()
@@ -300,7 +341,7 @@ def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1) -> str:
             continue
         if ITEM_RE.match(line):
             flush()
-            html, i = _list(lines, i, sources)
+            html, i = _list(lines, i, sources, state)
             out.append(html)
             continue
         if line.lstrip().startswith(">"):
@@ -338,19 +379,22 @@ def shallowest_heading(*texts: str) -> int | None:
 
 
 def render(md: str, sources: list[dict[str, Any]] | dict[int, dict[str, Any]] | None = None,
-           *, heading_offset: int = 1, base_level: int | None = None, shallowest: int | None = None) -> Markup:
+           *, heading_offset: int = 1, base_level: int | None = None, shallowest: int | None = None,
+           numbering: dict | None = None) -> Markup:
     """Markdown to safe HTML.
 
     With base_level the shallowest heading in the text becomes that level, and the others keep their distance
     from it: render(md, base_level=2) under a page h1 gives h2, h3, ... whether the model wrote # or ##.
     Pass shallowest (from shallowest_heading over every part of one answer) when md is only one piece of it.
-    Without base_level, heading_offset moves every heading down by that many levels (# is h2 at offset 1)."""
+    Without base_level, heading_offset moves every heading down by that many levels (# is h2 at offset 1).
+    numbering is a dict shared between render calls for the parts of one answer, so a numbered list that starts
+    at 1 right after another one (a part split off between them) goes on counting."""
     smap = sources if isinstance(sources, dict) else source_map(sources)
     if base_level is not None:
         top = shallowest if shallowest is not None else shallowest_heading(md)
         heading_offset = base_level - (top or 1)
     lines = _normalize((md or "").replace("\r\n", "\n").split("\n"))
-    return Markup(_blocks(lines, smap, 0, heading_offset))
+    return Markup(_blocks(lines, smap, 0, heading_offset, numbering))
 
 
 def count_marks(md: str) -> tuple[int, int]:
@@ -386,18 +430,82 @@ def _tex(expr: str) -> str:
     return t.replace("*", r" \cdot ").replace("\u00d7", r" \times ").replace("\u00b7", r" \cdot ")
 
 
+# Raw TeX that reached the text without dollar signs (slide text: \hat{x} = (A^TA)^{-1}A^Tb). A run is a stretch of
+# words that hold a backslash command, a power or a subscript, with the lone letters, digits and signs between them.
+_TEX_STRONG = re.compile(r"\\[A-Za-z]+|[A-Za-z0-9)}]\^|[A-Za-z0-9)}]_[{A-Za-z0-9]|\^\{|\^[-0-9A-Za-z]")
+_TEX_WEAK = re.compile(r"^[(\[]?[A-Za-z0-9]?[)\]]?[=+\-*/<>,.;]?$|^[=+\-*/<>]$|^\(?[A-Za-z]\)?[,.;]?$|^[0-9]+(?:\.[0-9]+)?$")
+
+
+def _balanced(expr: str) -> bool:
+    depth = 0
+    for ch in expr:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _tex_runs(line: str) -> str:
+    """Wrap runs of raw TeX in $...$. Lines with dollar signs, code or no TeX at all are returned unchanged."""
+    if "$" in line or "`" in line or not _TEX_STRONG.search(line):
+        return line
+    parts = re.split(r"(\s+)", line)
+    toks = [(k, t) for k, t in enumerate(parts) if t and not t.isspace()]
+    kinds = []
+    for _, t in toks:
+        core = t.rstrip(".,;:")
+        kinds.append("strong" if _TEX_STRONG.search(core) and not re.search(r"[A-Za-z]{4,}(?<!\\)\b(?![{^_])", re.sub(r"\\[A-Za-z]+|\{[^}]*\}", "", core)) else
+                     "weak" if _TEX_WEAK.match(core) else "word")
+    out_parts = list(parts)
+    i = 0
+    while i < len(toks):
+        if kinds[i] == "word":
+            i += 1
+            continue
+        j = i
+        while j < len(toks) and kinds[j] != "word":
+            j += 1
+        run = list(range(i, j))
+        def bare(r: int) -> bool:  # an operator or number alone at the edge of a run is not part of the formula
+            return re.fullmatch(r"[=+\-*/<>,.;]+", toks[r][1].rstrip(".,;:") or "-") is not None
+        while run and kinds[run[0]] == "weak" and bare(run[0]):
+            run.pop(0)
+        while run and kinds[run[-1]] == "weak" and bare(run[-1]):
+            run.pop()
+        if run and any(kinds[r] == "strong" for r in run):
+            first, last = toks[run[0]][0], toks[run[-1]][0]
+            text = "".join(parts[first:last + 1])
+            trail = ""
+            while text and text[-1] in ".,;:":
+                trail = text[-1] + trail
+                text = text[:-1]
+            if _balanced(text):
+                out_parts[first] = "$" + text + "$" + trail
+                for k in range(first + 1, last + 1):
+                    out_parts[k] = ""
+        i = j
+    return "".join(out_parts)
+
+
 def _math_line(line: str) -> str:
     if "$" in line or "`" in line or line.lstrip().startswith(("#", "|", ">")):
         return line
     if "=" in line:  # *C*1*V*1 = *C*2*V*2: the asterisks were italics for variable names
         line = re.sub(r"(?<![A-Za-z_*])\*([A-Za-z]{1,2})\*(?![A-Za-z*])", r"\1", line)
+        line = re.sub(r"\*\*([A-Za-z]{1,2})\*(?=\d)", r"\1", line)  # **n*1: bold marks glued to a variable name
+        if line.count("*") == 1:  # one asterisk left with nothing to close it
+            line = re.sub(r"\*(?=\w)", "", line)
 
     def sub(m: re.Match) -> str:
         e = m.group(1)
-        if "=" not in e or not re.search(r"/|[A-Za-z]\d|\^", e):
+        if "=" not in e or not re.search(r"/|[A-Za-z]\d|\^", e) or not _balanced(e):
             return e
         return f"${_tex(e)}$"
-    return _EQ.sub(sub, line)
+    line = _EQ.sub(sub, line)
+    return _tex_runs(line)
 
 
 def mathify(md: str) -> str:
@@ -416,6 +524,23 @@ def mathify(md: str) -> str:
     return "\n".join(out)
 
 
+_EMPTY_PARENS = re.compile(r"[ \t]*\(\s*\)")
+
+
+def _drop_figure_artifacts(md: str) -> str:
+    """The importer leaves "()" where a figure reference was ("Thomas Jefferson ()"); the reader hides them."""
+    out: list[str] = []
+    fence: str | None = None
+    for line in (md or "").replace("\r\n", "\n").split("\n"):
+        fm = FENCE_RE.match(line)
+        if fm and (fence is None or fm.group(2) == fence):
+            fence = None if fence else fm.group(2)
+            out.append(line)
+        else:
+            out.append(line if fence or "`" in line else _EMPTY_PARENS.sub("", line))
+    return "\n".join(out)
+
+
 def render_reader(md: str, *, base_level: int = 3, math: bool = True) -> Markup:
     """The textbook reader's rendering: markdown emphasis plus recognisable equations as math."""
-    return render(mathify(md) if math else md, base_level=base_level)
+    return render(mathify(_drop_figure_artifacts(md)) if math else md, base_level=base_level)

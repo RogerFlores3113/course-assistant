@@ -158,7 +158,9 @@ def test_f6_reader_math_and_pdf_page_link(ready):
 
 
 def test_f6_missing_material_says_passage_no_longer_there(ready):
-    r = ready.client.get("/read/99999")
+    mid = ready.store.add_material(ready.store.add_course("Gone"), "notes", "Gone soon")
+    ready.store.delete_material(mid)
+    r = ready.client.get(f"/read/{mid}")
     assert r.status_code == 410 and "This passage is no longer in your materials" in r.text
 
 

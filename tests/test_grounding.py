@@ -202,7 +202,11 @@ def test_outside_labelling_skips_structural_lines_p1_p3():
 
 def test_not_covered_lines_become_the_note_p3():
     a = grounding.parse_answer("The materials do not cover week 8.\n\nDoors close at noon [1].", srcs(1))
-    assert [b.md for b in a.blocks] == ["Doors close at noon [1]."] and not a.not_covered  # cycle 3: cited, so covered
+    # cycle 4: the honest line stays visible as plain text, next to the cited answer
+    assert [b.md for b in a.blocks] == ["The materials do not cover week 8.", "Doors close at noon [1]."]
+    assert [b.kind for b in a.blocks] == ["text", "text"] and not a.not_covered
+    only = grounding.parse_answer("The materials do not cover week 8.", srcs(1))
+    assert only.not_covered and not only.blocks  # nothing cited: the page's own note says it
     b = grounding.parse_answer("Real claim [1].", srcs(1))
     assert not b.not_covered
     c = grounding.parse_answer("<outside>The notes don't mention this at all.</outside>", srcs(1))

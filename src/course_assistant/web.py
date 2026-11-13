@@ -30,13 +30,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__, disclaimer, paths
+from . import __version__, disclaimer, locations, paths
 from .store import EVENT_KINDS, GUIDE_KINDS, MATERIAL_KINDS, Store, now_iso
 from .web_md import render as render_md
-from .web_md import render_reader
+from .web_md import render_reader, source_map as _source_map
 from .web_helpers import (DEPTHS, MODELS, PALETTE, TABS, THEMES, accent_style, answer_view, chunk_range_label, clean_color,
                           clean_event_title, concept_graph, course_color, day_label, enrich_sources, group_guides, guide_view,
-                          merge_events, parse_day, time_label, week_label, week_start)
+                          merge_events, parse_day, snippet_text, time_label, week_label, week_start)
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -103,6 +103,12 @@ def _friendly(e: Exception) -> str:
 def create_app(store: Store, *, key: str | None = None, provider_factory=None, start_jobs: bool = False) -> FastAPI:
     """start_jobs=False (the default, so tests never spawn threads); `course-assistant serve` passes True and the app
     then runs the background worker that reads photos of notes and transcribes recordings."""
+    try:  # remember which materials were deleted, so the reader can tell "deleted" (410) from "never existed" (404)
+        store._exec("CREATE TABLE IF NOT EXISTS deleted_materials (id INTEGER PRIMARY KEY)")
+        store._exec("CREATE TRIGGER IF NOT EXISTS materials_deleted AFTER DELETE ON materials "
+                    "BEGIN INSERT OR IGNORE INTO deleted_materials(id) VALUES (old.id); END")
+    except Exception:  # noqa: BLE001 - the reader falls back to a guess from the ids in use
+        pass
     key = key or paths.app_key()
     res = paths.resource_dir()
 
@@ -139,6 +145,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
     env.filters["day"] = day_label
     env.filters["clean"] = clean_event_title
     env.filters["clock"] = time_label
+    env.filters["snippet"] = snippet_text
     env.filters["quote"] = lambda s: quote(str(s), safe="")
     app.mount("/static", StaticFiles(directory=str(res / "static")), name="static")
 
@@ -1270,9 +1277,32 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         return after(request, course_id, "offerings", notice="Removed from the list.")
 
     # ------------------------------------------------------------------ reader and files
+    def _was_material(material_id: int) -> bool:
+        """True when this id belonged to a material that was deleted: it is below the newest id in use (ids are not
+        reused below it), or a saved answer, guide or chat message still cites it."""
+        try:
+            if store._row("SELECT 1 AS x FROM deleted_materials WHERE id = ?", (material_id,)):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        top = store._row("SELECT MAX(id) AS m FROM materials")
+        if material_id <= int((top or {}).get("m") or 0):
+            return True
+        needle = f'"material_id": {int(material_id)}'
+        for table in ("guides", "chat_messages"):
+            try:
+                if store._row(f"SELECT 1 AS x FROM {table} WHERE sources_json LIKE ? LIMIT 1", (f"%{needle}%",)):
+                    return True
+            except Exception:  # noqa: BLE001 - a missing table just means no trace
+                continue
+        return False
+
     @app.get("/read/{material_id}", response_class=HTMLResponse)
     def reader(request: Request, material_id: int, at: str | None = None):
         m = store.material(material_id)
+        if not m and not _was_material(material_id):
+            return friendly_page(request, 404, "No such passage", "There is no passage with that address. The link may "
+                                 "be mistyped. Go back to your course to open your materials.")
         if not m:
             return friendly_page(request, 410, "This passage is no longer in your materials",
                                  "This passage is no longer in your materials. It came from a material that has been "
@@ -1296,6 +1326,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         for c in chunks:
             c["seek"] = int(float(c["loc_start"])) if c["loc_kind"] == "time" and re.match(r"^\d+(\.\d+)?$", str(c["loc_start"])) else None
             c["range_label"] = chunk_range_label(c)
+            c["start_label"] = locations.time_label(float(c["loc_start"])) if c["seek"] is not None else ""
             c["html"] = render_reader(c["text"], base_level=3, math=not code_like)
         file_frag = ""
         if at_id and Path(m.get("filename") or m.get("original_name") or "").suffix.lower() == ".pdf":
@@ -1336,7 +1367,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             raise _NotFound("That guide was not found.")
         course = store.course(g["course_id"])
         graph = concept_graph(g["data"]) if g["kind"] == "concept_map" else None
-        smap = {s.get("n", i): s for i, s in enumerate(enrich_sources(store, g.get("sources")), start=1)}
+        smap = _source_map(enrich_sources(store, g.get("sources")))
         tree = bool(graph and not graph.get("empty"))
         return page(request, "guide.html", g=g, course=course, accent=course_color(course),
                     view=guide_view(g, store=store, tree_shown=tree),
