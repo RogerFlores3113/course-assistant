@@ -35,8 +35,8 @@
 <label>How many <input type="number" name="count" min="1" max="40" value="12"></label>{% endcall %}
 {% call tool_form('missed', 'What did I miss?', 'A catch-up on a lecture you skipped.', 'Writing your catch-up.') %}
 <label>Lecture <select name="event_id"><option value="">Choose a lecture</option>
-{% if study_opts is defined and study_opts %}{% for e in study_opts.past_lectures %}<option value="{{ e.id }}">{{ e.date }}: {{ e.label }}</option>{% endfor %}
-{% else %}{% for e in past_lectures if e.title|length > 3 %}<option value="{{ e.id }}">{{ e.date }}: {{ e.topics if e.topics and ('|' in e.title) else e.title.split('|')[-1]|trim }}</option>{% endfor %}{% endif %}</select></label>
+{% if study_opts is defined and study_opts %}{% for e in study_opts.past_lectures|reverse %}<option value="{{ e.id }}">{{ e.date }}: {{ e.label }}</option>{% endfor %}
+{% else %}{% for e in past_lectures|reverse if e.title|length > 3 %}<option value="{{ e.id }}">{{ e.date }}: {{ e.topics if e.topics and ('|' in e.title) else e.title.split('|')[-1]|trim }}</option>{% endfor %}{% endif %}</select></label>
 <label>Or a date <input type="date" name="day"></label>{% endcall %}
 </div>
 {% if all_cards %}<p><a class="btn ghost" href="/flashcards/{{ course.id }}">Review flashcards ({{ due_cards }} due)</a>
