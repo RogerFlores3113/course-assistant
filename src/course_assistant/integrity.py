@@ -3546,7 +3546,7 @@ def twin_fallback(name: str, reason: str, check: bool = False, practice_button: 
 
 
 def twin(store, course_id: int, question: str, provider, graded: dict, why: str = "", *, model_calls: int = 2,
-         keep_sources: list[dict] | None = None) -> Answer:
+         keep_sources: list[dict] | None = None, keep_text: str = "") -> Answer:
     """Answer graded work safely and save a guide of kind 'twin' (data["mode"] is 'twin' or 'concepts'). why is how it
     was routed here (match, marker, sticky, key, reply, soft_essay); it only changes the sentence the page shows."""
     title = (graded.get("title") or "this item").strip()
@@ -3618,6 +3618,14 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
         blocks, used = _concepts_reply(provider, store, course_id, graded, kind, src_block, problem_text, question,
                                        depth_rule, len(sources), sources)
 
+    if keep_text and keep_sources and kind == "essay" and not feedback and mode != "twin" and not fell_back:
+        kept = essay.passing_sentences({"title": graded.get("title", ""), "body": body or problem_text}, keep_text, question,
+                                       keep_sources[:6])
+        if kept:  # the replaced answer's cited reading notes that passed on their own stay on the page
+            kb, ku = grounding.parse_blocks("From my first answer, these parts stay close to your materials:\n\n" + " ".join(kept),
+                                            len(sources))
+            blocks = list(blocks) + list(kb)
+            used = sorted(set(used) | set(ku))
     if mode == "twin":
         note = NOTE_CHECK_TWIN.format(title=title) if check else ""
         lead = [Block("text", "**Twin problem**\n\n" + twin_problem, []),

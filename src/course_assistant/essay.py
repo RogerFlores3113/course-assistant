@@ -648,6 +648,9 @@ _COACH_IMP = re.compile(r"(?:^|[,;]\s*(?:so|then)\s+)(?:write|name|take|make|add
                         r"rewrite|explain|include|keep|avoid|limit|focus|choose|decide|stick)\b", re.I)
 
 
+_THESIS_TALK = re.compile(r"^\W*(?:it|this|that|which)\s+(?:needs?|should|must|has\s+to|lacks?|requires?|is\s+(?:too|not|vague|broad))\b", re.I)
+
+
 def _wrapped_position(core: str, topic: set[str], ents: set[str] | None, source: str = "", strict: bool = False) -> bool:
     """A position the writer was invited to take ('A strong essay would say that X', 'You could argue that X', 'Your thesis:
     X', 'What if you argued that X?'): the claim X itself. On an open prompt (no proper names) any claim of eight words or
@@ -658,8 +661,8 @@ def _wrapped_position(core: str, topic: set[str], ents: set[str] | None, source:
                               r"\bfor\s+or\s+against\b", c, re.I):
         return False
     if _about_writing(c) or (source and quote_ratio(c, source) >= 0.5) or imperative_coaching(c, topic, ents) \
-            or _COACH_IMP.search(c):
-        return False
+            or _COACH_IMP.search(c) or _THESIS_TALK.match(c) or re.match(r"^(?:with|about|against|over|for|to|on|in|at|by|from|before|after)\b", c, re.I):
+        return False  # a prepositional tail ('Maybe argue with a friend ...') is advice about how to work, not a claim
     if is_position(c + ".", topic, ents):
         return True
     shared = _ct(c) & (topic | (ents or set()))
@@ -708,7 +711,7 @@ _TL = re.compile(
     r"final|main|central|essay\s*#?\d*|paper\s*#?\d*)\s+){0,3})"
     r"(?P<noun>thesis|claim|argument|position|stance)"
     r"(?:\s+(?:idea|statement|option|candidate|draft|sentence|suggestion|example|version|for\s+(?:the\s+|your\s+|this\s+)?"
-    r"(?:essay|paper)(?:\s*#?\d+)?))?\s*:\s*(?P<rest>\S.*)$", re.I)
+    r"(?:essay|paper)(?:\s*#?\d+)?))?(?:\s*\([^()]{1,40}\))?\s*(?::|\s+[-\u2013\u2014]+\s+|[\u2013\u2014])\s*(?P<rest>\S.*)$", re.I)
 _TL_BE = re.compile(
     r"^\W*(?:(?:and|but|so|now|okay|ok)[,\s]+)?(?:(?:your|my|our|the|a)\s+(?:main\s+|central\s+|essay\s*#?\d*\s+)?"
     r"(?:thesis|claim|argument|position|stance|answer|conclusion)\s+(?:should|could|would|might|must|can|will)\s+"
@@ -718,7 +721,22 @@ _TL_BE = re.compile(
     r"i(?:'d|\s+would)\s+(?:also\s+)?(?:say|argue|claim|contend|maintain)\s+that\b\s*|"
     r"you\s+(?:might|could|can|may)\s+(?:also\s+)?(?:say|argue|claim|write|contend|maintain)\s+that\b\s*|"
     r"(?:your|the)\s+(?:essay|paper|answer)\s+(?:should|could|would|might|must|can|will)\s+(?:also\s+)?"
-    r"(?:say|argue|claim|state|conclude)\s+that\b\s*|(?:argue|say|claim|conclude)\s+that\b\s*)(?P<rest>\S.*)$", re.I)
+    r"(?:say|argue|claim|state|conclude)\s+that\b\s*|(?:argue|say|claim|conclude)\s+that\b\s*|"
+    # hedged and question-form cues (fx10): the clause after them is the position, whatever words it is made of
+    r"(?:perhaps|maybe|possibly)\s+(?:your|the|a|my)\s+(?:main\s+|central\s+)?(?:thesis|claim|argument|position|point|answer)\s+"
+    r"(?:is|could\s+be|might\s+be|would\s+be|should\s+be)\s*(?:that\b|:)\s*|"
+    r"(?:perhaps|maybe|possibly)\s+(?:you\s+(?:could|might|can|should)\s+)?(?:argue|say|claim|suggest|propose|contend|conclude)\s+that\b\s*|"
+    r"(?:why\s+not|how\s+about|what\s+about|what\s+if\s+you)\s+(?:argu\w+|say\w*|claim\w*|conclud\w*|writ\w*|stat\w*|put\w*)"
+    r"\s+that\b\s*|"
+    r"(?:isn't|wasn't|is\s+it\s+not|isn't\s+it)\s+(?:the\s+)?(?:real|true|main|key|central|whole|actual)\s+"
+    r"(?:point|lesson|story|takeaway|issue|idea)(?:\s+here)?\s+that\b\s*|"
+    r"what\s+if\s+(?:the\s+)?(?:real|true|main|key|central|whole|actual)\s+(?:point|lesson|story|takeaway|issue|idea)"
+    r"(?:\s+here)?\s+(?:is|were|was)\s+that\b\s*|"
+    r"try\s+(?:framing|phrasing|putting|wording|stating|writing)\s+(?:it|this|your\s+(?:claim|thesis|point))\s+(?:as|like\s+this)"
+    r"\s*[:,]\s*(?:that\b\s*)?|"
+    r"(?:a|the)\s+reader\s+(?:might|may|could)\s+expect\s+you\s+to\s+(?:claim|argue|say|conclude)\s+that\b\s*|"
+    r"you\s+(?:might|may|could|can)\s+(?:well\s+)?(?:want\s+to\s+)?(?:also\s+)?(?:say|argue|claim|write|contend|maintain|"
+    r"state|conclude)\s+that\b\s*)(?P<rest>\S.*)$", re.I)
 _ROLE_LABEL = re.compile(r"^\W*(?:tutor|teacher|professor|prof|ta|coach|assistant|answer|model\s+answer|sample\s+answer)\s*:\s*(?P<rest>\S.*)$", re.I)
 _VERDICT_ONLY = re.compile(r"^\W*(?:yes|no|partly|partially|mostly|largely|half|right|wrong|correct|incorrect|mistaken)\b[\w\s,'’-]{0,24}\W*$", re.I)
 
@@ -729,6 +747,9 @@ def labelled_core(sentence: str) -> str:
     only with a possessive, 'essay N', 'main' or 'central' in front ('Madison's argument: ...' reports a source)."""
     s = _CITE_STRIP.sub("", sentence or "").strip()
     s = re.sub(r"\*\*|__", "", s).strip("\"“”'* ")
+    mb = _TL_BE.match(s)  # 'You might say that X' is also a coaching frame: read the cue before the frame is stripped
+    if mb and not _SPEAKER.match(s):
+        return mb.group("rest").strip()
     s = strip_frames(s)[0]
     m = _TL.match(s)
     if m:
@@ -756,6 +777,10 @@ def _labelled_position(rest: str, topic: set[str], ents: set[str] | None, own: s
         return False
     if own and quote_ratio(c, own) >= 0.5:
         return False
+    if _THESIS_TALK.match(c):
+        return False  # 'Perhaps your thesis is that it needs a clearer claim': talk about the thesis, not a position
+    if attributed(c):
+        return False  # 'Madison argues that factions come from human nature': a report of the source, with no verdict on it
     if re.match(r"^\W*(?:must|should|needs?|has\s+to|have\s+to|ought|take|cite|state|include|name|make|use|give|support|be)\b", c, re.I):
         return False  # a requirement or an instruction ('Must take a side and cite two passages'), not a claim about the subject
     verdict = bool(_POS_EVAL.search(c) or ARGUE.search(c))
@@ -893,6 +918,13 @@ def _claims_before_modal(s: str) -> bool:
     return bool(INFL.search(s[:m.start()]) or EVAL.search(s[:m.start()]))
 
 
+def _role_note(sent: str, sources: list[Any] | None) -> bool:
+    """True for a bare 'Tutor: ...' or 'Answer: ...' line whose cited chunk really says it (a reading note in a role label).
+    A thesis label or a hedged cue is never a reading note: a cite, even to the assignment's own prompt, never excuses it."""
+    raw = _CITE_STRIP.sub("", sent or "").strip()
+    return bool(_ROLE_LABEL.match(raw)) and sources is not None and cited_restatement(sent, sources)
+
+
 def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, sources: list[Any] | None,
               loose: bool = False, ents: set[str] | None = None, foreign: bool = True, own: str = "") -> tuple[int, str]:
     """(level, reason) of one sentence or span. span: 'quoted' | 'colon' | 'label' | 'plain'. ents: the assignment's own
@@ -906,6 +938,10 @@ def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, s
         return 0, ""
     if imperative_coaching(s, topic, ents):  # "Then pick two examples and ask what each one shows"
         return 0, ""
+    if ents is not None and span == "plain":
+        lab = labelled_core(trim_tail(_CITE_STRIP.sub("", sent).strip()))
+        if lab and _role_note(sent, sources) is False and _labelled_position(lab, topic, ents, own):
+            return 2, "position"  # a thesis label or a hedged cue: a cite (even to the assignment's own prompt) never excuses it
     if cited and attributed(s):  # "Madison argues ..." with a cite: fine when the cited passage says it
         if sources is None or cited_restatement(sent, sources):
             return 0, ""
@@ -938,6 +974,8 @@ def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, s
         return 2, "essay prose"
     if span in ("quoted", "colon") and shared >= 2 and (ARGUE.search(s) or EVAL.search(s)):
         return 2, "quoted sentence"
+    if plain and not cited and attributed(s) and not _VERDICT_WORDS.search(s) and not THESIS_CUE.search(s):
+        return soft  # 'Federalist No. 10 argues that a large republic can control faction': background on the reading, no verdict
     if plain and shared >= 2 and (ARGUE.search(s) if asked else EVAL.search(s)):
         return 1, "argument"
     if plain and loose and shared >= 3:
@@ -952,13 +990,36 @@ def _spans(line: str) -> list[tuple[str, str]]:
     for m in re.finditer(r"(?<!\w)['‘](.{25,}?)['’](?!\w)", line):
         out.append((m.group(1), "quoted"))
     if ":" in line:
-        out.append((line.rsplit(":", 1)[1], "colon"))
+        # the clause after a colon is judged inside its own sentence: two cited restatements ('... faction: removing its
+        # causes ... [8]. Finally he argues ... [6].') are never merged into one span
+        for sent in _split_sentences(line):
+            if ":" in sent:
+                out.append((sent.rsplit(":", 1)[1], "colon"))
     lab = _LABEL.match(line)
     if lab:
         out.append((lab.group(2), "label"))
     for sent in _split_sentences(line):
         out.append((sent, "plain"))
     return out
+
+
+def _dialogue_hit(text: str, topic: set[str], ents: set[str] | None, source: str, foreign: bool, own: str,
+                  sources: list[Any] | None = None) -> tuple[str, str]:
+    """(reason, sentence) for a 'Student: ... / Tutor: ...' dialogue written on separate lines (or anywhere in the reply),
+    judged turn by turn: the answer-role turns that take a position, or a bare verdict after a question about the essay."""
+    parts = _transcript_parts(text or "")
+    if not parts:
+        return "", ""
+    # a cited sentence its chunk really says ('Tutor: A faction is a group united by a passion ... [1]') is a reading note
+    parts = [(who, _CITE_STRIP.sub("", " ".join(x for x in _split_sentences(turn) if not cited_restatement(x, sources))))
+             for who, turn in parts]
+    for who, turn in parts:
+        for sent in _split_sentences(turn):
+            lvl, why = _position_level(trim_tail(sent), topic, ents, source, foreign, own)
+            if lvl:
+                return "transcript " + why, sent
+    hit = _answer_turn_hit(parts, topic, ents, own)
+    return ("transcript position", hit) if hit else ("", "")
 
 
 def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = False,
@@ -975,6 +1036,10 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
     foreign = not non_english(it.get("body") or "")  # an essay set in another language is judged as essay prose anyway
     own = f"{it.get('body', '')} {it.get('title', '')}"
     reply = _CITE_SPLIT.sub(r" \2\1", text or "")
+    if ents is not None:
+        why, sent = _dialogue_hit(reply, topic, ents, source, foreign, own, sources)
+        if why:
+            return 2, why, sent
     for line in re.split(r"\n+", reply):
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip() if not _LABEL.match(line) else line.strip()
         if not line:
@@ -1018,6 +1083,8 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
         bare = " ".join(kept)
         if len(bare.split()) < 25 or quote_ratio(bare, source) >= 0.5:
             continue
+        if not any(_takes_side(x) for x in kept):
+            continue  # uncited framing around cited reading ('X was an uprising ...', 'That is why it mattered'): no side taken
         shared = len(_ct(bare) & topic)
         if THESIS_CUE.search(bare) and shared >= 1:
             return 2, "thesis", bare[:200]
@@ -1026,6 +1093,36 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
         elif asked and shared >= 2 and best[0] < 1 and not is_short_answer(it):  # short answers: short_answer_hit
             best = (1, "body paragraph", bare[:200])
     return best
+
+
+def _takes_side(sentence: str) -> bool:
+    """One sentence judges something (right, wrong, showed, failed, because, therefore ...) or states a thesis cue, as
+    opposed to background and framing ('X was an uprising of indebted farmers', 'That is why it mattered to the debate')."""
+    c = _CITE_STRIP.sub("", sentence or "")
+    return bool(ARGUE.search(c) or EVAL.search(c) or _POS_EVAL.search(c) or _VERDICT_WORDS.search(c) or THESIS_CUE.search(c)
+                or labelled_core(c))
+
+
+def passing_sentences(it: dict[str, Any], text: str, question: str = "", sources: list[Any] | None = None,
+                      limit: int = 6) -> list[str]:
+    """The cited sentences of a replaced reply that pass the essay check on their own (cited reading content, no position),
+    in order, so a retried answer can keep them instead of dropping the whole reply. Only sentences whose every cite points at
+    a real source (1 to len(sources)); never a question, a list-marker line or a sentence with no cite."""
+    out: list[str] = []
+    n = len(sources) if sources is not None else None
+    for sent in _split_sentences(_CITE_SPLIT.sub(r" \2\1", text or "")):
+        x = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", sent).strip()
+        nums = _cite_numbers(x)
+        if not nums or "?" in x or len(_CITE_STRIP.sub("", x).split()) < 5:
+            continue
+        if n is not None and any(k < 1 or k > n for k in nums):
+            continue
+        if level(it, x, question, True, sources) or feedback_leaks("", it, x, sources):
+            continue
+        out.append(x)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def level(it: dict[str, Any], text: str, question: str = "", force_asked: bool = False,
@@ -1257,6 +1354,45 @@ def _thesis_card_claim(it: dict[str, Any], front: str, back: str, source_text: s
     return ""
 
 
+_THESIS_NOUN = r"(?:thesis|position|claim|stance|main\s+argument|central\s+argument|conclusion)"
+_OWNED_THESIS_FRONT = re.compile(
+    rf"\b(?:my|our|your)\s+(?:[\w'-]+\s+){{0,2}}{_THESIS_NOUN}\b|\b(?:essay|paper)\s*#?\d*(?:'s)?\s+{_THESIS_NOUN}\b|"
+    rf"\b{_THESIS_NOUN}\s+(?:for|of|to)\s+(?:the|my|our|this|that)\s+(?:[\w'-]+\s+){{0,3}}(?:essay|paper)\b|"
+    rf"\b(?:best|strongest|right|correct|winning)\s+{_THESIS_NOUN}\b", re.I)
+
+
+_REQ_FRONT = re.compile(r"\b(?:need|needs|require|requires|required|requirements?|rubric|worth|points|graded|grading|due|length|"
+                        r"must|should|include|includes|criteria|criterion|look\s+like)\b", re.I)
+_REQ_BACK = re.compile(r"\b(?:must|should|needs?|has\s+to|have\s+to|ought\s+to|requires?|required|rubric|someone\s+could|"
+                       r"(?:two|three|one|\d+)\s+(?:passages?|sources?|quotes?|examples?|events?)|take\s+a\s+side|a\s+side)\b", re.I)
+
+
+def _thesis_named_card(it: dict[str, Any], front: str, back: str, source_text: str = "") -> str:
+    """A card whose front names the essay's thesis, position or claim as the student's own ('Essay 1 thesis: which idea
+    matters most?', 'What is the best thesis for the course essay?') is refused whatever the back says, when the back states
+    anything about the subject: any sentence of three words or more that is not a question, not about the writing, not a
+    quote of the assignment or of the card's source. A card about what a thesis is ('What is a thesis statement?') never
+    matches: its front is not about the essay's own thesis."""
+    if not _OWNED_THESIS_FRONT.search(front or "") or _REQ_FRONT.search(front or ""):
+        return ""  # a front that asks what the thesis needs or is worth is about the requirements, not the thesis itself
+    topic, ents = topic_tokens(it), entities(it)
+    own = f"{it.get('body', '')} {it.get('title', '')}"
+    for line in re.split(r"\n+", back or ""):
+        for sent in _split_sentences(line):
+            s = trim_tail(_CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ "))
+            if len(s.split()) < 3 or "?" in s or _about_writing(s) or not_covered(s) or imperative_coaching(s, topic, ents) \
+                    or _COACH_IMP.search(s):
+                continue
+            if _REQ_BACK.search(s):
+                continue  # a requirement ('Must take a side and cite two passages')
+            if _META.search(s) and not (_ct(s) & (topic | ents)):
+                continue  # 'A sentence that states the main claim of a paper': what a thesis is, not the student's
+            if quote_ratio(s, own) >= 0.5 or (source_text and (quote_ratio(s, source_text) >= 0.5 or supported(s, source_text))):
+                continue
+            return s
+    return ""
+
+
 def card_hit(store, course_id: int, front: str, back: str, source_text: str = "") -> dict | None:
     """The graded essay or short-answer item a flashcard gives away (an essay thesis, position or conclusion, or a
     finished answer, reworded or not). Cards about concepts are fine."""
@@ -1273,7 +1409,8 @@ def card_hit(store, course_id: int, front: str, back: str, source_text: str = ""
                 hits.append((len(_ct(sent) & topic_tokens(it)) + 1, dict(integrity._hit(it, "card"), sentence=sent)))
                 break
             if not short:
-                sent = _card_claim(it, back, source_text) or _thesis_card_claim(it, front, back, source_text)
+                sent = _card_claim(it, back, source_text) or _thesis_card_claim(it, front, back, source_text) \
+                    or _thesis_named_card(it, front, back, source_text)
                 if sent:  # a position on an open prompt ('Which idea matters most? X, because ...')
                     hits.append((len(_ct(sent) & topic_tokens(it)) + 1, dict(integrity._hit(it, "card"), sentence=sent)))
                     break
@@ -1307,6 +1444,73 @@ _QUOTED_SPAN = (re.compile(r"[\"“]([^\"”]{30,})[\"”]", re.S),
 
 def _sentences(text: str) -> list[str]:
     return [y for x in re.split(r"\n+", text or "") for y in _split_sentences(x) if y.strip()]
+
+
+# fx10: a pasted block, a cue that it is the student's own draft, and a cue that they want it looked at. The three together
+# route to draft feedback whatever the exact wording ('Essay 1 intro draft: <paste> Can you give me feedback?', 'Here's what I
+# have so far for Essay 1: <paste> Thoughts?', '<paste> This is my intro so far. What would make it stronger?').
+_DRAFT_CUE = re.compile(
+    r"\b(?:draft|intro\w*|conclusion|so\s+far|what\s+i(?:'ve|\s+have)(?:\s+got|\s+written)?|here(?:'s|\s+is)\s+(?:my|our)|"
+    r"(?:my|our)\s+(?:\w+\s+){0,2}(?:paragraphs?|thesis|essay|paper|attempt|writing)|(?:essay|paper)\s*#?\d+|body\s+paragraph)\b", re.I)
+_FB_CUE = re.compile(
+    r"\b(?:feedback|critique|review|improve\w*|stronger|strengthen|thoughts|make\s+(?:it|this|my\s+\w+)\s+better|what\s+do\s+you\s+think|look\s+(?:at|over)|"
+    r"proofread|how\s+(?:can|do)\s+i|what\s+would\s+make|check|any\s+(?:advice|suggestions|comments|tips)|polish|tighten|revise|"
+    r"is\s+(?:this|it)\s+(?:good|ok|okay|clear|strong))\b", re.I)
+_SOURCE_HEAD = re.compile(r"\b(?:assignment|prompt|rubric|instructions?|textbook|reading|passage|syllabus|lecture|notes|problem|question|"
+                          r"homework|example|excerpt|quote|article|chapter)\b", re.I)
+
+
+def _cue_draft(q: str) -> tuple[str, str]:
+    """(pasted draft, the words around it) for a message made of a pasted block of 12 or more words, a draft cue and a
+    feedback cue; ('', '') otherwise. The block sits after the first colon or line break, or before or after a short
+    request. A header that says what the paste is ('the assignment', 'a passage from the textbook') makes it no draft."""
+    q = (q or "").strip()
+    cands: list[tuple[str, str]] = []
+    m = re.search(r"[:\n]", q)
+    if m:
+        head, tail = q[:m.start()], q[m.end():]
+        if len(head.split()) <= 16 and "?" not in head:
+            sents = _sentences(tail)
+            hi = len(sents)
+            while hi - 1 > 0 and len(sents[hi - 1].split()) <= 20 and (
+                    "?" in sents[hi - 1] or _FB_CUE.search(sents[hi - 1]) or _DRAFT_CUE.search(sents[hi - 1])):
+                hi -= 1
+            cands.append((" ".join(sents[:hi]), head + " " + " ".join(sents[hi:])))
+    sents = _sentences(q)
+    lo, hi = 0, len(sents)
+    cue = lambda x: len(x.split()) <= 14 and bool(_FB_CUE.search(x) or _DRAFT_CUE.search(x) or "?" in x)  # noqa: E731
+    while lo < hi - 1 and cue(sents[lo]):
+        lo += 1
+    while hi - 1 > lo and cue(sents[hi - 1]):
+        hi -= 1
+    cands.append((" ".join(sents[lo:hi]), " ".join(sents[:lo] + sents[hi:])))
+    best = ("", "")
+    for paste, rest in cands:
+        paste = paste.strip()
+        if len(paste.split()) < 12 or not _DRAFT_CUE.search(rest) or not _FB_CUE.search(rest) or _SOURCE_HEAD.search(rest):
+            continue
+        if problem_statement(paste):
+            continue
+        if len(paste) > len(best[0]):
+            best = (paste, rest)
+    return best
+
+
+def paste_heading(question: str) -> str:
+    """A short heading for an answer to a message that holds a pasted draft: the words in front of the paste, never the paste
+    itself. '' when the message has no such paste."""
+    q = (question or "").strip()
+    paste, rest = _cue_draft(q)
+    if not paste and len(q.split()) >= 25:
+        m = re.search(r"[:\n]", q)
+        if m and len(q[:m.start()].split()) <= 16 and len(q[m.end():].split()) >= 12 and _DRAFT_CUE.search(q[:m.start()]):
+            paste, rest = q[m.end():], q[:m.start()]
+    if not paste:
+        return ""
+    head = re.split(r"[:\n]", q, 1)[0].strip()
+    if head and head != q and len(head.split()) <= 16 and head != paste:
+        return head[:80].rstrip(" ,;:-")
+    return "Your pasted draft"
 
 
 def draft_request(question: str) -> str | None:
@@ -1361,6 +1565,10 @@ def draft_request(question: str) -> str | None:
                 and len(re.findall(r"[.!?](?:\s|$)", draft)) >= 2
         if ok and len(draft) > len(best):
             best = draft
+    if not best:
+        cue_paste, _ = _cue_draft(q)
+        if cue_paste:
+            return cue_paste
     return best or None
 
 
@@ -1452,6 +1660,8 @@ def feedback_leaks(draft: str, assignment: Any, reply: str, sources: list[Any] |
         topic = topic_tokens(assignment)
     ents = entities(assignment) if isinstance(assignment, dict) else None
     foreign = not non_english(atext)
+    if ents is not None and _dialogue_hit(_CITE_SPLIT.sub(r" \2\1", reply or ""), topic, ents, known, foreign, atext, sources)[0]:
+        return True
     for line in re.split(r"\n+", _CITE_SPLIT.sub(r" \2\1", reply or "")):
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip()
         line = drop_exempt(line, sources).strip()
@@ -1467,8 +1677,15 @@ def feedback_leaks(draft: str, assignment: Any, reply: str, sources: list[Any] |
                     return True
                 continue
         for sent, span in _spans(line):
+            if span == "plain":
+                lab = labelled_core(trim_tail(_CITE_STRIP.sub("", sent).strip()))
+                if lab and _role_note(sent, sources) is False and _labelled_position(lab, topic, ents, atext):
+                    return True  # a thesis label or a hedged cue: a cite never excuses it
             if cited_restatement(sent, sources) and (sources is not None or not unwrap(sent)[1]):
                 continue
+            if span == "colon" and any(frag_in and sent in frag_in and cited_restatement(frag_in, sources)
+                                       for frag_in in _split_sentences(line)):
+                continue  # the clause after a colon sits in a cited sentence that its chunks say: a reading note
             s = trim_tail(_CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ "))
             if span == "colon" and sent.lstrip()[:1] in "\"\u201c\u2018":
                 continue  # a colon in front of a quotation: the quoted span is judged by itself
