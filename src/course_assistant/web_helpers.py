@@ -6,7 +6,9 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from . import disclaimer
-from .web_md import count_marks, render, source_map, split_outside
+import itertools
+
+from .web_md import count_marks, render, shallowest_heading, source_map, split_outside
 
 # Accent colours: each passes AA as a bar or dot on the page background and as text on its tinted card.
 PALETTE = {
@@ -220,16 +222,55 @@ def chunk_range_label(chunk: dict[str, Any]) -> str:
     return label
 
 
-NOT_COVERED_NOTE = "Your saved materials don't cover this well. Parts below come from general knowledge."
+NOT_COVERED_NOTE = "Your saved materials don't cover this."
+NOT_COVERED_EXTRA = " Parts below come from general knowledge."
+_UID = itertools.count(1)
+_LATEX_WORDS = {"lambda": "lambda", "Lambda": "Lambda", "alpha": "alpha", "beta": "beta", "gamma": "gamma",
+                "Gamma": "Gamma", "delta": "delta", "Delta": "Delta", "mu": "mu", "sigma": "sigma", "Sigma": "Sigma",
+                "pi": "pi", "theta": "theta", "epsilon": "epsilon", "phi": "phi", "omega": "omega", "rho": "rho",
+                "cdot": "*", "times": "x", "infty": "infinity", "leq": "<=", "geq": ">=", "neq": "!=", "to": "->",
+                "rightarrow": "->", "sum": "sum", "int": "integral", "sqrt": "sqrt", "det": "det", "in": "in"}
+
+
+def plain_math(text: str) -> str:
+    """A concept label spelled without LaTeX, for places that cannot render it (SVG text): "$A = X\\Lambda X^{-1}$"
+    becomes "A = X Lambda X^-1"."""
+    t = (text or "").replace("$", "")
+    t = re.sub(r"\\(?:mathbf|mathrm|text|mathcal|operatorname)\{([^{}]*)\}", r"\1", t)
+    t = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", t)
+    t = re.sub(r"\\([A-Za-z]+)", lambda m: f" {_LATEX_WORDS.get(m.group(1), m.group(1))} ", t)
+    t = re.sub(r"([_^])\{([^{}]*)\}", r"\1\2", t)
+    t = t.replace("{", "").replace("}", "").replace("\\", " ")
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _merge_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per distinct title and location, in source-number order. A row holds every number it stands for, so
+    two cited passages from the same section show once with [2][5]."""
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for s in sorted(items, key=lambda x: x["n"]):
+        label = s.get("label") or ""
+        title = s.get("title") or ""
+        if label and (label == title or title.endswith(", " + label) or title.endswith(": " + label)):
+            label = ""
+        key = (title, label)
+        row = rows.get(key)
+        if row is None:
+            rows[key] = {**s, "label": label, "ns": [{"n": s["n"], "href": s.get("href", "")}]}
+        else:
+            row["ns"].append({"n": s["n"], "href": s.get("href", "")})
+    return list(rows.values())
 
 
 def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: list[Any] | None = None,
                 twin: bool = False, ai_app: bool = False, mode: str | None = None,
-                data: dict[str, Any] | None = None) -> dict[str, Any]:
+                data: dict[str, Any] | None = None, base_level: int = 4) -> dict[str, Any]:
     """Everything the answer partial needs, from live grounding output or from a saved guide/chat message.
 
-    Sources: view["sources"] holds only the ones the text cites (they are listed under "Sources");
-    view["unused_sources"] holds the rest (a collapsed "Also searched (not cited)" list)."""
+    Banners come only from mode ("twin", "concepts"); a saved guide with no mode falls back to its kind (twin).
+    Sources: view["sources"] holds only the ones the text cites, one row per distinct passage, in number order, each
+    with its [n] marks; view["unused_sources"] holds the rest (a collapsed "Also searched (not cited)" list).
+    base_level is the heading level the shallowest heading of the text gets (the container's heading level + 1)."""
     from . import grounding
 
     sources = list(sources or [])
@@ -242,7 +283,20 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
             raw.append({"kind": "outside" if kind == "outside" else "text", "md": str(md)})
     if not raw:
         raw = split_outside(body_md or "")
-    out_blocks = [{"kind": b["kind"], "html": render(b["md"], smap)} for b in raw]
+    top = shallowest_heading(*[b["md"] for b in raw])
+    uid = next(_UID)
+    out_blocks: list[dict[str, Any]] = []
+    for b in raw:
+        html = render(b["md"], smap, base_level=base_level, shallowest=top)
+        if b["kind"] == "outside" and out_blocks and out_blocks[-1]["kind"] == "outside":
+            out_blocks[-1]["html"] = type(html)(f"{out_blocks[-1]['html']}{html}")  # one box for a run of outside parts
+        else:
+            out_blocks.append({"kind": b["kind"], "html": html})
+    n_out = 0
+    for b in out_blocks:
+        if b["kind"] == "outside":
+            n_out += 1
+            b["id"] = f"out-{uid}-{n_out}"
     cited = {k for b in raw if b["kind"] == "text" for k in grounding.cited_numbers(b["md"])}
     removed = sum(count_marks(b["md"])[0] for b in raw)
     unverified = sum(count_marks(b["md"])[1] for b in raw)
@@ -250,22 +304,28 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
           for b in raw]
     data = data or {}
     not_covered = bool(raw) and (bool(data.get("not_covered")) or grounding.is_not_covered(gb, len(sources)))
+    has_outside = any(b["kind"] == "outside" for b in raw)
+    if mode in ("twin", "concepts"):
+        is_twin, is_concepts = mode == "twin", mode == "concepts"
+    else:
+        is_twin, is_concepts = bool(twin), False
     return {"blocks": out_blocks,
-            "sources": [smap[k] for k in sorted(smap) if k in cited],
-            "unused_sources": [smap[k] for k in sorted(smap) if k not in cited],
-            "twin": twin or mode == "twin", "concepts": mode == "concepts",
-            "outside": any(b["kind"] == "outside" for b in raw), "not_covered": not_covered,
-            "not_covered_note": NOT_COVERED_NOTE, "removed_citations": removed, "unverified_quotes": unverified,
+            "sources": _merge_sources([smap[k] for k in sorted(smap) if k in cited]),
+            "unused_sources": _merge_sources([smap[k] for k in sorted(smap) if k not in cited]),
+            "twin": is_twin, "concepts": is_concepts,
+            "outside": has_outside, "not_covered": not_covered,
+            "not_covered_note": NOT_COVERED_NOTE + (NOT_COVERED_EXTRA if has_outside else ""),
+            "removed_citations": removed, "unverified_quotes": unverified, "base_level": base_level,
             "footer": disclaimer.AI_APP_FOOTER if ai_app else disclaimer.FOOTER}
 
 
-def guide_view(guide: dict[str, Any]) -> dict[str, Any]:
+def guide_view(guide: dict[str, Any], base_level: int = 2) -> dict[str, Any]:
     data = guide.get("data") if isinstance(guide.get("data"), dict) else {}
     saved = data.get("blocks") if isinstance(data.get("blocks"), list) else None
     mode = data.get("mode") if data.get("mode") in ("answer", "twin", "concepts") else None
     return answer_view(guide.get("body_md", ""), guide.get("sources"), blocks=saved,
                        twin=guide.get("kind") == "twin", ai_app=guide.get("created_by") == "ai_app",
-                       mode=mode, data=data)
+                       mode=mode, data=data, base_level=base_level)
 
 
 def _wrap(text: str, width: int) -> list[str]:
@@ -304,7 +364,8 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
     Returns a text tree (every node once, each edge once with its own cites), a list of cross links (the edges the
     tree could not show), and a layered SVG layout with arrows, edge labels and full, wrapped node labels."""
     nodes = {str(n.get("id")): {"id": str(n.get("id")), "label": str(n.get("label") or n.get("id")),
-                                "cites": _cite_list(n.get("cites"))}
+                                "cites": _cite_list(n.get("cites")),
+                                "removed": bool(n.get("cites_removed") or n.get("removed"))}
              for n in (data.get("nodes") or []) if isinstance(n, dict) and n.get("id") is not None}
     edges: list[dict[str, Any]] = []
     for e in (data.get("edges") or []):
@@ -313,7 +374,7 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
         label = str(e.get("label") or "")
         cites = _cite_list(e.get("cites")) + _cite_list(e.get("cite")) + [int(x) for x in _CITE_IN_LABEL.findall(label)]
         edges.append({"a": str(e["a"]), "b": str(e["b"]), "label": _CITE_IN_LABEL.sub("", label).strip(),
-                      "cites": sorted(set(cites))})
+                      "cites": sorted(set(cites)), "removed": bool(e.get("cites_removed") or e.get("removed"))})
     children: dict[str, list[int]] = {k: [] for k in nodes}
     has_parent: set[str] = set()
     for i, e in enumerate(edges):
@@ -344,11 +405,12 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
                 tree_edges.add(i)
                 kids.append(tree(ch, edges[i]))
         return {**nodes[node], "via": (via or {}).get("label", ""), "via_cites": (via or {}).get("cites", []),
-                "has_via": via is not None, "children": kids}
+                "has_via": via is not None, "via_removed": (via or {}).get("removed", False), "children": kids}
 
     forest = [tree(r, None) for r in roots if r not in seen]
     forest += [tree(k, None) for k in nodes if k not in seen]
-    cross = [{"a": nodes[e["a"]]["label"], "b": nodes[e["b"]]["label"], "label": e["label"], "cites": e["cites"]}
+    cross = [{"a": nodes[e["a"]]["label"], "b": nodes[e["b"]]["label"], "label": e["label"], "cites": e["cites"],
+              "removed": e["removed"]}
              for i, e in enumerate(edges) if i not in tree_edges]
 
     # layout: columns by depth, boxes sized to their full wrapped label
@@ -361,10 +423,10 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
     for d, ids in cols.items():
         y = pad
         for k in ids:
-            lines = _wrap(nodes[k]["label"], wrap_at)
+            lines = _wrap(plain_math(nodes[k]["label"]), wrap_at)
             h = len(lines) * line_h + 18
             boxes[k] = {"x": pad + d * (box_w + gap_x), "y": y, "w": box_w, "h": h, "lines": lines,
-                        "full": nodes[k]["label"], "ty": y + 9 + line_h - 3}
+                        "full": plain_math(nodes[k]["label"]), "ty": y + 9 + line_h - 3}
             y += h + gap_y
         col_h[d] = y
     width = pad * 2 + (max(cols, default=0) + 1) * box_w + max(cols, default=0) * gap_x
@@ -382,7 +444,7 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
             x1, y1, x2, y2 = a["x"] + a["w"] // 2, a["y"] + a["h"], b["x"] + b["w"] // 2, b["y"]
         else:
             x1, y1, x2, y2 = a["x"] + a["w"] // 2, a["y"], b["x"] + b["w"] // 2, b["y"] + b["h"]
-        lab = _wrap(e["label"], 22) if e["label"] else []
+        lab = _wrap(plain_math(e["label"]), 22) if e["label"] else []
         shown_edges.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2, "lines": lab,
                             "lx": (x1 + x2) // 2, "ly": (y1 + y2) // 2 - (len(lab) - 1) * 6 - 3})
     n_nodes = len(nodes)

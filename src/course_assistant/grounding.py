@@ -168,6 +168,30 @@ def _expand(spec: str) -> list[int]:
     return nums
 
 
+# Words and signs that, right before a bracket, mean it holds values (a vector, an interval), not source numbers.
+_VALUE_BEFORE = re.compile(
+    r"(?:[=≈≠≤≥∈]|\\in|\b(?:vectors?|intervals?|rows?|columns?|tuples?|coordinates?|lists?\s+of\s+numbers)"
+    r"(?:\s+(?:like|of|is|are|as|being|=))?)\s*$", re.I)
+_VALUE_NEIGHBOUR = re.compile(r"(?:\[[\d\s,;.\-–]*[,\-–][\d\s,;.\-–]*\]\s*(?:,|and|or|to)?\s*)$", re.I)
+
+
+def _is_value_bracket(masked: str, s: int, e: int, spec: str) -> bool:
+    """A bare [1,2], [2, 3] or [1-3] that is a vector, interval or row of numbers rather than a citation."""
+    before = masked[max(0, s - 40):s]
+    multi = bool(re.search(r"[,;\-–]", spec))
+    m_before = _VALUE_BEFORE.search(before)
+    if m_before and (multi or m_before.group(0).strip()[:1] in "=≈≠≤≥∈\\"):
+        return True
+    if not multi:
+        return False
+    if s > 0 and (masked[s - 1].isalnum() or masked[s - 1] in ")_"):  # x[1,2]: an index
+        return True
+    if _VALUE_NEIGHBOUR.search(before):  # [1,2], [2,3]: a run of value brackets
+        return True
+    after = masked[e:e + 40]
+    return bool(re.match(r"\s*(?:,|and|or|to)\s*\[[\d\s,;.\-–]*[,\-–][\d\s,;.\-–]*\]", after))
+
+
 def _find_cites(text: str) -> list[tuple[int, int, list[int]]]:
     """(start, end, numbers) for every [n] that really is a citation: outside math and code, not nested in another
     bracket pair, no zero, and a list only when its numbers are distinct ([1, 3] yes; [2, 1, 1], [0-1] no)."""
@@ -179,6 +203,8 @@ def _find_cites(text: str) -> list[tuple[int, int, list[int]]]:
             continue
         nums = _expand(m.group(1))
         if not nums or 0 in nums or len(set(nums)) != len(nums):
+            continue
+        if _is_value_bracket(masked, s, e, m.group(1)):
             continue
         out.append((s, e, nums))
     return out
@@ -240,20 +266,36 @@ def _strip_cites(text: str) -> str:
     return _tidy("".join(pieces)).replace(REMOVED_MARK, "").strip()
 
 
+_DETAILS_OPEN = re.compile(r"<details(?:\s[^>]*)?>", re.I)
+_DETAILS_CLOSE = re.compile(r"</details\s*>", re.I)
+_LIST_START = re.compile(r"^\s{0,3}(?:[-*+]|\d+[.)])\s+")
+
+
 def _paragraphs(text: str) -> list[str]:
-    """Split on blank lines, keeping fenced code blocks and $$ display math whole."""
+    """Split on blank lines, keeping fenced code blocks, $$ display math and everything from <details> to
+    </details> whole, and keeping a list (items separated by blank lines, nested bullets) in one piece."""
     paras: list[str] = []
     cur: list[str] = []
     fenced = False
     display = False
-    for line in text.splitlines():
+    details = 0
+    lines = text.splitlines()
+    track = len(_DETAILS_OPEN.findall(text)) <= len(_DETAILS_CLOSE.findall(text))  # an unclosed tag must not swallow the rest
+    for idx, line in enumerate(lines):
         st = line.strip()
         if not display and st.startswith(("```", "~~~")):
             fenced = not fenced
         if not fenced and st.count("$$") % 2 == 1:
             display = not display
-        if not fenced and not display and not st:
+        if track and not fenced and not display:
+            details += len(_DETAILS_OPEN.findall(line)) - len(_DETAILS_CLOSE.findall(line))
+            details = max(details, 0)
+        if not fenced and not display and not st and details == 0:
             if cur:
+                nxt = next((ln for ln in lines[idx + 1:] if ln.strip()), "")
+                in_list = any(_LIST_START.match(c) for c in cur) and not cur[0].lstrip().startswith(("#", "<details"))
+                if in_list and (_LIST_START.match(nxt) or re.match(r"^\s{2,}\S", nxt)):
+                    continue  # a loose list stays one block
                 paras.append("\n".join(cur).strip())
                 cur = []
         else:
@@ -327,6 +369,91 @@ def _makes_no_claim(p: str) -> bool:
     return False
 
 
+# Sentences about the answer itself (what the materials cover, what the app will not do) make no claim about the
+# subject, so they are never boxed as "Not from your materials".
+_META_COVERAGE = re.compile(
+    r"\b(?:your|the)\s+(?:saved\s+)?(?:course\s+)?(?:materials?|notes|sources?|documents?|readings?|slides|syllabus)\b[^.!?]*?"
+    r"\b(?:do(?:es)?\s*n[o']t|don't|doesn't|never|(?:is|are)\s+not|(?:isn|aren)'t|silent|lack|miss)\b", re.I)
+_META_REFUSAL = re.compile(
+    r"\b(?:I|we)\s+(?:can(?:'|no)?t|cannot|can\s+not|won't|will\s+not|am\s+not\s+able\s+to|'m\s+not\s+able\s+to)\b|"
+    r"\b(?:ask|check\s+with|talk\s+to|email|see)\s+(?:your\s+)?(?:instructor|professor|teacher|TA|teaching\s+assistant)\b|"
+    r"\bthis\s+(?:looks\s+like|is)\s+(?:part\s+of\s+)?your\s+graded\b|\bgraded\s+(?:work|problem|item|assignment)\b|"
+    r"\bworth\s+asking\b|\bnot\s+covered\s+in\b", re.I)
+_ABBREV = {"e.g", "i.e", "vs", "dr", "fig", "eq", "eqs", "etc", "cf", "no", "approx", "mr", "ms", "mrs", "prof", "sec", "ch", "al"}
+_SENT_SPLIT = re.compile(r"(?<=[.!?])((?:\s*\[\d+(?:\s*[,;–-]\s*\d+)*\])*)\s+(?=[A-Z0-9\"“*_])")
+
+
+def _sentences(p: str) -> list[str]:
+    """A one-line prose paragraph cut into sentences (citations stay with the sentence they follow). Math, code
+    and abbreviations never end a sentence."""
+    masked = _mask(p)
+    out, pos = [], 0
+    for m in _SENT_SPLIT.finditer(masked):
+        head = masked[pos:m.start()]
+        last = re.split(r"\s+", head.strip())[-1].lower().rstrip(".") if head.strip() else ""
+        if last in _ABBREV or re.fullmatch(r"[a-z]", last):
+            continue
+        out.append(p[pos:m.end(1)].strip())
+        pos = m.end()
+    out.append(p[pos:].strip())
+    return [x for x in out if x]
+
+
+def _is_meta(text: str) -> tuple[bool, bool]:
+    """(every sentence of text is about the answer itself, any of them says the materials do not cover it)."""
+    plain = re.sub(r"[*_`>#]", "", text).strip()
+    if not plain or "$" in plain or "=" in plain or "\n" in plain.strip():
+        return False, False
+    sents = _sentences(plain)
+    if not sents or len(sents) > 3:
+        return False, False
+    cov = [bool(_META_COVERAGE.search(x) or _NOT_COVERED_2.search(x)) for x in sents]
+    ref = [bool(_META_REFUSAL.search(x)) for x in sents]
+    ok = all(c or r for c, r in zip(cov, ref))
+    return ok, ok and any(cov)
+
+
+def _split_sentences(cleaned: str, found: list[int]) -> list[Block]:
+    """A cited prose paragraph. A sentence that makes a claim, has no citation of its own, follows a cited sentence
+    and has no cited sentence after it is cut out and labelled; a lead-in before a cited sentence stays with it."""
+    if "\n" in cleaned or cleaned.lstrip().startswith(("#", ">", "|", "<", "-", "*", "+")) or "|" in cleaned \
+            or re.match(r"^\s*\d+[.)]\s", cleaned) or QUOTE_OPEN in cleaned:
+        return [Block("text", cleaned, sorted(set(found)))]
+    sents = _sentences(cleaned)
+    if len(sents) < 2:
+        return [Block("text", cleaned, sorted(set(found)))]
+    cites = [sorted(set(_cites_in(x))) for x in sents]
+    flags = []  # True = label this sentence
+    for i, x in enumerate(sents):
+        plain = re.sub(r"[*_`>#]", "", _strip_cites(x)).strip()
+        flag = (not cites[i] and any(cites[:i]) and not any(cites[i + 1:]) and REMOVED_MARK not in x
+                and len(plain.split()) >= 5 and not _is_meta(plain)[0] and not _makes_no_claim(plain))
+        flags.append(flag)
+    if not any(flags):
+        return [Block("text", cleaned, sorted(set(found)))]
+    out: list[Block] = []
+    run: list[int] = []
+
+    def flush() -> None:
+        if run:
+            out.append(Block("text", " ".join(sents[j] for j in run), sorted({c for j in run for c in cites[j]})))
+            run.clear()
+    for i, x in enumerate(sents):
+        if flags[i]:
+            flush()
+            out.append(Block("outside", _strip_cites(x), []))
+        else:
+            run.append(i)
+    flush()
+    return out
+
+
+def _details_inner(p: str) -> str:
+    """The text of a details block without its tags and summary line."""
+    t = _DETAILS_OPEN.sub("", _DETAILS_CLOSE.sub("", p))
+    return re.sub(r"<summary>.*?</summary>", "", t, flags=re.S | re.I).strip()
+
+
 _LIST_ITEM = re.compile(r"^\s{0,3}(?:[-*+]|\d+[.)])\s+")
 
 
@@ -381,16 +508,33 @@ def _parse(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool]:
                 if _says_not_covered(stripped):
                     said_not_covered = True
                     continue
+                if (meta := _is_meta(stripped))[0]:
+                    said_not_covered = said_not_covered or meta[1]
+                    blocks.append(Block("text", stripped, []))
+                    continue
                 blocks.append(Block("outside", stripped, []))
             elif not cleaned:
                 continue
             elif found:
-                blocks.extend(_split_mixed_list(cleaned, found))
+                if _DETAILS_OPEN.search(cleaned):
+                    blocks.append(Block("text", cleaned, sorted(set(found))))  # a hidden solution stays one block
+                else:
+                    blocks.extend(_split_mixed_list(cleaned, found) if "\n" in cleaned
+                                  else _split_sentences(cleaned, found))
             elif REMOVED_MARK in cleaned and not cleaned.lstrip().startswith("#"):
                 # A line that tried to cite a source that doesn't exist is a claim, so it is never exempt.
                 blocks.append(Block("outside", cleaned, []))
             elif _says_not_covered(cleaned):
                 said_not_covered = True
+            elif _DETAILS_OPEN.search(cleaned):
+                inner = _details_inner(cleaned)
+                if not inner or _makes_no_claim(inner):
+                    blocks.append(Block("text", cleaned, []))
+                else:
+                    blocks.append(Block("outside", cleaned, []))
+            elif (meta := _is_meta(cleaned))[0]:
+                said_not_covered = said_not_covered or meta[1]
+                blocks.append(Block("text", cleaned, []))
             elif _makes_no_claim(cleaned) and (n_sources > 0 or _is_structural(cleaned)):
                 blocks.append(Block("text", cleaned, []))
             else:
@@ -445,7 +589,8 @@ def block_dicts(blocks: list[Block]) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- quote check
-_QUOTE = re.compile(r'"([^"\n]{8,}?)"|“([^”\n]{8,}?)”')
+_QUOTE = re.compile(r'"([^"\n]{7,}?)"|“([^”\n]{7,}?)”')
+QUOTE_MIN_WORDS = 4
 
 
 def _norm_words(text: str) -> str:
@@ -457,7 +602,7 @@ def _norm_words(text: str) -> str:
 def quote_in_sources(quote: str, texts: list[str]) -> bool:
     """True when quote (ellipses and [...] allowed) appears in one of the texts, ignoring case, spacing, curly
     quotes, punctuation and line-end hyphenation."""
-    pieces = [_norm_words(p) for p in re.split(r"\.\.\.|…|\[\s*\.\.\.\s*\]", quote)]
+    pieces = [_norm_words(p) for p in re.split(r"\.\.\.|…|\[[^\]\n]{0,60}\]", quote)]
     pieces = [p for p in pieces if p]
     if not pieces:
         return True
@@ -465,7 +610,7 @@ def quote_in_sources(quote: str, texts: list[str]) -> bool:
     return any(all(p in h for p in pieces) for h in hay)
 
 
-def verify_quotes(blocks: list[Block], sources: list[Source], *, min_words: int = 8) -> list[Block]:
+def verify_quotes(blocks: list[Block], sources: list[Source], *, min_words: int = QUOTE_MIN_WORDS) -> list[Block]:
     """Flag quoted strings of min_words or more that are not in the sources the block cites. The quote is wrapped in
     QUOTE_OPEN ... QUOTE_CLOSE, which the web shows as "quote not found in the cited source". Returns the blocks."""
     for b in blocks:

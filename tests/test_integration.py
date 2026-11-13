@@ -270,7 +270,7 @@ def test_web_end_to_end(tmp_path, monkeypatch):
     assert r.status_code == 200
     assert re.search(rf'class="cite" href="/read/{mid}\?at=\d+#c\d+"', r.text)
     assert "Not from your materials" in r.text and 'class="outside"' in r.text
-    assert 'class="sources"' in r.text and "<h3>Sources</h3>" in r.text and store.material(mid)["title"] in r.text
+    assert 'class="sources"' in r.text and "<h4>Sources</h4>" in r.text and store.material(mid)["title"] in r.text
     assert disclaimer.FOOTER in r.text
     assert len(store.chat_messages(cid)) == 2
     assert "Not from your materials" in c.get(f"/courses/{cid}/ask").text  # history renders from saved blocks

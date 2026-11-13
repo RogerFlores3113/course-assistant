@@ -61,7 +61,7 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
 
     text = text.replace("\x00", "")
     text = text.replace(REMOVED_MARK, hold(
-        f'<span class="cite-removed" role="img" aria-label="{escape(REMOVED_LABEL)}">(citation removed)</span>'))
+        f'<span class="cite-removed" title="{escape(REMOVED_LABEL)}">(citation removed)</span>'))
     text = text.replace(QUOTE_OPEN, hold('<mark class="quote-unverified">'))
     text = text.replace(QUOTE_CLOSE, hold(f'</mark> <span class="quote-flag">({QUOTE_FLAG_TEXT})</span>'))
     text = re.sub(r"`([^`\n]+)`", lambda m: hold(f"<code>{escape(m.group(1))}</code>"), text)
@@ -86,6 +86,8 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
         after = m.string[m.end()] if m.end() < len(m.string) else ""
         if before == "[" or after == "]":  # part of a matrix or list such as [[1],[2]], not a citation
             return m.group(0)
+        if re.search(r"[=≈∈]\s*$", m.string[max(0, m.start() - 6):m.start()]):  # x = [2]: a value
+            return m.group(0)
         n = int(m.group(1))
         s = sources.get(n)
         if not s or not s.get("href"):
@@ -94,9 +96,13 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
         return hold(f'<a class="cite" href="{escape(s["href"])}" aria-label="{aria}">[{n}]</a>')
 
     text = re.sub(r"\[(\d{1,3})\]", cite, text)
+    text = re.sub(r"\\([*_`$\[\]#])", lambda m: hold(escape(m.group(1))), text)  # \* and friends are literal
     text = escape(text, quote=False)
+    text = re.sub(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*", r"<strong><em>\1</em></strong>", text)
     text = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])", r"<em>\1</em>", text)
+    text = re.sub(r"(?<![\w])__(?=\S)(.+?)(?<=\S)__(?![\w])", r"<strong>\1</strong>", text)
+    # a closing * may touch a digit or letter: *V*1 is V followed by 1 (textbook variable names)
+    text = re.sub(r"(?<![\w*])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?!\*)", r"<em>\1</em>", text)
     text = re.sub(r"(?<![\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\w_])", r"<em>\1</em>", text)
     for _ in range(3):  # a stash entry can hold another (a link label with code)
         text = re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], text)
@@ -274,7 +280,7 @@ def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1) -> str:
             continue
         if (h := HEAD_RE.match(line)):
             flush()
-            level = min(6, len(h.group(1)) + offset)
+            level = max(1, min(6, len(h.group(1)) + offset))
             out.append(f"<h{level}>{inline(h.group(2), sources)}</h{level}>")
             i += 1
             continue
@@ -308,11 +314,33 @@ def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1) -> str:
     return "".join(out)
 
 
+def shallowest_heading(*texts: str) -> int | None:
+    """The smallest heading level (1 for #) used outside code in any of the texts, or None when there are none."""
+    best: int | None = None
+    for md in texts:
+        fence: str | None = None
+        for line in (md or "").replace("\r\n", "\n").split("\n"):
+            fm = FENCE_RE.match(line)
+            if fm and (fence is None or fm.group(2) == fence):
+                fence = None if fence else fm.group(2)
+                continue
+            if fence is None and (h := HEAD_RE.match(line)):
+                best = len(h.group(1)) if best is None else min(best, len(h.group(1)))
+    return best
+
+
 def render(md: str, sources: list[dict[str, Any]] | dict[int, dict[str, Any]] | None = None,
-           *, heading_offset: int = 1) -> Markup:
-    """Markdown to safe HTML. heading_offset 1 puts # at h2 (answers and guides, under the page h1); the reader
-    passes 2 because each passage already has an h2 for its location."""
+           *, heading_offset: int = 1, base_level: int | None = None, shallowest: int | None = None) -> Markup:
+    """Markdown to safe HTML.
+
+    With base_level the shallowest heading in the text becomes that level, and the others keep their distance
+    from it: render(md, base_level=2) under a page h1 gives h2, h3, ... whether the model wrote # or ##.
+    Pass shallowest (from shallowest_heading over every part of one answer) when md is only one piece of it.
+    Without base_level, heading_offset moves every heading down by that many levels (# is h2 at offset 1)."""
     smap = sources if isinstance(sources, dict) else source_map(sources)
+    if base_level is not None:
+        top = shallowest if shallowest is not None else shallowest_heading(md)
+        heading_offset = base_level - (top or 1)
     lines = _normalize((md or "").replace("\r\n", "\n").split("\n"))
     return Markup(_blocks(lines, smap, 0, heading_offset))
 

@@ -1,17 +1,19 @@
 {% extends "base.html" %}{% from "_answer.html" import answer %}{% block title %}{{ g.title }} - Course Assistant{% endblock %}
+{% macro removed(flag) %}{% if flag %} <span class="cite-removed">(citation removed)</span>{% endif %}{% endmacro %}
 {% macro chips(cites) %}{% for c in cites %}{% if smap.get(c) %} <a class="cite" href="{{ smap[c].href }}" aria-label="Source {{ c }}: {{ smap[c].title }}{% if smap[c].label %}, {{ smap[c].label }}{% endif %}">[{{ c }}]</a>{% endif %}{% endfor %}{% endmacro %}
-{% macro edge(label, cites) %}{% if label %}<span class="muted">{{ label }}</span>{% endif %}{% if cites %}{{ chips(cites) }}{% else %} <span class="edge-note">Not from your materials</span>{% endif %}{% endmacro %}
-{% macro node(n) %}<li><strong>{{ n.label }}</strong>{{ chips(n.cites) }}
-{% if n.children %}<ul>{% for ch in n.children %}<li class="via"><span class="muted">links to</span> {{ edge(ch.via, ch.via_cites) }}<ul>{{ node(ch) }}</ul></li>{% endfor %}</ul>{% endif %}</li>{% endmacro %}
+{% macro edge(label, cites, gone) %}{% if label %}<span class="muted" data-math>{{ label }}</span>{% endif %}{% if cites %}{{ chips(cites) }}{% elif not gone %} <span class="edge-note">Not from your materials</span>{% endif %}{{ removed(gone) }}{% endmacro %}
+{% macro node(n) %}<li><strong data-math>{{ n.label }}</strong>{{ chips(n.cites) }}{{ removed(n.removed) }}
+{% if n.children %}<ul>{% for ch in n.children %}<li class="via"><span class="muted">links to</span> {{ edge(ch.via, ch.via_cites, ch.via_removed) }}<ul>{{ node(ch) }}</ul></li>{% endfor %}</ul>{% endif %}</li>{% endmacro %}
 {% block body %}
 <div class="course-head" style="--accent-c: {{ accent }}"><p class="crumbs"><a href="/courses/{{ course.id }}/guides">{{ course.name }}</a> &rsaquo; {{ kind_label }}</p>
 <h1>{{ g.title }}</h1><p class="muted small">{{ g.created_at[:10] }}{% if g.model %} &middot; {{ g.model }}{% endif %}</p></div>
-{% if g.question %}<p><strong>Question:</strong> {{ g.question }}</p>{% endif %}
+{% if g.question and g.kind in ('answer', 'twin') %}<p><strong>Question:</strong> {{ g.question }}</p>
+{% elif g.question and g.kind in ('missed', 'primer') %}<p><strong>Lecture:</strong> {{ g.question }}</p>{% endif %}
 {% if graph %}
 <section aria-labelledby="map-h"><h2 id="map-h">Concept map</h2>
 {% if graph.empty %}<p class="muted">This map has no concepts.</p>{% else %}
 <ul class="tree">{% for n in graph.forest %}{{ node(n) }}{% endfor %}</ul>
-{% if graph.cross %}<h3>Other links between concepts</h3><ul class="cross">{% for x in graph.cross %}<li><strong>{{ x.a }}</strong> links to <strong>{{ x.b }}</strong>{% if x.label %}: <span class="muted">{{ x.label }}</span>{% endif %}{% if x.cites %}{{ chips(x.cites) }}{% else %} <span class="edge-note">Not from your materials</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+{% if graph.cross %}<h3>Other links between concepts</h3><ul class="cross">{% for x in graph.cross %}<li><strong data-math>{{ x.a }}</strong> links to <strong data-math>{{ x.b }}</strong>{% if x.label %}: <span class="muted" data-math>{{ x.label }}</span>{% endif %}{% if x.cites %}{{ chips(x.cites) }}{% elif not x.removed %} <span class="edge-note">Not from your materials</span>{% endif %}{{ removed(x.removed) }}</li>{% endfor %}</ul>{% endif %}
 <div class="mapwrap"><svg viewBox="0 0 {{ graph.width }} {{ graph.height }}" width="{{ graph.width }}" height="{{ graph.height }}" role="img" aria-label="{{ graph.aria }}" focusable="false" class="map">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
 {% for l in graph.edges %}<path class="edge" d="M{{ l.x1 }},{{ l.y1 }} L{{ l.x2 }},{{ l.y2 }}" marker-end="url(#arrow)"/>

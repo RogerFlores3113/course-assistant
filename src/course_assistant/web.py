@@ -976,7 +976,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         if not is_htmx(request):
             return redirect(f"/guides/{int(result)}", notice=ready)
         return after(request, course_id, "study", notice=ready, result_guide=guide,
-                     result_view=guide_view(guide) if guide else None)
+                     result_view=guide_view(guide, base_level=4) if guide else None)
 
     # ------------------------------------------------------------------ ask
     @app.post("/courses/{course_id}/ask")
@@ -1113,7 +1113,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         for c in chunks:
             c["seek"] = int(float(c["loc_start"])) if c["loc_kind"] == "time" and re.match(r"^\d+(\.\d+)?$", str(c["loc_start"])) else None
             c["range_label"] = chunk_range_label(c)
-            c["html"] = render_md(c["text"], heading_offset=2)
+            c["html"] = render_md(c["text"], base_level=3)
         source = m["source_url"] if re.match(r"^https?://\S+$", m.get("source_url") or "") else ""
         return page(request, "read.html", m=m, course=course, accent=course_color(course), chunks=chunks, at=at_id,
                     at_note=at_note, media=media, has_file=bool(file_of(m)), source_url=source,
