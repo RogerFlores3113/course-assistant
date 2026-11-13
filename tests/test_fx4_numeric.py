@@ -146,14 +146,17 @@ def test_answer_check_failed_state_has_try_again_and_never_says_connect_when_con
     assert "Answer check: on" in good.get(f"/courses/{c}").text
 
 
-def test_answer_check_off_without_an_ai_and_empty_keys_retried_lazily():
+def test_answer_check_off_without_an_ai_and_failed_keys_wait_for_try_again():
     s, c, m = comp_course(keyed=False)
     html = client_for(s, None).get(f"/courses/{c}").text
     assert "connect an AI to turn it on" in html and "be made" not in html
     it = item(s, c, m, "problem-set-3", "Problem 1")
     assert integrity.build_answer_key(s, it["id"], FakeProvider("nothing")) == []
     p = FakeProvider('["5.11 g"]')
-    assert integrity.ensure_keys(s, c, p) >= 1  # the empty key is tried again
+    # cycle 7: a failed build is cached until the student presses Try again (no hidden retries on Ask or Study)
+    integrity.ensure_keys(s, c, p)  # builds items never tried, leaves the failed one alone
+    assert integrity.item_key(s.graded_item(it["id"])) == []
+    assert integrity.build_answer_key(s, it["id"], p) == ["5.11 g"]  # what the Try again button runs
     assert integrity.item_key(s.graded_item(it["id"])) == ["5.11 g"]
 
 

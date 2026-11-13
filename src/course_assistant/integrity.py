@@ -633,18 +633,87 @@ def given_constants(text: str) -> set[str]:
     return out
 
 
+_CONST_CONTEXT = re.compile(
+    r"(?:(?:\bx|\u00d7|\*|\btimes|\bmultiplied\s+by|\bper|\bout\s+of)\s*\$?\\?(?:times|cdot)?\s*100(?![\d.]*\d)(?!\.\d)(?!\s*(?:ml|l|cm|m)\b)"
+    r"|\b100\s*(?:%|\\%|percent\b)"
+    r"|\b100(?:\.0+)?\s*g(?:rams?)?\s+(?:sample|of\s+(?:the\s+|a\s+)?(?:compound|sample|substance|material))"
+    r"|\b(?:a|the)\s+100(?:\.0+)?\s*g(?:rams?)?\s+(?:sample|basis)"
+    r"|\b6\.0\d*\s*(?:e|x|\u00d7|\\times)\s*10\^?\{?\+?23\}?"
+    r"|\b22\.4\s*(?:l|liters?|litres?)\b|\b273\.15\b|\b8\.314\b|\b0\.0?8206\b|\b96,?485\b|\b3\.14159\d*\b|\b2\.71828\d*\b"
+    r"|\b9\.8[01]?\s*m\s*/\s*s)", re.I)
+
+
+def strip_constants(text: str) -> str:
+    """The text with math and physical constants and percent contexts ('x 100', '100%', 'a 100 g sample') blanked: they
+    are never evidence that a text is about a graded item (decision: givens and constants are not key values)."""
+    return _CONST_CONTEXT.sub(" ", text or "")
+
+
 class _Text:
     """Everything the matcher needs to know about one piece of text, computed once."""
 
     def __init__(self, text: str):
         self.raw = text or ""
-        self.fm = forms_map(self.raw)
+        self.fm = forms_map(strip_constants(self.raw))
         self.forms = {f for v in self.fm.values() for f in v}
         consts = given_constants(self.raw)
-        self.sig = [n for n in dict.fromkeys(numbers(self.raw)) if not _small(n) and n not in consts]
+        self.sig = [n for n in dict.fromkeys(numbers(strip_constants(self.raw))) if not _small(n) and n not in consts]
         self.tok = content_tokens(self.raw)
         self.mrows = matrix_rows(self.raw)
         self.erows = equation_rows(self.raw)
+
+
+_ROW_SEP = r"\s*(?:,|;|&|\\&|\||\s)\s*"
+
+
+def _row_regex(row: list[str], extra: int = 0) -> "re.Pattern[str]":
+    nums = [re.escape(x) + (r"(?:\.0+)?" if "." not in x else "0*") for x in row]
+    body = _ROW_SEP.join(nums)
+    tail = (r"(?:" + _ROW_SEP + r"-?\d+(?:\.\d+)?){0,%d}" % extra) if extra else ""
+    return re.compile(r"[\[(]?\s*(?<![\d.])" + body + tail + r"(?![\d.]*\d)\s*[\])]?")
+
+
+def given_rows(item: dict[str, Any] | None) -> list[list[str]]:
+    """The item's own statement as rows of numbers (matrix rows, vectors, the columns of its equations), whole rows of
+    three or more entries only."""
+    b = _Text((item or {}).get("body") or "")
+    rows = [r for r in [*b.mrows, *b.erows] if len(r) >= 3 and all(re.fullmatch(_NUM.pattern, x) for x in r)]
+    return [list(r) for r in sorted({tuple(r) for r in rows}, key=lambda r: -len(r))]
+
+
+def mask_givens(text: str, item: dict[str, Any] | None) -> str:
+    """The text with the item's own givens blanked: its matrix rows, vectors and equations restated as they stand (an
+    augmented row may carry up to three more entries). Givens are never answer values (decision 1), so a guide or a
+    question that only restates the problem is not an answer; a row that merely differs is left alone."""
+    t = text or ""
+    if not item or not (item.get("body") or "").strip() or not t.strip():
+        return t
+    for row in given_rows(item):
+        t = _row_regex(row, extra=3 if len(row) <= 4 else 0).sub(" ", t)
+    for line in (item.get("body") or "").splitlines():
+        flat = re.sub(r"[\s`*]+", "", line)
+        if "=" in flat and re.search(r"\d", flat) and len(flat) >= 6 and not re.search(r"[A-Za-z]{4,}", flat):
+            t = re.sub(r"\s*".join(re.escape(ch) for ch in flat), " ", t)
+    return t
+
+
+_NUMW = r"(?:\d{1,2}|one|two|three|four|five|six)"
+_STRUCT = re.compile(
+    r"\b(?:row|rows|column|columns|col|equation|equations|step|steps|line|pivot|stage|round|pass|part|case)\s*#?\s*" + _NUMW + r"\b"
+    r"|\b(?:first|last|next|final|these|those|other|remaining|previous)\s+" + _NUMW + r"\s+(?:[a-z]+\s+){0,2}(?:steps?|rows?|columns?|equations?|entries|pivots?|"
+    r"operations?|passes|lines|parts|stages|moves)\b"
+    r"|\b" + _NUMW + r"\s+(?:[a-z]+\s+){0,1}(?:steps?|rows?|columns?|equations?|operations?|passes|stages|moves)\b", re.I)
+
+
+def mask_structure(text: str) -> str:
+    """The text with counts of the method's own structure blanked ('the first two steps', 'row 2', 'step three'): they
+    number the steps of a method, not a value of the problem."""
+    return _STRUCT.sub(" ", text or "")
+
+
+def _kl(text: str, item: dict[str, Any] | None, ctx: dict[str, Any] | None = None) -> list[str]:
+    """key_leak on the text with the item's own givens and the method's step counts masked."""
+    return key_leak(mask_structure(mask_givens(text, item)), item, ctx)
 
 
 def _overlap_score(q: str, b: str, paste_only: bool = False) -> float:
@@ -670,7 +739,7 @@ def _overlap_score(q: str, b: str, paste_only: bool = False) -> float:
         return score
     if ((len(qt) >= 5 and qn) or len(qt) >= 8) and of_question >= 0.8 and (not qn or nums_inside) and len(words_in) >= 3:
         score = max(score, of_question)
-    if len(qn) >= 2 and nums_inside and of_question >= 0.5 and len(inter) >= 4:
+    if len(qn) >= 2 and nums_inside and of_question >= 0.5 and len(inter) >= 4 and any(not _small(n) for n in qn):
         score = max(score, of_question)
     return score
 
@@ -808,7 +877,8 @@ def _essay_match(question: str, essays: list[dict[str, Any]]) -> tuple[float, di
         shared = len(qtok & _essay_topic_tokens(it))
         # only a request for wording or a model answer goes to concepts mode; questions about the essay (due date, AI
         # policy, what a source says) are answered normally
-        ok = wr and (poss or part or shared >= 1 or len(essays) == 1 and bool(_MODEL_PHRASE.search(question)))
+        in_title = bool(qtok & content_tokens(it.get("title") or ""))  # one word of the essay's own title names it
+        ok = wr and (shared >= 2 or (shared >= 1 and in_title) or (len(essays) == 1 and (poss or part or bool(_MODEL_PHRASE.search(question)))))  # 2+ of its own topic words
         if ok:
             sc = 0.8 + min(0.15, 0.03 * shared)
             if best is None or sc > best[0]:
@@ -843,9 +913,25 @@ _CHECK_ASK = re.compile(
 _GENERIC_CHECK = re.compile(r"\bin general\b|\bhow\s+(?:do|can|should|would|to)\b[^.?!]{0,12}\b(?:check|verify|confirm)\b", re.I)
 
 
+_HOWTO_CHECK = re.compile(r"\bhow\s+(?:do|can|should|would|could|to|might)\b[^.?!\n]{0,24}\b(?:check|verify|confirm|test|validate)\b", re.I)
+_TOOL_REF = re.compile(r"\b(?:in|with|using)\s+(?:julia|python|matlab|numpy|scipy|sympy|r|excel|sheets|mathematica|octave|java|c\+\+|code)\b|"
+                       r"\b(?:script|syntax|command line|library|package|compile|debug|error message|jupyter|notebook)\b", re.I)
+
+
+def _states_value(text: str) -> bool:
+    """The text carries a value of the student's own ('I got 5.11 g', 'x = 3/2', 'is it 0.0875?'), not an exponent or label."""
+    t = re.sub(r"\^\s*\{?-?\d+\}?|\b(?:problem|question|row|column|step|part|chapter|lecture|section|pset|set)\s*\d+", " ", text or "", flags=re.I)
+    if re.search(r"(?:=|\bis\b|\bgot\b|\bget\b|\bfound\b|\bobtained\b|\banswer\b)\s*\(?\s*-?\d", t, re.I):
+        return True
+    return any(_distinctive(n) for n in numbers(t))
+
+
 def is_check_ask(text: str) -> bool:
-    """'Check my answer', 'I got 5.11 g, right?', 'is x = (1,1,2) correct': a request to confirm or deny an answer."""
+    """'Check my answer', 'I got 5.11 g, right?', 'is x = (1,1,2) correct': a request to confirm or deny an answer. 'How do
+    I check eigenvalues in Julia?' is a how-to question: a check ask needs a value or a draft in the message."""
     t = text or ""
+    if _HOWTO_CHECK.search(t) and not _states_value(t) and not essay.draft_request(t):
+        return False
     return bool(_CHECK_ASK.search(t)) or bool(re.search(r"(?:right|correct)\s*\?\s*$", t.strip(), re.I))
 
 
@@ -935,6 +1021,40 @@ def is_draft_feedback(question: str) -> bool:
     return bool(essay.draft_request(question))
 
 
+_SET_WORD = re.compile(r"\b(?:problem\s*set|problem\s*sheet|pset|p-set|homework|hw|worksheet|assignment)s?\b", re.I)
+_SET_WORDS_PFX = frozenset({"probl", "set", "pset", "homew", "hw", "works", "sheet", "assig"})
+
+
+def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[str, Any] | None:
+    """'I'm stuck on the LU question from my problem set': the request names a problem set without a number and one of
+    the topic words of a graded set. It touches every item of that set (a concepts-only stand-in with `members`), so
+    follow-ups about its entries are guarded though no single item was named."""
+    if not _SET_WORD.search(question) or is_logistics(question):
+        return None
+    stripped = _SET_WORD.sub(" ", question)
+    groups: dict[Any, list[dict[str, Any]]] = {}
+    for it in items:
+        if it["kind"] != "essay" and (it.get("body") or "").strip() and it.get("material_id"):
+            groups.setdefault(it["material_id"], []).append(it)
+    best, top = None, 0
+    for mid, its in groups.items():
+        if len(its) < 2:
+            continue
+        words = _pfx_set(stripped) - _SET_WORDS_PFX
+        words |= {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", stripped)}
+        mat = store.material(mid) or {}
+        have = _pfx_set(f"{mat.get('title', '')} " + " ".join(f"{i.get('title', '')} {i.get('body', '')}" for i in its))
+        have |= {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", " ".join(f"{i.get('title', '')} {i.get('body', '')}" for i in its))}
+        n = len((words & have) - _SET_WORDS_PFX - {w[:5] for w in GENERIC})
+        if n > top:
+            best, top = its, n
+    if best and top >= 1:
+        out = _combined(store, best)
+        out.update(score=0.7)
+        return out
+    return None
+
+
 def match_graded(store, course_id: int, question: str) -> dict | None:
     """The graded item this request is about (a paraphrase, one step, a notation change, a reference, or a request to
     write prose for a graded essay), or None. The result is the graded_items row plus `kind`, `score` and `source`
@@ -954,10 +1074,16 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     scored: list[tuple[float, dict[str, Any]]] = []
     keyed = key_leak_any(store, course_id, question, items, {"lone": True})  # the message carries a final value: a check ask
     refs: list[dict[str, Any]] = []
-    texts: dict[int, _Text] = {}
+    texts: dict[int, _Text] = {i["id"]: _Text(i.get("body") or "") for i in items}
+    if keyed is not None:
+        # a pasted problem goes to the item it pastes: the item a final value belongs to wins only when no other item is
+        # pasted as it stands (decision 8, 'Problem 2 pasted is not Problem 3')
+        pasted = {i["id"]: score_text(q, texts[i["id"]]) for i in items if i["kind"] not in ("essay",) and (i.get("body") or "").strip()}
+        if pasted.get(keyed["id"], 0.0) < 0.6 and max(pasted.values(), default=0.0) >= 0.9:
+            keyed = None
     for it in items:
         essay_kind = it["kind"] == "essay" and bool((it.get("body") or "").strip())
-        b = texts[it["id"]] = _Text(it.get("body") or "")
+        b = texts[it["id"]]
         if keyed is not None and it["id"] == keyed["id"]:
             scored.append((1.0, it))
             continue
@@ -982,6 +1108,8 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     written = [i for i in items if i["kind"] in ("essay", "proof") and (i.get("body") or "").strip()]
     numeric_hit = any(it["kind"] not in ("essay", "proof") and (it.get("body") or "").strip()
                       and score_text(q, texts.get(it["id"]) or _Text(it.get("body") or "")) >= 0.6 for it in items)
+    numeric_hit = numeric_hit or any(sc >= 0.85 and it["kind"] not in ("essay", "proof") and it not in refs
+                                  and (keyed is None or it["id"] != keyed["id"]) for sc, it in scored)
     fb = None if numeric_hit else essay.draft_item(question, written, items)  # a pasted draft of an essay or proof
     if fb:
         return dict(fb, source="material" if fb.get("material_id") else "item", score=0.95, intent="feedback")
@@ -989,7 +1117,7 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     if em:
         scored.append(em)
     if not scored:
-        return None
+        return _set_topic_match(store, items, question)
     best = max(scored, key=lambda x: (round(x[0], 2), _own_ref(question, x[1]),
                                       round(_closeness(q, x[1], texts.get(x[1]["id"]) or _Text("")), 3), -x[1]["id"]))
     score, item = best
@@ -1067,7 +1195,8 @@ def _leaks_problem(r: _Text, b: _Text, reply: str, question_matches: bool = Fals
         return True
     if g >= 3 and m >= max(2, math.ceil(0.6 * g)) and dm >= 1:
         return True
-    return g == 1 and m == 1 and dm == 1 and question_matches
+    # an item with a single number (a keyless conceptual question with '100.0 mL' in it) is never matched on that number alone
+    return False
 
 
 def _quote_ratio(p: str, source: str) -> float:
@@ -1097,6 +1226,12 @@ def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
                             or score_text(_Text(question), b) >= 0.5)
 
 
+def _tool_howto(question: str) -> bool:
+    """A how-to question about a tool or code ('how do I check eigenvalues of A^4 in Julia?'), not a request for writing."""
+    q = question or ""
+    return bool(_TOOL_REF.search(q)) and not writing_request(q) and not essay.draft_request(q)
+
+
 def _hit(it: dict[str, Any], reason: str = "reply") -> dict[str, Any]:
     out = dict(it)
     out.pop("intent", None)  # a draft-feedback turn must not make the next ordinary question a draft
@@ -1116,10 +1251,10 @@ def _leaks_forced(it: dict[str, Any], reply: str, question: str, sources: list[A
     body = (it.get("body") or "").strip()
     if kind == "problem" and body:
         b, r = _Text(body), _Text(reply)
-        if _leaks_problem(r, b, reply, True):
-            return True
         if item_key(it):  # a key judges the reply (key_leak, with the chat's context); given data is never a key value
             return False
+        if _leaks_problem(r, b, reply, True):
+            return True
         if component_leak(it, reply, question) or _unit_result(body, reply):
             return True
         found = {c for c in _reply_numbers(reply) if _distinct_val(c) and c not in _index(it).given | _text_numbers_given(it)
@@ -1127,6 +1262,8 @@ def _leaks_forced(it: dict[str, Any], reply: str, question: str, sources: list[A
         return len(found) >= 2 and bool(_RESULTISH.search(reply))
     if kind == "proof" and body:
         return _leaks_proof(it, reply, question)
+    if kind == "essay" and body and _tool_howto(question):
+        return False
     if kind == "essay" and body:
         lvl = essay.level(it, reply, question, True, sources)
         return lvl >= 2 or (lvl == 1 and not essay.is_short_answer(it))
@@ -1149,15 +1286,27 @@ def _unit_result(body: str, reply: str) -> bool:
     return False
 
 
+def force_map(items: list[dict[str, Any]], force_item: dict | None) -> dict[int, dict[str, Any]]:
+    """The items a chat touched, by id: the one item, or every member of a touched set."""
+    if not force_item:
+        return {}
+    if force_item.get("members"):
+        by_id = {i["id"]: i for i in items}
+        return {m: dict(by_id[m], source="material" if by_id[m].get("material_id") else "item", score=1.0,
+                        reason="sticky") for m in force_item["members"] if m in by_id}
+    return {force_item["id"]: force_item} if force_item.get("id") is not None else {}
+
+
 def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with_cites: str,
                     force_item: dict | None) -> dict[str, Any] | None:
     """The item whose key the reply gives away (most matches), judged with each item's own chat context."""
     best, top = None, 0
+    forced = force_map(items, force_item)
     for it in items:
         if not item_key(it):
             continue
-        ctx = reply_ctx(it, question, reply, force_item)
-        n = len(key_leak(reply, it, ctx) or key_leak(with_cites, it, ctx))
+        ctx = reply_ctx(it, question, reply, forced.get(it["id"]))
+        n = len(_kl(reply, it, ctx) or _kl(with_cites, it, ctx))
         if n > top:
             best, top = it, n
     return best
@@ -1182,11 +1331,13 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         return _hit(k, "key")
     if keys_only:
         return None
-    if force_item and _leaks_forced(force_item, reply, question or "", sources):
-        return _hit(force_item, "sticky")
-    if force_item and question and is_check_ask(question) and confirms_answer(reply) \
-            and (force_item.get("kind") or _item_kind(force_item)) in ("problem", "proof"):
-        return _hit(force_item, "sticky")
+    for fi in force_map(items, force_item).values():
+        if _leaks_forced(fi, reply, question or "", sources):
+            return _hit(fi, "sticky")
+    for fi in force_map(items, force_item).values():
+        if question and is_check_ask(question) and confirms_answer(reply) \
+                and (fi.get("kind") or _item_kind(fi)) in ("problem", "proof"):
+            return _hit(fi, "sticky")
     r = _Text(reply)
     q = _Text(question or "")
     best: tuple[float, dict[str, Any], str] | None = None
@@ -1203,9 +1354,11 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         hit, soft = False, False
         if kind == "problem" and body:
             b = _Text(body)
-            hit = not (given_ok and item_key(it)) and _leaks_problem(r, b, reply, score_text(q, b) >= 0.5)
+            hit = not item_key(it) and _leaks_problem(r, b, reply, score_text(q, b) >= 0.5)  # a key judges a keyed item: givens are not answers
         elif kind == "proof" and body:
             hit = _leaks_proof(it, reply, question or "")
+        elif kind == "essay" and body and _tool_howto(question):
+            continue  # 'how do I check eigenvalues in Julia?' is about code: the essay's topic words do not make it essay prose
         elif kind == "essay" and body:
             lvl = essay_leak_level(it, with_cites, question or "", False, sources)
             hit, soft = lvl > 0, lvl == 1
@@ -1264,7 +1417,9 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_T
         if m.get("role") == "user":
             text = m.get("content") or ""
             found = match_graded(store, course_id, text)
-            if found and found.get("id"):
+            if found and found.get("members"):  # a whole set was named or described: every item in it is touched
+                found = dict(found, kind="problem")
+            if found and (found.get("id") or found.get("members")):
                 item, since, last = found, 0, found
             elif item is not None:
                 if names_item(text, item) or question_names(item, text):
@@ -1282,7 +1437,8 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_T
         item = last  # a question that names one of its key entries ('l31', 'x3', 'ratio') touches the item again
     if item is None:
         return None
-    if item.get("kind") == "essay" and _READING_REF.search(question or "") and not writing_request(question or ""):
+    if item.get("kind") == "essay" and (_READING_REF.search(question or "") or _TOOL_REF.search(question or "")) \
+            and not writing_request(question or ""):
         return None
     return dict(item, source="material" if item.get("material_id") else "item", score=1.0, reason="sticky")
 
@@ -2205,7 +2361,7 @@ def _legacy_key_leak(store, course_id, text, items=None, ctx=None):
     best, top = None, 0
     base = dict(ctx or {"named": True})
     for it in (items if items is not None else graded_view(store, course_id)):
-        n = len(key_leak(text, it, base))
+        n = len(_kl(text, it, base))
         if n > top:
             best, top = it, n
     return best
@@ -2231,7 +2387,7 @@ def _text_numbers_given(item: dict[str, Any]) -> set[str]:
 
 def has_candidate(question: str, item: dict[str, Any]) -> bool:
     """The student's message carries a candidate value for one of the item's unknowns."""
-    if states_unknown(item, question) or key_leak(question or "", item, {"lone": True}):
+    if states_unknown(item, question) or _kl(question or "", item, {"lone": True}):
         return True
     given = _index(item).given | _text_numbers_given(item)
     return any(_distinct_val(n) and n not in given for n in _reply_numbers(question or ""))
@@ -2331,17 +2487,16 @@ def build_answer_key(store, item_id: int, provider) -> list[str]:
 
 def ensure_keys(store, course_id: int, provider) -> int:
     """Fill the key of every numeric item with none (a lazy fill, run on the next Ask or Study when a provider is
-    available). An item whose key came back empty is tried again, up to MAX_KEY_TRIES times in all. Returns how many
-    keys were made."""
+    available). An item whose build failed is NOT retried here (no hidden model calls on every Ask or Study action): it
+    stays 'couldn't be made' until the student presses Try again. Returns how many keys were made."""
     if provider is None:
         return 0
     n = 0
     for it in graded_view(store, course_id):
         if it["kind"] != "problem" or not (it.get("body") or "").strip() or item_key(it):
             continue
-        stored = (it.get("answer_key") or "").strip()
-        if stored and _key_tries(store, it["id"]) >= MAX_KEY_TRIES:
-            continue
+        if (it.get("answer_key") or "").strip():
+            continue  # a failed build is stored as '[]' and stays failed until the student presses Try again
         if build_answer_key(store, it["id"], provider):
             n += 1
     return n
@@ -2782,7 +2937,7 @@ def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_
     a not-covered sentence) is level 0 sentence by sentence, so it passes on the first try."""
     reply = _CITE_STRIP.sub("", raw or "")
     body = (graded.get("body") or "").strip()
-    if item_key(graded) and key_leak(reply, graded, {"named": True, "sticky": True, "short": len(reply.split()) < 80,
+    if item_key(graded) and _kl(reply, graded, {"named": True, "sticky": True, "short": len(reply.split()) < 80,
                                                       "question_refs": question_refs(graded, question)}):
         return 2
     if kind == "problem" and body:
@@ -3090,10 +3245,51 @@ def _text_key_item(items: list[dict[str, Any]], whole: str, text: str) -> dict[s
     for it in items:
         if not item_key(it):
             continue
-        n = len(key_leak(text, it, {"named": True, "guide": True, "small": touches(whole, it) or len(text.split()) <= 15}))
+        n = len(_kl(text, it, {"named": True, "guide": True, "small": touches(whole, it) or len(text.split()) <= 15}))
         if n > top:
             best, top = it, n
     return best
+
+
+def copies_item(text: str, it: dict[str, Any], rows: bool = False) -> bool:
+    """The text reproduces a graded question (most of its words and its own numbers), as a card, a guide part or a practice
+    question does when it copies the assignment. A twin with other numbers is not a copy."""
+    body = (it.get("body") or "").strip()
+    if it.get("kind") not in ("problem", None) or not body or len((text or "").split()) < 5:
+        return False
+    b, r = _Text(body), _Text(text)
+    if rows and _row_hits(r, b) >= 2:  # a practice question that restates the item's own matrix rows or equations
+        return True
+    if _overlap_score(text, body, paste_only=True) < 0.5:
+        return False
+    if not b.sig:
+        return True
+    hit = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
+    return len(hit) >= max(1, math.ceil(0.6 * len(b.sig)))
+
+
+_CONV_PAIR = re.compile(r"(" + _NUM.pattern + r")\s*(ml|l|liters?|litres?|kg|g|mg|mol|mmol)\b\s*(?:=|\u2248|is|equals)\s*(" + _NUM.pattern +
+                        r")\s*(ml|l|liters?|litres?|kg|g|mg|mol|mmol)\b", re.I)
+
+
+def pure_conversion(text: str) -> bool:
+    """The text only converts one quantity into another unit ('250 mL = 0.250 L'): it states no result, so it is never
+    an answer fragment."""
+    t = _norm_hay(text or "")
+    found = False
+    for m in _CONV_PAIR.finditer(t):
+        u1, u2 = (("l" if u.lower().startswith(("liter", "litre")) else u.lower()) for u in (m.group(2), m.group(4)))
+        if u1 not in _UNIT_SCALE or u2 not in _UNIT_SCALE:
+            continue
+        try:
+            n1, n2 = Decimal(_canon(m.group(1))), Decimal(_canon(m.group(3)))
+            ok = n1 * _UNIT_SCALE[u1] == n2 or n2 * _UNIT_SCALE[u2] == n1 or (u1 == u2 and n1 == n2)
+        except InvalidOperation:
+            continue
+        if not ok:
+            return False
+        found = True
+    return found and not re.search(r"\d", _CONV_PAIR.sub(" ", t))
 
 
 def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
@@ -3123,7 +3319,7 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
     scored = []
     for it in problems:
         b = _Text(it["body"])
-        if it["kind"] == "problem" and _leaks_problem(r, b, clean, True, worked_required=False):
+        if it["kind"] == "problem" and not item_key(it) and _leaks_problem(r, b, clean, True, worked_required=False):
             scored.append((_closeness(r, it, b), it))
     if scored:
         return out(max(scored, key=lambda x: x[0])[1], "guide")
@@ -3137,7 +3333,7 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
         or bool(matrix_rows(body or ""))  # cite stripping eats small-number rows like [3,1,0]; read the raw body too
     topical = [it for it in nokey if len(content_tokens(clean) & _Text(it["body"]).tok) >= 1]
     wc = _prose_word_count(clean)
-    if nokey and wc <= 14 and ((has_math and (wc <= 4 or topical or not english)) or (topical and bool(numbers(clean)))):
+    if nokey and wc <= 14 and not pure_conversion(clean) and ((has_math and (wc <= 4 or topical or not english)) or (topical and bool(numbers(clean)))):
         return out((topical or nokey)[0], "answer_only")
     # an answer given in another language: numbers or topic words of a graded item inside a non-English body
     if not english:
@@ -3165,12 +3361,20 @@ def check_card(store, course_id: int, front: str, back: str) -> dict | None:
             if named and (any(re.fullmatch(r"[a-z]\d{1,3}", n) for n in named) or touches(text, it)) \
                     and component_leak(it, back, front):
                 return _hit(it, "key")
+    for it in items:  # 'd for problem 1 -> ten', 'carbon atoms in the formula -> 3': a bare value of the item's own entries
+        if item_key(it) and len(back.split()) <= 3 and touches(text, it):
+            vals = {e.val for e in _index(it).entries if e.val not in _index(it).given}
+            if any(num_eq(a, b) for a in _reply_numbers(back) for b in vals) and not pure_conversion(text):
+                return _hit(it, "key")
     hit = check_reply(store, course_id, front, text)
     if hit:
         return hit
+    for it in items:
+        if it["kind"] == "problem" and copies_item(back, it):
+            return _hit(it, "card")
     r = _Text(_CITE_STRIP.sub("", text))
     for it in graded_view(store, course_id):
-        if it["kind"] == "problem" and (it.get("body") or "").strip() and \
+        if it["kind"] == "problem" and (it.get("body") or "").strip() and not item_key(it) and \
                 _leaks_problem(r, _Text(it["body"]), text, True, worked_required=False):
             return _hit(it, "card")
     return None
@@ -3210,11 +3414,24 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
     LAST_SCRUB_ITEMS = []
 
     def hit_of(seg: str) -> dict[str, Any] | None:
-        return check_reply(store, course_id, question, seg, given_ok=True)
+        h = check_reply(store, course_id, question, seg, given_ok=True)
+        if h:
+            return h
+        # a practice question that copies a graded question word for word is dropped, not just its solution
+        text_only = re.sub(r"</?(?:details|summary)>|Show (?:solution|answer)", " ", seg, flags=re.I)
+        for it in items:
+            if it["kind"] == "problem" and copies_item(re.sub(r"^\s*(?:\d+[.)]|[-*])\s*", "", text_only.strip()), it, rows=True):
+                return _hit(it, "copy")
+        return None
 
+    drop_details = False
     for seg in parts:
         if not seg.strip() or _SEG_SPLIT.fullmatch(seg) and not seg.lower().startswith("<details>"):
             out.append(seg)
+            continue
+        if drop_details and seg.lower().startswith("<details>"):
+            drop_details = False  # the solution of a copied question goes with it
+            n += 1
             continue
         hit = hit_of(seg)
         if not hit:
@@ -3225,6 +3442,7 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
                         break
         if hit:
             n += 1
+            drop_details = hit.get("reason") == "copy" and not seg.lower().startswith("<details>")
             names.append(_item_name(hit))
             kinds.append(hit.get("kind"))
             if hit.get("id") and hit["id"] not in LAST_SCRUB_ITEMS:

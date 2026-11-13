@@ -1229,7 +1229,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
     why = "match" if graded else ""
     # a chat that recently touched a graded item has its REPLIES checked against that item (never its questions routed).
     # "Ask normally" turns routing off only: the item the question or chat is about still has every reply checked.
-    sticky = None if graded else (matched if (matched and matched.get("id")) else None) or \
+    sticky = None if graded else (matched if (matched and (matched.get("id") or matched.get("members"))) else None) or \
         integrity.sticky_item(store, course_id, question)
     sources: list[Source] = []
     fixed, caught, answer = False, None, None
