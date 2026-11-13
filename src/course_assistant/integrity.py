@@ -940,13 +940,15 @@ def _combined(store, items: list[dict[str, Any]], kind: str = "essay") -> dict[s
             "label": "", "answer_key": _json.dumps(key), "source": "material" if first.get("material_id") else "item", "members": [i["id"] for i in items]}
 
 
-_CHECK_ASK = re.compile(
+_CHECK_VERB = re.compile(
     r"\b(check|verify|confirm|double[- ]?check|grade (?:my|this)|sanity[- ]check|"
-    r"(?:is|was|are)\b[^.?!\n]{0,60}\b(?:right|correct|wrong|incorrect|good)\b|"
     r"am i\s+(?:right|correct|close|on track)|did i\s+(?:get|do|solve|make|mess)|"
-    r"(?:right|correct|ok(?:ay)?)\s*\?|"
-    r"i\s+(?:got|get|found|came up with|calculated|computed|ended up with|think (?:it|the answer) is)|"
-    r"my\s+(?:answer|solution|result|work|attempt|value))\b", re.I)
+    r"i\s+(?:got|get|found|came up with|calculated|computed|ended up with|think (?:it|the answer) is))\b", re.I)
+# "is that right?", "..., correct?", "my answer": a check ask only when the message also states a value or a draft
+_CHECK_WEAK = re.compile(
+    r"\b((?:is|was|are)\b[^.?!\n]{0,60}\b(?:right|correct|wrong|incorrect|good)\b|"
+    r"(?:right|correct|ok(?:ay)?)\s*\?|my\s+(?:answer|solution|result|work|attempt|value))\b|(?:right|correct|ok(?:ay)?)\s*\?", re.I)
+_CHECK_ASK = _CHECK_VERB  # kept for callers that import the name: the strong forms
 
 
 _GENERIC_CHECK = re.compile(r"\bin general\b|\bhow\s+(?:do|can|should|would|to)\b[^.?!]{0,12}\b(?:check|verify|confirm)\b", re.I)
@@ -960,18 +962,29 @@ _TOOL_REF = re.compile(r"\b(?:in|with|using)\s+(?:julia|python|matlab|numpy|scip
 def _states_value(text: str) -> bool:
     """The text carries a value of the student's own ('I got 5.11 g', 'x = 3/2', 'is it 0.0875?'), not an exponent or label."""
     t = re.sub(r"\^\s*\{?-?\d+\}?|\b(?:problem|question|row|column|step|part|chapter|lecture|section|pset|set)\s*\d+", " ", text or "", flags=re.I)
+    t = _blank_logistics(t)  # a due date, a clock time, a point value or a count is no value of the student's
     if re.search(r"(?:=|\bis\b|\bgot\b|\bget\b|\bfound\b|\bobtained\b|\banswer\b)\s*\(?\s*-?\d", t, re.I):
         return True
+    if any(re.search(r"\d", f) for f in re.findall(r"\b(?:[A-Z][a-z]?\d*){2,}\b", t)):
+        return True  # a formula (C5H10O3) is a value
     return any(_distinctive(n) for n in numbers(t))
 
 
 def is_check_ask(text: str) -> bool:
     """'Check my answer', 'I got 5.11 g, right?', 'is x = (1,1,2) correct': a request to confirm or deny an answer. 'How do
-    I check eigenvalues in Julia?' is a how-to question: a check ask needs a value or a draft in the message."""
+    I check eigenvalues in Julia?' is a how-to question and 'Problem Set 2 is due Thursday, right?' is logistics: a
+    check ask needs a value or a draft in the message (or a plain 'check/verify/confirm/grade my' verb)."""
     t = text or ""
-    if _HOWTO_CHECK.search(t) and not _states_value(t) and not essay.draft_request(t):
+    stated = _states_value(t) or bool(essay.draft_request(t))
+    if _HOWTO_CHECK.search(t) and not stated:
         return False
-    return bool(_CHECK_ASK.search(t)) or bool(re.search(r"(?:right|correct)\s*\?\s*$", t.strip(), re.I))
+    if _LOGISTICS.search(t) and not _SOLVE_ASK.search(t) and not essay.draft_request(t) and not (
+            "=" in t or re.search(r"\bi\s+(?:got|get|found)\b|\bmy\s+(?:answer|solution|result)\b", t, re.I)
+            or any(_distinctive(n) for n in numbers(_blank_logistics(t)))):
+        return False  # due dates, times, counts, percentages and points are never an answer to check
+    if _CHECK_VERB.search(t):
+        return True
+    return bool(_CHECK_WEAK.search(t)) and stated
 
 
 _TOPIC_PHRASE = re.compile(r"\b(?:the|that|this|my|our)\s+([\w'+ -]{2,40}?)\s+(?:problem|question|exercise|one|homework|task)\b", re.I)
@@ -1105,6 +1118,13 @@ def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[
     return None
 
 
+def _proof_markers(question: str) -> bool:
+    """The message names a proof item ('Problem 4') or carries proof wording: 'prove', 'suppose ... then', QED."""
+    q = question or ""
+    return bool(_prob_refs(q) or re.search(r"\b(?:prove|proof|lemma|theorem)\b", q, re.I) or _PROOF_END.search(q) or proof_shaped(q, short=True)
+                or re.search(r"\bsuppose\b[^.?!]{0,200}\bthen\b", q, re.I))
+
+
 def match_graded(store, course_id: int, question: str) -> dict | None:
     """The graded item this request is about (a paraphrase, one step, a notation change, a reference, or a request to
     write prose for a graded essay), or None. The result is the graded_items row plus `kind`, `score` and `source`
@@ -1145,7 +1165,8 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
             sc = _overlap_score(q.raw, b.raw, paste_only=True)
         else:
             sc = score_text(q, b)
-            if sc == 0 and check and it["kind"] in ("problem", "proof"):
+            named_other = bool(_prob_refs(question)) and not _own_ref(question, it)  # an explicit 'Problem N' beats topic overlap
+            if sc == 0 and check and it["kind"] in ("problem", "proof") and not named_other:
                 shared = len(q.tok & b.tok) + sum(1 for a in set(re.findall(r"\b[A-Z]{2,4}\b", q.raw))
                                                   if re.search(rf"\b{a}\b", b.raw))
                 loose = topic_overlap(q.raw, it)
@@ -1160,7 +1181,10 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
                       and score_text(q, texts.get(it["id"]) or _Text(it.get("body") or "")) >= 0.6 for it in items)
     numeric_hit = numeric_hit or any(sc >= 0.85 and it["kind"] not in ("essay", "proof") and it not in refs
                                   and (keyed is None or it["id"] != keyed["id"]) for sc, it in scored)
-    fb = None if numeric_hit else essay.draft_item(question, written, items)  # a pasted draft of an essay or proof
+    drafts = written
+    if any(i["kind"] == "essay" for i in written) and not _proof_markers(question):
+        drafts = [i for i in written if i["kind"] == "essay"]  # a pasted essay intro never goes to a proof item
+    fb = None if numeric_hit else essay.draft_item(question, drafts, items)  # a pasted draft of an essay or proof
     if fb:
         return dict(fb, source="material" if fb.get("material_id") else "item", score=0.95, intent="feedback")
     em = _essay_match(question, essays)
@@ -1312,13 +1336,14 @@ _P_END = re.compile(r"\b(?:therefore|thus|hence|so|it follows|which (?:shows|mea
                     r"this proves|we conclude)\b", re.I)
 
 
-def proof_shaped(reply: str) -> bool:
+def proof_shaped(reply: str, short: bool = False) -> bool:
     """A step-by-step derivation ('Suppose ... Then ... Hence ... Therefore ...') whether or not it ends with QED: four
     or more sentences that carry a proof step, one that opens it and one that closes it, with an equation in a step
-    or at least five steps."""
+    or at least five steps. short: three steps are enough when one has an equation (the whole proof of a short item)."""
     sents = [x for x in re.split(r"(?<=[.!?])\s+|\n+", _CITE_STRIP.sub("", reply or "")) if x.strip() and "?" not in x]
     steps = [x for x in sents if _P_STEP.search(x)]
-    if len(steps) < 4 or not any(_P_OPEN.search(x) for x in sents) or not any(_P_END.search(x) for x in steps[-2:]):
+    if len(steps) < (3 if short else 4) or not any(_P_OPEN.search(x) for x in sents) \
+            or not any(_P_END.search(x) for x in steps[-2:]):
         return False
     return any("=" in x for x in steps) or len(steps) >= 5
 
@@ -1329,7 +1354,7 @@ def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
         return False
     share = len(b.tok & content_tokens(reply)) / len(b.tok)
     if not _PROOF_END.search(reply):
-        return proof_shaped(reply) and share >= 0.3
+        return proof_shaped(reply, short=True) and share >= 0.3
     return share >= 0.5 or score_text(_Text(question), b) >= 0.5
 
 
@@ -1416,6 +1441,8 @@ def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with
             continue
         ctx = reply_ctx(it, question, reply, forced.get(it["id"]))
         n = len(_kl(reply, it, ctx) or _kl(_CITE_SOFT.sub("", with_cites, n_cites), it, ctx))
+        if not n and ctx.get("bare_vec") and (bare_vec_leak(reply, it, question) or bare_vec_leak(_CITE_SOFT.sub("", with_cites, n_cites), it, question)):
+            n = 1
         if n > top:
             best, top = it, n
     return best
@@ -2586,6 +2613,47 @@ def key_leak_any(store, course_id: int, text: str, items: list[dict[str, Any]] |
     return _legacy_key_leak(store, course_id, text, items, ctx)
 
 
+_SOLN_WORD = re.compile(r"\b(?:x\d{0,3}|solution|solutions|answer|answers|result|results|solved|solves)\b", re.I)
+
+
+def _vec_comps(item: dict[str, Any]) -> list[_Comp]:
+    given = _given_seqs(item)
+    return [c for c in _index(item).comps if c.kind == "vec" and len(c.rows[0]) >= 3 and not _stated(c.rows[0], given)]
+
+
+def bare_vec_leak(text: str, item: dict[str, Any] | None, question: str = "", sentences: bool = False) -> bool:
+    """An unnamed vector equal, in order, to one of the item's key vectors, in any rendering ('(1, 1, 2)', '[1; 1; 2]',
+    '1 1 2', '<1,1,2>', '(x1, x2, x3) = (1, 1, 2)'). The small-integer rule that lets '(1, 1, 2)' pass in any small
+    matrix does not apply here: callers use this only when the context is touched or named. sentences=True judges only
+    the sentences that name a solution, 'x', an answer or a result (or the item). A vector the question itself typed,
+    or one the problem states, is never a hit."""
+    vecs = _vec_comps(item) if item else []
+    if not vecs or not (text or "").strip():
+        return False
+    chunks = [text]
+    if sentences:
+        sents = _sentences_of(text)
+        chunks = [sn for i, sn in enumerate(sents)
+                  if _SOLN_WORD.search((sents[i - 1] + " " if i else "") + sn) or names_item(sn, item)]
+    qseqs = {tuple(sq) for _, sq in _Hay(question).seqs} if question else set()
+    for ch in chunks:
+        for _, seq in _Hay(mask_structure(mask_givens(ch, item))).seqs:
+            if tuple(seq) not in qseqs and any(_vec_hit(seq, c.rows[0], True, True) for c in vecs):
+                return True
+    return False
+
+
+def named_value_leak(text: str, item: dict[str, Any] | None) -> bool:
+    """A distinctive value of the key given to its own name ('d = 11', 'd is eleven'): a lone two-digit answer in a
+    saved guide or card needs its name to count, and with the name it is the answer."""
+    ix = _index(item) if item else None
+    if not ix or not ix.entries:
+        return False
+    h = _Hay(text)
+    return any(e.name and e.unit != "atom" and not _is_small(e.val) and e.val not in ix.given and not _is_const(e.val)
+               and h.named(e.name, e.val) for e in ix.entries)
+
+
 def touches(text: str, item: dict[str, Any]) -> bool:
     """A saved guide or card is about this item: it names it, or shares two of its concept words."""
     if names_item(text, item):
@@ -2631,6 +2699,8 @@ def reply_ctx(item: dict[str, Any], question: str, reply: str, force_item: dict 
            "question_refs": question_refs(item, question or "")}
     if question and not claims_check(question, item):
         ctx["asked"] = tuple(_reply_numbers(question))  # numbers the student typed are not leaked values
+    # an unnamed key vector is a hit when the chat touched the item or the question names it or asks for 'the solution'
+    ctx["bare_vec"] = bool(forced or named or (question and _SOLN_WORD.search(question) and touches(question, item)))
     return ctx
 
 
@@ -2917,6 +2987,53 @@ def search_safe(store, course_id: int, query: str, *, limit: int = 6, **kw) -> l
     except TypeError:
         graded = {m["id"] for m in store.materials(course_id) if m.get("graded")}
         return [s for s in retrieval.search(store, course_id, query, limit=limit, **kw) if s.get("material_id") not in graded]
+
+
+HANDOUT_NOTE = ("Part of your graded handout was not searched: its questions are kept out of answers, so something the "
+                "handout says about them may be missing here. Open the handout to read it.")
+
+
+def _question_paragraph(para: str, bodies: list[tuple[dict[str, Any], _Text]]) -> bool:
+    """The paragraph belongs to a graded question of its material: it quotes the question's words, or carries two of its
+    distinctive numbers or two of its rows or equations."""
+    t = _Text(para)
+    for it, b in bodies:
+        if _quote_ratio(para, it.get("body") or "") >= 0.3 or _row_hits(t, b) >= 2:
+            return True
+        hit = [n for n in b.sig if _distinctive(n) and b.fm.get(n, {n}) & t.forms]
+        if len(hit) >= 2:
+            return True
+    return False
+
+
+def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tuple[list[dict], int]:
+    """Passages of a graded material that are not its graded questions (equipment, procedure, settings, safety), found for
+    an ordinary question, and how many paragraphs that matched were left out because they hold a graded question.
+    Search never returns a graded question: each chunk is cut to its paragraphs that do not belong to one."""
+    items = graded_view(store, course_id)
+    by_mid: dict[int, list[tuple[dict[str, Any], _Text]]] = {}
+    for it in items:
+        if it.get("material_id") and (it.get("body") or "").strip():
+            by_mid.setdefault(it["material_id"], []).append((it, _Text(it["body"])))
+    if not by_mid or not (query or "").strip():
+        return [], 0
+    try:
+        found = retrieval.search(store, course_id, query, limit=max(limit * 2, 6), material_ids=sorted(by_mid))
+    except Exception:
+        return [], 0
+    out: list[dict] = []
+    left_out = 0
+    for src in found:
+        bodies = by_mid.get(src.get("material_id"))
+        if not bodies:
+            continue
+        paras = [x for x in re.split(r"\n\s*\n", src.get("text") or "") if x.strip()]
+        keep = [x for x in paras if not _question_paragraph(x, bodies)]
+        left_out += len(paras) - len(keep)
+        keep = [x for x in keep if len(x.split()) >= 4]  # a bare heading is no passage
+        if keep and len(out) < limit:
+            out.append(dict(src, text="\n\n".join(keep)))
+    return out, left_out
 
 
 def _assignment_sources(store, graded: dict, limit_chars: int = 6000) -> list[dict]:
@@ -3486,7 +3603,10 @@ def _text_key_item(items: list[dict[str, Any]], whole: str, text: str) -> dict[s
     for it in items:
         if not item_key(it):
             continue
-        n = len(_kl(text, it, {"named": True, "guide": True, "small": touches(whole, it) or len(text.split()) <= 15}))
+        about = touches(whole, it) or len(text.split()) <= 15
+        n = len(_kl(text, it, {"named": True, "guide": True, "small": about, "bare_vec": True}))
+        if not n and (bare_vec_leak(text, it, sentences=True) or (about and named_value_leak(text, it))):
+            n = 1  # 'The solution is (1, 1, 2)', 'd = 11 makes the system singular'
         if n > top:
             best, top = it, n
     return best
@@ -3615,6 +3735,10 @@ def check_card(store, course_id: int, front: str, back: str) -> dict | None:
             vals = {e.val for e in _index(it).entries if e.val not in _index(it).given}
             if any(num_eq(a, b) for a in _reply_numbers(back) for b in vals) and not pure_conversion(text):
                 return _hit(it, "key")
+    for it in items:  # 'Problem 3 answer vector' -> '(1, 1, 2)': the front names the item or asks for a solution
+        if item_key(it) and len(back.split()) <= 12 and (names_item(front, it) or (_SOLN_WORD.search(front) and touches(text, it))
+                                                         or _front_letters(it, front)) and bare_vec_leak(back, it, front):
+            return _hit(it, "key")
     hit = check_reply(store, course_id, front, text)
     if hit:
         return hit

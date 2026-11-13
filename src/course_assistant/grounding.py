@@ -1293,9 +1293,15 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
     sticky = None if graded else (matched if (matched and (matched.get("id") or matched.get("members"))) else None) or \
         integrity.sticky_item(store, course_id, question)
     sources: list[Source] = []
+    handout_note = ""
     fixed, caught, answer, reworded = False, None, None, None
     if not graded:
         sources = integrity.search_safe(store, course_id, question, limit=limit)
+        # a graded handout's own equipment, procedure and safety text is searchable; its questions never are
+        extra, left_out = integrity.handout_sources(store, course_id, question)
+        have = {x.get("chunk_id") for x in sources}
+        sources = sources + [x for x in extra if x.get("chunk_id") not in have]
+        handout_note = integrity.HANDOUT_NOTE if left_out and (not have or extra) else ""
         if integrity.is_logistics(question):
             sources = integrity.logistics_sources(store, course_id, question) + sources
         system, messages = build_messages(question, sources, depth=depth, history=history,
@@ -1349,6 +1355,9 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
                                 **({"keep_sources": sources} if sources and why in ("sticky", "soft_essay", "reply", "normal_reply") else {}))
     elif not fixed:
         answer = parse_answer(raw, sources)
+        if not graded and handout_note and route:
+            answer.blocks.insert(0, Block("text", handout_note, []))
+            answer.body_md = render_body(answer.blocks)
         if reworded:  # the retry was thinner than the first reply: never silently
             answer.blocks.insert(0, Block("text", integrity.reworded_note(reworded), []))
             answer.body_md = render_body(answer.blocks)
