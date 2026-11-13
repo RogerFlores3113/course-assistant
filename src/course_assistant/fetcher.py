@@ -27,7 +27,12 @@ class FetchError(Exception):
 
 
 class FetchBlocked(FetchError):
-    """The site's robots.txt asks robots not to fetch this page (or the address is not allowed)."""
+    """This page is not fetched: the site's robots.txt asks robots not to (reason "robots"), or the address is a
+    private or local one (reason "private"). The message says which, so callers can show it as it is."""
+
+    def __init__(self, message: str, reason: str = "robots"):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -101,10 +106,17 @@ class PoliteFetcher:
         addrs = [host] if _is_ip(host) else self.resolver(host, port)
         if not addrs:
             raise FetchError(f"I couldn't find the site {host}.")
-        for a in addrs:
-            if not is_public_ip(a):
-                raise FetchBlocked(f"I won't open {host}: it points to a private or local address on your own "
-                                   "network, not to a public website.")
+        bad = [a for a in addrs if not is_public_ip(a)]
+        if bad:
+            # One private address among the answers is enough to refuse: a name that resolves to both a public and
+            # a private address is the DNS rebinding trick (a "public" site that points back inside your network).
+            # Every redirect hop is checked again for the same reason.
+            mixed = len(bad) < len(addrs)
+            raise FetchBlocked(
+                f"I won't open {host}: it is a private or local address (your own computer or network), not a "
+                "public website. This is not about the site's robots.txt."
+                + (" The name also resolves to a private address, which can be a DNS rebinding trick, so I treat "
+                   "it as unsafe." if mixed else ""), reason="private")
 
     # ------------------------------------------------------------ one HTTP request, no redirects followed
     def _request(self, url: str, *, limit: int) -> tuple[httpx.Response, bytes]:
@@ -209,6 +221,21 @@ class PoliteFetcher:
         self._robots[key] = result
         return result
 
+    def why_blocked(self, url: str) -> tuple[str, str] | None:
+        """("private" | "robots", message to show) when this page would not be fetched for one of those reasons,
+        else None. Network or other errors are not a block."""
+        try:
+            p, host, port = self._parts(url)
+            self._check_host(host, port)
+        except FetchBlocked as exc:
+            return exc.reason, str(exc)
+        except FetchError:
+            return None
+        if not self.allowed(url):
+            return "robots", (f"{host} asks robots not to open this page (its robots.txt says no), so I didn't "
+                              "save it. You can open it in your browser and save it as a PDF to add it yourself.")
+        return None
+
     def allowed(self, url: str) -> bool:
         try:
             p, host, port = self._parts(url)
@@ -226,7 +253,8 @@ class PoliteFetcher:
         self._check_host(host, port)
         if not self.allowed(url):
             raise FetchBlocked(f"{host} asks robots not to open this page (its robots.txt says no), so I didn't "
-                               "save it. You can open it in your browser and save it as a PDF to add it yourself.")
+                               "save it. You can open it in your browser and save it as a PDF to add it yourself.",
+                               reason="robots")
         resp, body, final = self._safe_request(url, limit=self.max_bytes, rate_limit=True)
         if resp.status_code >= 400:
             raise FetchError(_status_message(resp.status_code, host))

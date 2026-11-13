@@ -6,6 +6,9 @@ message that says what to do instead.
 """
 from __future__ import annotations
 
+import importlib.util
+import logging
+import threading
 from typing import Any, Callable
 
 from . import paths
@@ -14,13 +17,43 @@ from .store import Store
 
 NO_WHISPER = ("Transcription isn't installed. Add a captions file (.vtt or .srt) for this recording, or install "
               "the transcribe extra (pip install \"course-assistant[transcribe]\") and try again.")
-NO_PROVIDER = ("Reading photos of notes needs an AI with vision. Connect one in Settings, or type or paste the "
-               "notes in as text instead.")
+NO_PROVIDER = ("Connect an AI in Settings to read this photo (it needs one that can look at pictures). It will be read "
+               "on its own once you do. Or type or paste the notes in as text instead.")
 OCR_SYSTEM = ("You transcribe photos of a student's handwritten or printed course notes. Return only the text that "
               "is in the picture, in reading order, as plain text or Markdown. Write equations in plain text or "
               "LaTeX. Do not explain, summarize or add anything that is not on the page. If nothing is readable, "
               "return an empty reply.")
 OCR_PROMPT = "Transcribe this photo of notes."
+
+
+log = logging.getLogger(__name__)
+
+WAITING_OCR = "Photo of notes: waiting for its text to be read. This happens on its own in a moment."
+WAITING_TRANSCRIBE = "Waiting to be transcribed on this computer. This can take a while for a long recording."
+NEEDS_AI_NOTE = "Connect an AI in Settings to read this photo. It will be read on its own once you do."
+NEEDS_CAPTIONS_NOTE = ("Add a captions file (.vtt or .srt) for this recording, or install transcription "
+                       "(pip install \"course-assistant[transcribe]\"). Without one, it can't be searched.")
+
+
+def whisper_available() -> bool:
+    return importlib.util.find_spec("faster_whisper") is not None
+
+
+def provider_available(store: Store) -> bool:
+    try:
+        from . import providers
+
+        return providers.get_provider(store) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def pending_note(store: Store, kind: str) -> str:
+    """What to tell the student about a photo ("ocr") or recording ("transcribe") that has no text yet: what is
+    happening, or what they can do about it."""
+    if kind == "ocr":
+        return WAITING_OCR if provider_available(store) else NEEDS_AI_NOTE
+    return WAITING_TRANSCRIBE if whisper_available() else NEEDS_CAPTIONS_NOTE
 
 
 def _fail(store: Store, job: dict[str, Any], message: str, *, material_error: bool = False) -> dict[str, Any]:
@@ -135,3 +168,70 @@ def run_pending(store: Store, *, whisper_factory=None, provider=None) -> list[di
         if job["kind"] in ("transcribe", "ocr"):
             out.append(run_job(store, job["id"], whisper_factory=whisper_factory, provider=provider))
     return out
+
+
+# ------------------------------------------------------------------ background worker
+POLL_SECONDS = 5.0
+
+
+def _requeue_blocked(store: Store, *, ai: bool | None = None, speech: bool | None = None) -> int:
+    """Jobs that failed only because nothing could run them (no AI connected, no speech model) go back in the
+    queue once that thing exists. Returns how many were queued again."""
+    n = 0
+    ai = provider_available(store) if ai is None else ai
+    speech = whisper_available() if speech is None else speech
+    for job in store.jobs():
+        if job["status"] != "error" or not job.get("material_id"):
+            continue
+        blocked_ocr = job["kind"] == "ocr" and job["note"] == NO_PROVIDER and ai
+        blocked_tr = job["kind"] == "transcribe" and job["note"] == NO_WHISPER and speech
+        if blocked_ocr or blocked_tr:
+            if not store.material(job["material_id"]):
+                continue
+            store.update_job(job["id"], status="queued", progress=0.0,
+                             note=WAITING_OCR if blocked_ocr else WAITING_TRANSCRIBE)
+            n += 1
+    return n
+
+
+def work_once(store: Store, *, whisper_factory=None, provider=None) -> int:
+    """One pass of the worker: retry jobs that were blocked, then run what is queued. Returns jobs run."""
+    _requeue_blocked(store, ai=True if provider is not None else None,
+                     speech=True if whisper_factory is not None else None)
+    return len(run_pending(store, whisper_factory=whisper_factory, provider=provider))
+
+
+class Worker(threading.Thread):
+    """A daemon thread that runs queued transcribe and OCR jobs. It sleeps between passes (never a busy loop)
+    and stops promptly when stop() is called."""
+
+    def __init__(self, store: Store, *, interval: float = POLL_SECONDS, whisper_factory=None, provider=None):
+        super().__init__(name="course-assistant-jobs", daemon=True)
+        self.store = store
+        self.interval = interval
+        self.whisper_factory = whisper_factory
+        self.provider = provider
+        self._stop_event = threading.Event()
+        self.passes = 0
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        while not self._stop_event.is_set():
+            ran = 0
+            try:
+                ran = work_once(self.store, whisper_factory=self.whisper_factory, provider=self.provider)
+            except Exception:  # noqa: BLE001 - the store may be closed at shutdown; never crash the app
+                log.debug("job worker pass failed", exc_info=True)
+                if self._stop_event.is_set():
+                    break
+            self.passes += 1
+            self._stop_event.wait(0.2 if ran else self.interval)
+
+
+def start_worker(store: Store, *, interval: float = POLL_SECONDS, whisper_factory=None, provider=None) -> Worker:
+    """Start the background job thread and return it (call .stop() to end it)."""
+    t = Worker(store, interval=interval, whisper_factory=whisper_factory, provider=provider)
+    t.start()
+    return t

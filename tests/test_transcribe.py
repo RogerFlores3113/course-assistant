@@ -150,3 +150,58 @@ def test_ocr_provider_without_vision_and_empty_result(env):
     out = transcribe.run_pending(s, provider=FakeVision("   "))[0]
     assert out["status"] == "error" and "readable" in out["note"]
     assert s.material(mid2)["status"] == "error"
+
+
+# ---- background worker (fx-import) ---------------------------------------------------------------------------
+import threading
+import time
+
+
+def test_pending_notes_say_what_to_do(env):
+    s, cid, tmp = env
+    assert "captions" in transcribe.pending_note(s, "transcribe")
+    assert transcribe.pending_note(s, "ocr")
+
+
+def test_work_once_retries_ocr_blocked_for_lack_of_provider(env):
+    s, cid, tmp = env
+    mid = add_image(s, cid, tmp)
+    assert transcribe.run_pending(s)[0]["status"] == "error"  # no provider yet
+    assert s.jobs("queued") == []
+    ran = transcribe.work_once(s, provider=FakeVision("Hello photo text."))
+    assert ran == 1 and s.material(mid)["status"] == "ready"
+
+
+def test_work_once_leaves_real_failures_alone(env):
+    s, cid, tmp = env
+    add_image(s, cid, tmp)
+    job = s.jobs("queued")[0]
+    s.update_job(job["id"], status="error", note="The image was unreadable.")
+    assert transcribe.work_once(s, provider=FakeVision("x")) == 0
+
+
+def test_worker_runs_jobs_and_stops_cleanly(env):
+    s, cid, tmp = env
+    mid = add_image(s, cid, tmp)
+    w = transcribe.start_worker(s, interval=0.05, provider=FakeVision("Photo words here."))
+    try:
+        assert w.daemon and w.is_alive()
+        for _ in range(100):
+            if s.material(mid)["status"] == "ready":
+                break
+            time.sleep(0.05)
+        assert s.material(mid)["status"] == "ready"
+    finally:
+        w.stop()
+        w.join(2)
+    assert not w.is_alive()
+
+
+def test_worker_sleeps_between_passes(env):
+    s, cid, tmp = env
+    w = transcribe.start_worker(s, interval=5)
+    time.sleep(0.3)
+    assert w.passes == 1  # one pass, then waiting, not spinning
+    w.stop()
+    w.join(2)
+    assert not w.is_alive()

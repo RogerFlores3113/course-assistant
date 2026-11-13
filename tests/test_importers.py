@@ -135,7 +135,7 @@ def test_pdf_chunk_per_page(env):
     mid = import_file(s, cid, pdf)
     m = s.material(mid)
     assert m["status"] == "ready" and m["page_count"] == 2 and m["mime"] == "application/pdf"
-    assert m["kind"] == "slides" and m["title"] == "lecture 1 slides"
+    assert m["kind"] == "slides" and m["title"] == "Lecture 1 slides"
     ch = s.chunks_of(mid)
     assert [(c["loc_kind"], c["loc_start"], c["loc_label"]) for c in ch] == [("page", "1", "p. 1"), ("page", "2", "p. 2")]
     assert "Eigenvalues" in ch[1]["text"]
@@ -243,7 +243,7 @@ def test_plain_text_line_ranges(env):
     ch = s.chunks_of(mid)
     assert len(ch) >= 2
     assert all(c["loc_kind"] == "line" for c in ch)
-    assert ch[0]["loc_start"] == "1" and ch[0]["loc_label"] == "line 1"
+    assert ch[0]["loc_start"] == "1" and ch[0]["loc_label"] == f"lines 1 to {ch[0]['loc_end']}"
     assert int(ch[1]["loc_start"]) == int(ch[0]["loc_end"]) + 1
 
 
@@ -286,7 +286,7 @@ def test_vtt_time_chunks(env):
     mid = import_file(s, cid, f)
     ch = s.chunks_of(mid)
     assert [(c["loc_kind"], c["loc_start"], c["loc_label"]) for c in ch] == [
-        ("time", "1", "0:01"), ("time", "95", "1:35"), ("time", "190.5", "3:10")]
+        ("time", "1", "0:01 to 0:40"), ("time", "95", "1:35 to 1:50"), ("time", "190.5", "3:10 to 3:20")]
     assert "row reduction" in ch[0]["text"] and "<v" not in ch[0]["text"]
     m = s.material(mid)
     assert m["kind"] == "recording" and m["duration_seconds"] == 200.0
@@ -495,3 +495,116 @@ def test_api_surface():
     for name in ("import_file", "import_text", "import_url", "reimport", "detect_kind", "SUPPORTED_EXTENSIONS",
                  "ImportError_"):
         assert hasattr(importers, name)
+
+
+# ---- fx-import regression tests -------------------------------------------------------------------------------
+import re as _re
+from pathlib import Path as _Path
+
+from course_assistant import importers as _imp
+from course_assistant.importers.common import chunk_cues as _chunk_cues, split_text as _split_text
+
+FX = _Path(__file__).parent / "fixtures" / "import"
+
+
+@pytest.fixture()
+def fx_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("COURSE_ASSISTANT_DATA_DIR", str(tmp_path / "data"))
+    s = Store(":memory:")
+    return s, s.add_course("Math 200", term="Fall 2026")
+
+
+def _blocks(text):
+    return _re.findall(r"```\w*\n.*?```", text, _re.S)
+
+
+def test_code_blocks_survive_chunking_verbatim():
+    src = (FX / "code-notes.md").read_text()
+    pieces = _split_text(src, 40)
+    joined = "\n".join(pieces)
+    for block in _blocks(src):
+        assert block in joined
+    for p in pieces:
+        assert p.count("```") % 2 == 0  # never a half-open fence
+
+
+def test_big_code_block_stays_balanced():
+    body = "\n".join(f"    x{i} = {i}" for i in range(400))
+    pieces = _split_text("Intro.\n\n```python\n" + body + "\n```\n\nOutro.", 100)
+    assert all(p.count("```") % 2 == 0 for p in pieces)
+    assert "x399 = 399" in "\n".join(pieces)
+
+
+def test_plain_text_primary_source(fx_env):
+    s, cid = fx_env
+    mid = import_file(s, cid, FX / "federalist-10.txt")
+    m = s.material(mid)
+    assert m["title"].startswith("Federalist No. 10") and m["kind"] == "handout"
+    ch = s.chunks_of(mid)
+    assert ch and ch[0]["loc_kind"] == "line" and ch[0]["loc_label"].startswith("lines 1 to")
+
+
+def test_vtt_chunks_are_30_to_60_seconds(fx_env):
+    s, cid = fx_env
+    mid = import_file(s, cid, FX / "talk.vtt")
+    ch = s.chunks_of(mid)
+    assert len(ch) >= 4
+    for c in ch[:-1]:
+        assert 30 <= float(c["loc_end"]) - float(c["loc_start"]) <= 60 and " to " in c["loc_label"]
+
+
+def test_cues_chunker_ranges():
+    cues = [(i * 10.0, i * 10.0 + 10, f"cue {i}") for i in range(12)]
+    out = _chunk_cues(cues)
+    assert all(c["loc_end"] - c["loc_start"] <= 60 for c in out)
+    assert out[0]["loc_label"].startswith("0:00 to ")
+
+
+def test_syllabus_detected_and_events_made(fx_env):
+    s, cid = fx_env
+    mid = import_file(s, cid, FX / "syllabus-table.md")
+    assert s.material(mid)["kind"] == "syllabus"
+    titles = {e["title"]: e for e in s.events(cid)}
+    assert titles["Midterm 1"]["kind"] == "exam"
+    assert any(e["kind"] == "lecture" for e in titles.values())
+    assert any(e["date"].endswith("12-15") and e["kind"] == "exam" for e in titles.values())
+
+
+def test_detect_kind_basics():
+    assert _imp.detect_kind("syllabus.pdf") == "syllabus"
+    assert _imp.detect_kind("Lecture 4 slides.pdf") == "slides"
+    assert _imp.detect_kind("federalist-10.txt", "FEDERALIST No. 10") in {"handout", "other"}
+
+
+def test_duplicate_material_and_no_duplicate_syllabus_events(fx_env):
+    s, cid = fx_env
+    prose = " ".join(f"Week {i} covers vectors, matrices and the idea number {i} in some detail." for i in range(1, 12))
+    text = (FX / "syllabus-table.md").read_text() + "\n\n" + prose
+    a = _imp.import_text(s, cid, "Syllabus", text, kind="syllabus")
+    n = len(s.events(cid))
+    assert n > 0
+    b = _imp.import_text(s, cid, "Syllabus (copy)", text + "\n\nLast updated in August.", kind="syllabus")
+    assert s.material(b)["duplicate_of"] == a
+    assert _imp.find_duplicate(s, cid, b) == a
+    assert _imp.find_duplicate(s, cid, a) is None
+    assert len(s.events(cid)) == n  # the copy adds no second set of events
+
+
+def test_link_to_lecture(fx_env):
+    s, cid = fx_env
+    import_file(s, cid, FX / "syllabus-table.md")
+    mid = _imp.import_text(s, cid, "Lecture 2 slides", "Dot products and the angle between vectors. " * 20, kind="slides")
+    ev = s.material(mid)["event_id"]  # linked on import
+    assert ev and s.event(ev)["title"].startswith("Lecture 2")
+    assert _imp.link_to_lecture(s, mid) is None  # already linked: left alone
+    other = _imp.import_text(s, cid, "Unrelated notes", "Nothing to do with a numbered lecture. " * 10)
+    assert _imp.link_to_lecture(s, other) is None
+
+
+def test_link_runs_after_syllabus_import(fx_env):
+    s, cid = fx_env
+    mid = _imp.import_text(s, cid, "Lecture 3 slides", "Matrices and their products, worked through slowly. " * 20, kind="slides")
+    assert not s.material(mid)["event_id"]
+    import_file(s, cid, FX / "syllabus-table.md")
+    ev = s.material(mid)["event_id"]
+    assert ev and s.event(ev)["title"].startswith("Lecture 3")
