@@ -384,15 +384,33 @@ _SALUTE = re.compile(r"to the people of the state of new york|from the (new york
 _TITLE_LEAD = re.compile(r"^\W*(federalist(\s+papers)?\s*(no\.?|number)?\s*\d+|the federalist)\b", re.I)
 
 
+_TERM_LINE = re.compile(r"\b(fall|autumn|spring|summer|winter)\s*(?:19|20)\d{2}\b|\b[A-Z]{2,5}\s*\d{3,4}[A-Z]?\b|"
+                        r"\b(prof|professor|dr|instructor|department|university)\b|\b(19|20)\d{2}\b", re.I)
+_WELCOME = re.compile(r"^\W*(welcome|hello|hi|good (morning|afternoon)|today|these slides follow|title slide|"
+                      r"agenda|outline)\b", re.I)
+
+
 def is_title_only(text: str, heading: str = "") -> bool:
-    """A chunk that is only a title (a title slide, a bare heading)."""
+    """A chunk that is only a title: a bare heading, or a title slide (the slide's title, a course and term line and,
+    at most, a one-line welcome in the speaker notes)."""
     t = (text or "").strip()
     w = _words(t)
     if not w:
         return True
-    if len(w) <= 6 and (t.strip(" .:").lower() == (heading or "").strip(" .:").lower() or re.fullmatch(
+    head = (heading or "").strip(" .:").lower()
+    if len(w) <= 6 and (t.strip(" .:").lower() == head or re.fullmatch(
             r"(?:lecture|lec|week|chapter|unit|part|section|class)\s*#?\d+[\s:.\-]*(?:\w+\s*){0,3}", t.strip(), re.I)):
         return True
+    # a title slide: heading, then only course/term/instructor lines, then speaker notes that only welcome people
+    body, _, notes = t.partition("Speaker notes:")
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    if head and lines and lines[0].strip(" .:").lower() == head:
+        lines = lines[1:]
+    if len(w) <= 45 and all(_TERM_LINE.search(ln) and len(_words(ln)) <= 12 for ln in lines):
+        notes = re.sub(r"(?i)speaker notes:", " ", notes).strip()
+        nsents = [x for x in re.split(r"(?<=[.!?])\s+", notes) if x.strip()]
+        if not nsents or all(_WELCOME.match(x) or _TERM_LINE.search(x) or len(_words(x)) <= 4 for x in nsents):
+            return True
     return False
 
 
@@ -903,10 +921,25 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
     return [_source(r, sc) for sc, r in ranked[:limit]]
 
 
+def _is_notes_chunk(text: str) -> bool:
+    return bool(re.match(r"\s*speaker notes:", text or "", re.I))
+
+
+def _strip_notes(text: str) -> str:
+    return re.sub(r"^(\s*speaker notes:)+\s*", "", text or "", flags=re.I)
+
+
 def _dedupe(scored: list[tuple[float, dict[str, Any]]], n: int) -> list[tuple[float, dict[str, Any]]]:
     out, kept = [], []
+    by_mat: dict[int, list[set[str]]] = {}
+    for _, r in scored:  # the passages a speaker-notes copy could be a copy of
+        if not _is_notes_chunk(r["text"]):
+            by_mat.setdefault(r["material_id"], []).append(_shingles(r["text"]))
     for score, r in scored:
         sh = _shingles(r["text"])
+        if _is_notes_chunk(r["text"]) and any(_contained(_shingles(_strip_notes(r["text"])), o, 0.8)
+                                              for o in by_mat.get(r["material_id"], [])):
+            continue  # speaker notes that only repeat their slide
         if any(_near_duplicate(sh, k) for k in kept):
             continue
         kept.append(sh)
