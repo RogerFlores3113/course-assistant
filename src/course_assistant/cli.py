@@ -188,6 +188,22 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 def cmd_connect(args: argparse.Namespace) -> int:
     from . import connect
 
+    plan = connect.write_plan(args.target, with_skills=not args.no_skills)
+    if plan["writes"]:
+        print("Connecting will change files outside Course Assistant's own folder:")
+        for line in connect.plan_lines(plan):
+            print("  " + line)
+        if not args.yes:
+            try:
+                answer = input("Go ahead? [y/N] ").strip().lower()
+            except (EOFError, OSError):
+                answer = ""
+            if answer not in ("y", "yes"):
+                print("Nothing was changed. Run again with --yes to skip this question.")
+                return 1
+    else:
+        for line in connect.plan_lines(plan):
+            print(line)
     try:
         results = connect.connect(args.target, with_skills=not args.no_skills)
     except (ValueError, OSError) as exc:
@@ -281,6 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
     con = sub.add_parser("connect", help="add Course Assistant to Claude Desktop and/or Codex, and install the skills")
     con.add_argument("target", nargs="?", choices=["claude", "codex", "all"], default="all")
     con.add_argument("--no-skills", action="store_true", help="only write the MCP settings")
+    con.add_argument("--yes", "-y", action="store_true", help="don't ask before writing outside the app folder")
     con.set_defaults(func=cmd_connect)
 
     imp = sub.add_parser("import", help="save files into a course")

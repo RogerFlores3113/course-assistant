@@ -72,7 +72,7 @@ uv run course-assistant
 Open the Connect page in the app, or run:
 
 ```sh
-course-assistant connect            # Claude Desktop and Codex
+course-assistant connect            # Claude Desktop and Codex (only the ones installed; lists the files first and asks, or use --yes)
 course-assistant connect claude
 course-assistant connect codex
 ```

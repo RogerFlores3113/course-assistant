@@ -1,9 +1,9 @@
 {% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}Settings - Course Assistant{% endblock %}
 {% block body %}<section class="narrow"><h1>Settings</h1>
-<p class="muted">New here? <a href="/setup">Connect an AI</a> walks you through the choices.</p>
+<p class="muted">New here? <a href="/setup">Connect an AI</a> walks you through the choices. An API key or a local model turns on the Study and Ask buttons in this app. Claude Desktop or Codex does not: with those you ask in their own window.</p>
 <form method="post" action="/settings" class="form card" data-busy="Working. This can take a few seconds.">
   <fieldset><legend>AI provider</legend>
-  <label class="check"><input type="radio" name="ai_provider" value="none" {% if ai_kind not in ('anthropic','local') %}checked{% endif %}> None. You can still use Claude Desktop or Codex; see the Connect an AI page.</label>
+  <label class="check"><input type="radio" name="ai_provider" value="none" {% if ai_kind not in ('anthropic','local') %}checked{% endif %}> None. The Study and Ask buttons stay off. You can still ask in Claude Desktop or Codex; see the Connect an AI page.</label>
   <label class="check"><input type="radio" name="ai_provider" value="anthropic" {% if ai_kind == 'anthropic' %}checked{% endif %}> Anthropic API key</label>
   <label class="check"><input type="radio" name="ai_provider" value="local" {% if ai_kind == 'local' %}checked{% endif %}> Local model server (such as LM Studio)</label></fieldset>
   <fieldset><legend>Anthropic</legend>
