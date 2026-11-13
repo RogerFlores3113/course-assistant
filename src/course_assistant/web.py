@@ -84,6 +84,13 @@ def _is_no_provider(e: Exception) -> bool:
     return type(e).__name__ == "NoProvider"
 
 
+def _safe_mod(name: str):
+    try:
+        return _mod(name)
+    except _Missing:
+        return None
+
+
 def _friendly(e: Exception) -> str:
     if isinstance(e, _Missing):
         return "That part of the app is not installed yet."
@@ -105,7 +112,16 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                 _app.state.worker = starter(store) if callable(starter) else None
             except Exception:  # a broken worker must never stop the app from opening
                 log.exception("Could not start the background worker")
-        yield
+        try:
+            yield
+        finally:
+            w = getattr(_app.state, "worker", None)
+            if w is not None and callable(getattr(w, "stop", None)):
+                try:
+                    w.stop()
+                except Exception:
+                    log.exception("Could not stop the background worker")
+            _app.state.worker = None
 
     app = FastAPI(title="Course Assistant", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.worker = None
@@ -437,13 +453,16 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         by_id = {m["id"]: m for m in mats}
         ai_connected = provider_state()["connected"]
         rows = []
+        ev_titles = {e["id"]: e for e in store.events(cid)}
         for m in mats:
             is_media = Path(m.get("filename") or "").suffix.lower() in MEDIA_EXT
             info = job_info(m, jobs.get(m["id"]), is_media, ai_connected)
             orig = by_id.get(m.get("duplicate_of")) if m.get("duplicate_of") else None
             rows.append({**m, "kind_label": MATERIAL_KINDS.get(m["kind"], m["kind"]), "job_text": info["text"],
                          "job_next": info["next"], "job_retry": info["retry"], "is_media": is_media,
-                         "copy_of": {"id": orig["id"], "title": orig["title"]} if orig else None})
+                         "copy_of": {"id": orig["id"], "title": orig["title"]} if orig else None,
+                         "lecture_link": (clean_event_title(ev_titles[m["event_id"]]["title"])
+                                          if m.get("event_id") in ev_titles else "")})
         return rows
 
     def graded_panel(cid: int) -> dict[str, Any]:
@@ -479,6 +498,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             ctx["has_materials"] = bool(store.materials(cid))
             ctx["due_cards"] = len(store.flashcards(cid, due_only=True))
             ctx["all_cards"] = len(store.flashcards(cid))
+            opts = getattr(_safe_mod("study"), "study_form_options", None)
+            if callable(opts):
+                ctx["study_opts"] = opts(store, cid)
         elif tab == "guides":
             guides = store.guides(cid)
             ctx["guides"] = guides
@@ -767,6 +789,15 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         extra = f" It now belongs to {clean_event_title(ev['title'])}." if ev else ""
         return redirect(course_url(m["course_id"]), notice=f"Saved {title.strip()}.{extra}")
 
+    @app.post("/materials/{material_id}/not-copy")
+    def material_not_copy(request: Request, material_id: int):
+        m = store.material(material_id)
+        if not m:
+            raise _NotFound("That material was not found.")
+        store.update_material(material_id, duplicate_of=None)
+        return after(request, m["course_id"], "materials",
+                     notice=f"{m['title']} is now treated as its own material.")
+
     @app.post("/materials/{material_id}/process")
     async def material_process(request: Request, material_id: int):
         """Start (or retry) reading a photo or transcribing a recording now."""
@@ -893,7 +924,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
 
     @app.post("/courses/{course_id}/study/{action}")
     async def study_run(request: Request, course_id: int, action: str, topic: str = Form(""), depth: str = Form("standard"),
-                        count: int = Form(0), event_id: str = Form(""), day: str = Form("")):
+                        count: int = Form(0), event_id: str = Form(""), day: str = Form(""),
+                        material_id: str = Form(""), material_ids: list[str] = Form(default=[])):
         require_course(course_id)
         if action not in STUDY_LABELS:
             raise _NotFound("That study tool was not found.")
@@ -901,6 +933,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         if p is None:
             return after(request, course_id, "study", error="Connect an AI first. See the panel below.")
         ev = int(event_id) if event_id.strip().isdigit() else None
+        mat = int(material_id) if material_id.strip().isdigit() else None
+        mats = [int(v) for v in material_ids if str(v).strip().isdigit()] or None
         depth = depth if depth in {d for d, _ in DEPTHS} else "standard"
         topic = topic.strip()
         if action in ("explain",) and not topic:
@@ -913,7 +947,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             if action == "primer":
                 return study.primer(store, course_id, p, event_id=ev)
             if action == "exam":
-                return study.exam_guide(store, course_id, p, event_id=ev)
+                return study.exam_guide(store, course_id, p, event_id=ev, material_ids=mats)
             if action == "map":
                 return study.concept_map(store, course_id, p, scope=topic)
             if action == "explain":
@@ -921,7 +955,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             if action == "practice":
                 return study.practice(store, course_id, p, topic, count=count or 5)
             if action == "flashcards":
-                return study.make_flashcards(store, course_id, p, topic=topic, count=count or 12)
+                return study.make_flashcards(store, course_id, p, material_id=mat, topic=topic, count=count or 12)
             return study.missed(store, course_id, p, event_id=ev, date=day.strip())
 
         try:
@@ -932,11 +966,16 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             return after(request, course_id, "study", error=f"{STUDY_LABELS[action]} did not work: {_friendly(e)}")
         if action == "flashcards":
             n = len(result or [])
-            return after(request, course_id, "study", notice=f"Made {n} flashcard{'s' if n != 1 else ''}.", cards_made=n)
+            note = (getattr(result, "note", "") or "").strip()
+            return after(request, course_id, "study", notice=note or f"Made {n} flashcard{'s' if n != 1 else ''}.",
+                         cards_made=n, cards_note=note)
         guide = store.guide(int(result))
+        rm = getattr(_mod("study"), "ready_message", None)
+        kind = (guide or {}).get("kind") or action
+        ready = rm(kind) if callable(rm) else f"{STUDY_LABELS.get(action, 'Your guide')} is ready."
         if not is_htmx(request):
-            return redirect(f"/guides/{int(result)}", notice=f"{STUDY_LABELS[action]} is ready.")
-        return after(request, course_id, "study", notice=f"{STUDY_LABELS[action]} is ready.", result_guide=guide,
+            return redirect(f"/guides/{int(result)}", notice=ready)
+        return after(request, course_id, "study", notice=ready, result_guide=guide,
                      result_view=guide_view(guide) if guide else None)
 
     # ------------------------------------------------------------------ ask
@@ -1012,8 +1051,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                     saved += 1
                 except Exception as e:
                     blocked = type(e).__name__ == "FetchBlocked"
-                    msg = ("This site's robots.txt asks programs not to read it, so nothing was saved." if blocked
-                           else _friendly(e))
+                    msg = _friendly(e)
                     store.update_offering_candidate(cid_, status="blocked" if blocked else "found", note=msg)
                     problems.append(f"{cand['title'] or cand['url']}: {msg}")
             return saved, problems
@@ -1116,29 +1154,90 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         return redirect(course_url(g["course_id"], "guides"), notice="Guide deleted.")
 
     # ------------------------------------------------------------------ flashcards
+    def cram_args(course_id: int, cram: str, material: str, done: str) -> tuple[bool, int | None, list[int]]:
+        mat = int(material) if str(material).strip().isdigit() else None
+        if mat is not None:
+            m = store.material(mat)
+            if not m or m["course_id"] != course_id:
+                mat = None
+        ids = [int(x) for x in str(done).split(",") if x.strip().isdigit()][-200:]
+        return str(cram) == "1", mat, ids
+
+    def flashcard_url(course_id: int, cram: bool, material: int | None, done: list[int] | None = None) -> str:
+        q = []
+        if cram:
+            q.append("cram=1")
+        if material is not None:
+            q.append(f"material={material}")
+        if cram and done:
+            q.append("done=" + ",".join(str(i) for i in done))
+        return f"/flashcards/{course_id}" + ("?" + "&".join(q) if q else "")
+
+    def next_exam_date(course_id: int) -> str:
+        try:
+            study = _mod("study")
+            return study._exam_date_for(store, course_id)
+        except (_Missing, AttributeError):
+            return ""
+
     @app.get("/flashcards/{course_id}", response_class=HTMLResponse)
-    def flashcards(request: Request, course_id: int):
+    def flashcards(request: Request, course_id: int, cram: str = "", material: str = "", done: str = ""):
         course = require_course(course_id)
+        cram_on, mat, done_ids = cram_args(course_id, cram, material, done)
         due = store.flashcards(course_id, due_only=True)
-        return page(request, "flashcards.html", course=course, accent=course_color(course), card=due[0] if due else None,
-                    due=len(due), total=len(store.flashcards(course_id)),
+        total = len(store.flashcards(course_id))
+        if cram_on:
+            try:
+                queue = _mod("study").cram_queue(store, course_id, material_id=mat)
+            except _Missing:
+                queue = []
+            queue = [c for c in queue if c["id"] not in done_ids]
+            shown, count, position = (queue[0] if queue else None), len(queue) + len(done_ids), len(done_ids) + 1
+        else:
+            if mat is not None:
+                chunk_ids = {c["id"] for c in store.chunks_of(mat)}
+                title = (store.material(mat) or {}).get("title", "")
+                due = [c for c in due if c.get("chunk_id") in chunk_ids or (title and c.get("deck") == title)]
+            shown, count, position = (due[0] if due else None), len(due), 1
+        mats = [{"id": m["id"], "title": m["title"]} for m in store.materials(course_id) if not m.get("duplicate_of")]
+        return page(request, "flashcards.html", course=course, accent=course_color(course), card=shown,
+                    due=len(due), total=total, cram=cram_on, material_id=mat, done=",".join(str(i) for i in done_ids),
+                    count=count, position=position, filter_materials=mats,
+                    toggle_url=flashcard_url(course_id, not cram_on, mat),
+                    filter_base=flashcard_url(course_id, cram_on, None),
                     page_title=f"Flashcards - {course['name']}")
 
     @app.post("/flashcards/{course_id}/review")
-    def flashcard_review(course_id: int, card_id: int = Form(...), grade: str = Form(...)):
+    def flashcard_review(course_id: int, card_id: int = Form(...), grade: str = Form(...), cram: str = Form(""),
+                         material: str = Form(""), done: str = Form("")):
         require_course(course_id)
+        cram_on, mat, done_ids = cram_args(course_id, cram, material, done)
+        back = flashcard_url(course_id, cram_on, mat, done_ids)
         card = store.flashcard(card_id)
         if not card or card["course_id"] != course_id or grade not in ("again", "hard", "good", "easy"):
-            return redirect(f"/flashcards/{course_id}", error="That card could not be graded.")
+            return redirect(back, error="That card could not be graded.")
+        kw: dict[str, Any] = {}
+        if cram_on:
+            kw["cram"] = True
+        exam = next_exam_date(course_id)
+        if exam:
+            try:
+                left = (date.fromisoformat(exam) - date.today()).days
+            except ValueError:
+                left = None
+            if left is not None and 0 <= left and (cram_on or left <= 7):
+                kw["exam_date"] = exam
         try:
-            _mod("study").review_flashcard(store, card_id, grade)
+            _mod("study").review_flashcard(store, card_id, grade, **kw)
         except _Missing:
-            return redirect(f"/flashcards/{course_id}", error="Flashcard review is not available yet.")
-        return redirect(f"/flashcards/{course_id}")
+            return redirect(back, error="Flashcard review is not available yet.")
+        if cram_on:
+            done_ids.append(card_id)
+        return redirect(flashcard_url(course_id, cram_on, mat, done_ids))
 
     def safe_next(value: str, default: str = "/settings") -> str:
         """Only addresses inside this app (a path, never another site)."""
-        return value if re.match(r"^/[A-Za-z0-9_\-./]*$", value or "") and not value.startswith("//") else default
+        return value if re.match(r"^/[A-Za-z0-9_\-./?=&,]*$", value or "") and not value.startswith("//") else default
 
     @app.post("/settings/shortcuts")
     def shortcuts_toggle(on: str = Form(""), next: str = Form("/settings")):

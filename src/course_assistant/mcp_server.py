@@ -261,6 +261,11 @@ def read_passage(chunk_id: int, before: int = 1, after: int = 1) -> str:
     return "\n".join(out)
 
 
+def _clean_title(title: str) -> str:
+    from .web_helpers import clean_event_title
+    return clean_event_title(title or "")
+
+
 @_tool(READ)
 def list_upcoming(days: int = 14, course_id: int | None = None) -> str:
     """Lectures, exams, quizzes and due dates in the next N days, for one course or all of them."""
@@ -273,7 +278,7 @@ def list_upcoming(days: int = 14, course_id: int | None = None) -> str:
     if not rows:
         return f"Nothing saved for the next {days} days."
     return "\n".join(f"{e['date']} {e.get('time') or ''} | {e.get('course_code') or e.get('course_name')} | "
-                     f"{EVENT_KINDS.get(e['kind'], e['kind'])}: {e['title']}"
+                     f"{EVENT_KINDS.get(e['kind'], e['kind'])}: {_clean_title(e['title'])}"
                      + (f" | topics: {e['topics']}" if e.get("topics") else "") for e in rows)
 
 
@@ -383,6 +388,22 @@ def _import_result(mid: int) -> str:
     msg = f"Saved material {mid}: {m.get('title')} ({n} searchable passages, status {m.get('status')})."
     if m.get("status") == "needs_transcription":
         msg += " It still needs transcription; the app will do it in the background."
+    try:
+        if not m.get("event_id"):
+            _mod('importers').link_to_lecture(st, mid)
+            m = st.material(mid) or m
+    except Exception:  # linking is a convenience; never fail the save
+        pass
+    if m.get("event_id"):
+        ev = st.event(int(m["event_id"]))
+        if ev:
+            from .web_helpers import clean_event_title
+            msg += f" Linked to the lecture {clean_event_title(ev['title'])} ({ev['date']})."
+    if m.get("duplicate_of"):
+        orig = st.material(int(m["duplicate_of"]))
+        if orig:
+            msg += (f" It looks like a copy of '{orig['title']}' (material {orig['id']}). Both are searched, so "
+                    "answers may repeat the same passage; the student can delete one or press Not a copy in the app.")
     return msg + f" Open it: {_link('/read/' + str(mid))}"
 
 

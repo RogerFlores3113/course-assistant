@@ -115,6 +115,25 @@ def _is_blocked(exc: Exception) -> bool:
     return type(exc).__name__ == "FetchBlocked"
 
 
+def _block_note(exc: Exception, fetcher: Any = None, url: str = "") -> str:
+    """The message for a blocked page: the exception's own text, else the fetcher's reason, else a robots.txt line.
+    A private or local address is never described as a robots.txt refusal."""
+    text = str(exc).strip()
+    if text:
+        return text
+    why = getattr(fetcher, "why_blocked", None)
+    if callable(why) and url:
+        try:
+            got = why(url)
+        except Exception:
+            got = None
+        if got:
+            return got[1]
+    if getattr(exc, "reason", "robots") == "private":
+        return "This address is on a private or local network, so it was not opened."
+    return "The site's robots.txt asks programs not to read this page."
+
+
 def _get_fetcher(fetcher: Any = None) -> Any:
     if fetcher is not None:
         return fetcher
@@ -151,7 +170,7 @@ def candidates_from_urls(store: Store, course_id: int, urls: list[str], *, fetch
             title, _ = parse_page(_page_text(res))
         except Exception as exc:
             if _is_blocked(exc):
-                status, note = "blocked", "The site's robots.txt asks programs not to read this page."
+                status, note = "blocked", _block_note(exc, f, u)
             else:
                 note = f"Could not read the page to get its title: {str(exc)[:120]}"
         cid = store.add_offering_candidate(course_id, u, title=title, term_label=guess_term(f"{title} {u}"),
@@ -193,7 +212,7 @@ def crawl(store: Store, course_id: int, seed_url: str, *, max_pages: int = DEFAU
             if _is_blocked(exc) and url != seed and guess_term(f"{link_text} {url}"):
                 cid = store.add_offering_candidate(course_id, url, title=link_text,
                                                    term_label=guess_term(f"{link_text} {url}"), found_by=found_by,
-                                                   status="blocked", note="robots.txt asks programs not to read this page.")
+                                                   status="blocked", note=_block_note(exc, f, url))
                 found.append(store.offering_candidate(cid))  # type: ignore[arg-type]
             continue
         title, links = parse_page(html)
@@ -251,7 +270,7 @@ def pick(store: Store, course_id: int, candidate_id: int, *, fetcher: Any = None
         mid = importers.import_url(store, course_id, cand["url"], kind="past_offering", fetcher=f, added_by=added_by)
     except Exception as exc:
         if _is_blocked(exc):
-            store.update_offering_candidate(cand["id"], status="blocked", note="robots.txt asks programs not to read this page.")
+            store.update_offering_candidate(cand["id"], status="blocked", note=_block_note(exc, f, cand["url"]))
         raise
     store.update_offering_candidate(cand["id"], status="saved", material_id=mid)
     return int(mid)

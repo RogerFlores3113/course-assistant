@@ -14,7 +14,7 @@
 <div class="card"><h3>Save a web page</h3>
 <form method="post" action="/courses/{{ course.id }}/materials/url" hx-post="/courses/{{ course.id }}/materials/url" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" data-busy="Saving the page. The app goes slowly on purpose." class="form">
   <label>Web address <input type="url" name="url" required placeholder="https://..." {{ fa('url', 'url') }}></label>{{ fe('url', 'url') }}
-  <label>Kind <select name="kind"><option value="website">Course website</option><option value="handout">Handout</option><option value="textbook">Textbook</option></select></label>
+  <label>Kind <select name="kind"><option value="website">Course website</option><option value="handout">Handout</option><option value="textbook">Textbook</option><option value="reading">Reading</option></select></label>
   <button class="btn" type="submit">Save page</button></form></div>
 <div class="card"><h3>Type a note</h3>
 <form method="post" action="/courses/{{ course.id }}/materials/note" hx-post="/courses/{{ course.id }}/materials/note" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" class="form">
@@ -30,7 +30,9 @@
   {% if m.graded %}<span class="badge warn-b">Graded work</span>{% endif %}
   {% if m.added_by == 'ai_app' %}<span class="badge">Added by your AI app</span>{% endif %}<br>
   <span class="muted small">{{ m.chunk_count }} passage{{ '' if m.chunk_count == 1 else 's' }}{% if m.lecture_date %} &middot; lecture {{ m.lecture_date | day }}{% endif %}</span>
-  {% if m.copy_of %}<br><span class="status-note">Looks like a copy of <a href="/read/{{ m.copy_of.id }}">{{ m.copy_of.title }}</a>. Both are searched, so answers may repeat the same passage. If you do not need both, delete one.</span>{% endif %}
+  {% if m.lecture_link %}<br><span class="muted small">Linked to {{ m.lecture_link }}</span>{% endif %}
+  {% if m.copy_of %}<br><span class="status-note"><strong>Copy of {{ m.copy_of.title }}.</strong> Looks like a copy of <a href="/read/{{ m.copy_of.id }}">{{ m.copy_of.title }}</a>. Both are searched, so answers may repeat the same passage. If you do not need both, delete one.</span>
+  <form method="post" action="/materials/{{ m.id }}/not-copy" hx-post="/materials/{{ m.id }}/not-copy" hx-target="#course-body" hx-swap="outerHTML" class="inline"><button class="btn small ghost" type="submit">Not a copy<span class="visually-hidden"> {{ m.title }}</span></button></form>{% endif %}
   {% if m.status == 'error' and not m.job_text %}<br><span class="status-note bad-t">Problem: {{ m.status_note or 'could not be read' }}</span>
   {% elif m.job_text %}<br><span class="status-note">{{ m.job_text }}</span>{% if m.job_next %}<br><span class="muted small">{{ m.job_next }}</span>{% endif %}{% if m.status_note and m.status == 'needs_transcription' %}<br><span class="muted small">{{ m.status_note }}</span>{% endif %}{% endif %}</div>
   <div class="actions">

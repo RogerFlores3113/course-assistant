@@ -287,7 +287,7 @@ def test_web_end_to_end(tmp_path, monkeypatch):
     r = c.post(f"/courses/{cid}/study/primer")
     assert r.status_code == 200 and "Primer: Eigenvalues" in r.text and 'class="cite"' in r.text
     r = c.post(f"/courses/{cid}/study/flashcards", data={"topic": "eigenvalues"})
-    assert "Made 2 flashcards" in r.text
+    assert "Made 2 cards" in r.text
     card = store.flashcards(cid)[0]
     r = c.get(f"/flashcards/{cid}")
     assert card["front"] in r.text
