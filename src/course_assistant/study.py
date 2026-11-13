@@ -102,8 +102,10 @@ def _material_sources(store: Store, material_id: int, limit: int = 12, *, spread
     if spread:  # sampling across a file: skip bare titles and byline blocks, which only say who wrote it
         r = _mod("retrieval")
         is_title, is_head = getattr(r, "is_title_only", None), getattr(r, "is_header_chunk", None)
+        is_filler = getattr(r, "is_filler_chunk", None)  # chapter intros and end-of-chapter exercise lists
         body = [c for c in chunks if not (is_title and is_title(c["text"], c.get("heading", "")))
-                and not (is_head and is_head(c["text"], m.get("title", "")))]
+                and not (is_head and is_head(c["text"], m.get("title", "")))
+                and not (is_filler and is_filler(c["text"], c.get("heading", "")))]
         chunks = body or chunks
     chunks = _spread_pick(chunks, limit) if spread else chunks[:limit]
     return [_source_from_chunk(c, m["title"], m["kind"]) for c in chunks]
@@ -622,7 +624,8 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
     per_topic = [_search(store, course_id, t, 4, exclude_graded=True, **({"material_ids": mids} if mids else {}))
                  for t in [*topics_text, *[m["title"] for m in mats]]]
     own = _spread_materials(store, mids, cap=MAX_SOURCES - 6, per=2) if mids else []
-    syl = _search(store, course_id, " ".join([ev["title"], *topics_text[:6]]), 3, kinds=["syllabus"])
+    # the syllabus adds exam logistics, but not when the student limited the guide to chosen materials
+    syl = [] if chosen else _search(store, course_id, " ".join([ev["title"], *topics_text[:6]]), 3, kinds=["syllabus"])
     sources = _merge(_interleave([own, *per_topic], cap=MAX_SOURCES - 3), syl)
     today = _today()
     try:

@@ -229,3 +229,20 @@ def test_fx3_instructor_notes_get_their_own_kind():
     assert kind != "notes"
     assert notes_kind("linear-algebra-halfdone.md", "# Linear algebra, my notes (unfinished)\n- TODO fill in") == "notes"
     assert notes_kind("notes.md", "Some plain text with nothing to tell.") == "notes"
+
+
+def test_exam_guide_sampling_skips_chapter_filler():
+    from course_assistant import study
+    from course_assistant.store import MATERIAL_KINDS, Store
+    assert "lecture_notes" in MATERIAL_KINDS
+    s = Store(":memory:")
+    c = s.add_course("Chem")
+    m = s.add_material(c, "textbook", "Chapter 3")
+    texts = [("Introduction", "Introduction\nIn this chapter you will learn about solutions."),
+             ("Molarity", "Molarity is moles of solute per litre of solution."),
+             ("Dilution", "Diluting a solution keeps the moles of solute the same."),
+             ("End of Chapter Exercises", "End of Chapter Exercises\n1. Find the molarity of each solution.")]
+    s.replace_chunks(m, [{"text": t, "heading": h, "loc_kind": "section", "loc_start": i, "loc_end": i,
+                          "loc_label": h} for i, (h, t) in enumerate(texts)])
+    got = [x["text"] for x in study._material_sources(s, m, 4, spread=True)]
+    assert any("Molarity is" in t for t in got) and not any("Exercises" in t or "In this chapter" in t for t in got)

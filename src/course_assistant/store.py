@@ -21,6 +21,7 @@ MATERIAL_KINDS = {
     "textbook": "Textbook",
     "reading": "Reading",
     "notes": "My notes",
+    "lecture_notes": "Lecture notes",
     "website": "Course website",
     "syllabus": "Syllabus",
     "past_offering": "Past offering",
