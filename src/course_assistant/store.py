@@ -46,7 +46,7 @@ GUIDE_KINDS = {
     "practice": "Practice questions",
     "missed": "What did I miss",
     "answer": "Answer",
-    "twin": "Worked twin problem",
+    "twin": "Help with graded work",
 }
 
 # Where in a material a chunk sits. The reader opens a citation at this spot.

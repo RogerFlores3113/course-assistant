@@ -913,9 +913,6 @@ _CITE_STRIP = re.compile(r"\[\d+(?:\s*[,;–-]\s*\d+)*\]")
 _WORKED = re.compile(r"[=≈]|\\frac|\btherefore\b|\bhence\b|\bthus\b|\bso\s+[a-z]\w*\s+(?:is|are)\b|\banswer\b", re.I)
 _COACHING = re.compile(r"\b(you|your|yours|you're|the student|students|rubric|assignment|should|could|consider|try to|"
                        r"ask yourself|a strong|a good|a clear|e\.g\.|for example|make sure|aim to|remember)\b", re.I)
-_THESIS_CUE = re.compile(r"\b(this essay (?:will )?(?:argue|argues|examine|examines|show|shows|demonstrate|demonstrates)|"
-                         r"in this (?:essay|paper)|this paper (?:will )?(?:argue|argues|examine|examines)|"
-                         r"i (?:will )?argue that|in conclusion,|to conclude,|ultimately,? (?:madison|hamilton|the))\b", re.I)
 _PROOF_END = re.compile(r"∎|\bq\.?e\.?d\.?\b|this completes the proof|as required|\bproof\s*[.:]", re.I)
 _LISTISH = re.compile(r"^\s*(?:[-*+>|#]|\d+[.)]|```)")
 
@@ -968,19 +965,6 @@ def _quote_ratio(p: str, source: str) -> float:
     sw = " ".join(re.findall(r"[a-z0-9']+", (source or "").lower()))
     grams = [" ".join(pw[i:i + 4]) for i in range(max(0, len(pw) - 3))]
     return sum(1 for g in grams if g in sw) / len(grams) if grams else 0.0
-
-
-_ARGUE, _SENT_COACH, _THESIS_CUE = essay.ARGUE, essay.STRICT_COACH, essay.THESIS_CUE
-_cited_restatement = essay.cited_restatement
-
-
-def _finished_sentences_x(reply: str, topic: set[str], asked: bool, source: str = "",
-                          sources: list[Any] | None = None) -> list[tuple[str, bool]]:
-    return essay.finished_sentences_x(reply, topic, asked, source, sources)
-
-
-def _finished_sentences(reply: str, topic: set[str], asked: bool, source: str = "", sources: list[Any] | None = None) -> list[str]:
-    return [s for s, _ in essay.finished_sentences_x(reply, topic, asked, source, sources)]
 
 
 def essay_leak_level(it: dict[str, Any], reply: str, question: str, force_asked: bool = False,
