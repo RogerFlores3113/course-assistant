@@ -23,7 +23,7 @@
 <label>Exam <select name="event_id"><option value="">Next exam</option>{% for e in events if e.kind in ('exam', 'quiz') and e.title|length > 3 %}<option value="{{ e.id }}" {% if pre_exam == e.id|string %}selected{% endif %}>{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>
 {% if study_opts is defined and study_opts and study_opts.materials %}<fieldset class="pick"><legend>Only these materials (optional)</legend>
 {% for m in study_opts.materials %}<label class="check"><input type="checkbox" name="material_ids" value="{{ m.id }}"> {{ m.title }}</label>{% endfor %}
-<p class="muted">Leave all unticked to use what you saved for the lectures since the last exam.</p></fieldset>{% endif %}{% endcall %}
+<p class="muted">Leave all unticked to use what you saved for the lectures since the last exam. If nothing you saved is linked to those lectures, the guide uses all your saved materials and says so.</p></fieldset>{% endif %}{% endcall %}
 {% call tool_form('map', 'Concept map', 'How the ideas connect.', 'Building your concept map.') %}
 <label>Topic (optional) <input name="topic" placeholder="All of the course"></label>{% endcall %}
 {% call tool_form('explain', 'Explain a topic', 'Re-explained at the depth you pick.', 'Writing the explanation.') %}

@@ -135,14 +135,13 @@ def test_check_answer_without_problem_numbers_matches_item():
     assert g and g["label"] == "Problem 2"
 
 
-def test_sticky_graded_context_across_follow_ups():
+def test_continuation_words_no_longer_route_follow_ups():
+    """Cycle 3: sticky context never routes a question; only the reply is checked (see test_fx3_integrity)."""
     s, c, m = course()
-    p = FakeProvider([TWIN_OK, "ok"])
+    p = FakeProvider([TWIN_OK, "A plain answer about significant figures."])
     grounding.ask(s, c, P1, p)
-    n = len(p.calls)
     a = grounding.ask(s, c, "Now multiply that by 58.44 and how many sig figs is the final mass again?", p)
-    assert a.mode in ("twin", "concepts") and "marked graded" in a.body_md
-    assert len(p.calls) > n
+    assert a.mode == "answer"
 
 
 def test_sticky_forced_check_catches_followup_answer():

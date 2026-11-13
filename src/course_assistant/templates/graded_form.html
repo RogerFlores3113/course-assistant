@@ -5,7 +5,9 @@
   <label>Label (optional) <input name="label" value="{{ item.label }}" placeholder="Problem 2" aria-describedby="gl-help"></label>
   <p id="gl-help" class="muted small">A short name for one problem or essay, such as Problem 3 or Essay 1.</p>
   <label>Kind <select name="kind">{% for k, l in graded_kinds.items() %}<option value="{{ k }}" {% if item.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+  {% if is_new and graded_materials %}<label>Part of (optional) <select name="material_id" aria-describedby="gm-help"><option value="">Not part of a saved material</option>{% for m in graded_materials %}<option value="{{ m.id }}">{{ m.title }}</option>{% endfor %}</select></label>
+  <p id="gm-help" class="muted small">Pick the graded material this problem belongs to, so the list there counts it as found.</p>{% endif %}
   <label>Text of the problem or assignment <textarea name="body" rows="8">{{ item.body }}</textarea></label>
   <div class="row"><button class="btn" type="submit">{{ 'Add it' if is_new else 'Save changes' }}</button> <a class="btn ghost" href="/courses/{{ course.id }}">Cancel</a></div>
 </form>
-{% if not is_new %}<p><a class="danger-link" href="/graded/{{ item.id }}/delete">Remove from graded work</a></p>{% endif %}</section>{% endblock %}
+{% if not is_new %}<p class="muted small">Answer check: {{ 'on' if answer_check else 'off (connect an AI to turn it on)' }}. The app keeps the final values of a numeric problem to make sure it never states them. They are not shown anywhere.</p><p><a class="danger-link" href="/graded/{{ item.id }}/delete">Remove from graded work</a></p>{% endif %}</section>{% endblock %}

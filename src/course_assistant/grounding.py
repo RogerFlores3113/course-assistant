@@ -729,10 +729,15 @@ def parse_blocks(raw: str, n_sources: int) -> tuple[list[Block], list[int]]:
     return blocks, used
 
 
+EMPTY_REPLY = "The AI did not return an answer. Try asking again."
+
+
 def is_not_covered(blocks: list[Block], n_sources: int, said: bool = False) -> bool:
     """True when the materials do not cover the question: no sources, nothing cited and the reply said so, or most of
     what the reply says is outside. A fully cited answer that ends with "your materials don't list anything else" is
-    covered."""
+    covered. An empty model reply is neither: the page says the AI did not answer and nothing about general knowledge."""
+    if blocks and all(b.md.strip() == EMPTY_REPLY for b in blocks):
+        return False
     if n_sources == 0:
         return True
     cited = sum(len(b.md) for b in blocks if b.kind == "text" and b.cites)
@@ -829,7 +834,7 @@ def make_answer(blocks: list[Block], used: list[int], sources: list[Source], *, 
 def parse_answer(raw: str, sources: list[Source]) -> Answer:
     blocks, used, said = _parse(raw, len(sources))
     if not blocks and not said:
-        blocks = [Block("outside", "The AI did not return an answer. Try asking again.", [])]
+        blocks = [Block("outside", EMPTY_REPLY, [])]
         verify_quotes(blocks, sources)  # no answer is not "general knowledge", so no not-covered banner either
         return make_answer(blocks, used, sources, not_covered=False)
     verify_quotes(blocks, sources)
@@ -850,32 +855,46 @@ def source_rows(sources: list[Source], used: list[int] | None = None) -> list[di
 
 
 def ask(store, course_id: int, question: str, provider, *, depth: str = "standard",
-        history: list[dict] | None = None, limit: int = 8, record_chat: bool = True) -> Answer:
-    """Search the course, route graded work to a twin, otherwise answer from the sources. Saves a guide."""
+        history: list[dict] | None = None, limit: int = 8, record_chat: bool = True, route: bool = True) -> Answer:
+    """Search the course, route graded work to a twin, otherwise answer from the sources. Saves a guide.
+    route=False (the student pressed "Ask normally") turns the matcher and the model's marker off; the answer-key
+    check of the reply stays on."""
     from . import integrity  # late import: integrity builds on this module
 
     question = (question or "").strip()
-    graded = integrity.match_graded(store, course_id, question)
-    # sticky graded context: a chat that recently worked on a graded item keeps being about it, so a follow-up with no
-    # problem numbers ("now multiply that by 58.44") or a "check my answer" is routed too
-    sticky = None if graded else integrity.sticky_item(store, course_id)
-    if sticky and sticky.get("kind") in ("problem", "proof") and (integrity.is_continuation(question) or integrity.is_check_ask(question)):
-        graded = sticky
+    graded = integrity.match_graded(store, course_id, question) if route else None
+    why = "match" if graded else ""
+    # a chat that recently touched a graded item has its REPLIES checked against that item (never its questions routed)
+    sticky = None if graded else integrity.sticky_item(store, course_id, question)
     sources: list[Source] = []
     if not graded:
         sources = integrity.search_safe(store, course_id, question, limit=limit)
+        if integrity.is_logistics(question):
+            sources = integrity.logistics_sources(store, course_id, question) + sources
         system, messages = build_messages(question, sources, depth=depth, history=history,
                                           integrity_block=integrity.prompt_block(store, course_id))
         raw = provider.complete(system, messages, max_tokens=4000)
         # The model may judge the request graded (a paraphrase the matcher missed); the post-check catches a reply that
         # worked a graded item anyway. Either way the reply is thrown away and the graded route runs instead.
         marker, raw = integrity.read_marker(raw)
-        if marker is not None:
-            graded = integrity.item_for_marker(store, course_id, marker or None, question)
+        if marker is not None and route:
+            graded, why = integrity.item_for_marker(store, course_id, marker or None, question), "marker"
         else:
-            graded = integrity.check_reply(store, course_id, question, raw, force_item=sticky)
+            graded = integrity.check_reply(store, course_id, question, raw, force_item=sticky if route else None,
+                                           sources=sources, keys_only=not route)
+            why = (graded or {}).get("reason", "reply")
+            if graded and why == "soft_essay":
+                # one regeneration on a soft essay rule; if that still reads as essay prose, concepts mode
+                messages = messages + [{"role": "assistant", "content": raw}, {"role": "user", "content":
+                                        "Your last reply read like finished essay wording. Answer again from the sources "
+                                        "without any sentence the student could submit as their own writing."}]
+                raw2 = provider.complete(system, messages, max_tokens=4000)
+                _, raw2 = integrity.read_marker(raw2)
+                again = integrity.check_reply(store, course_id, question, raw2, sources=sources)
+                if not again:
+                    graded, raw = None, raw2
     if graded:
-        answer = integrity.twin(store, course_id, question, provider, graded)
+        answer = integrity.twin(store, course_id, question, provider, graded, why)
     else:
         answer = parse_answer(raw, sources)
         title = question if len(question) <= 80 else question[:77].rstrip() + "..."

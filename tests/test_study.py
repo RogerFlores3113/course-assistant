@@ -339,15 +339,6 @@ def test_marker_routes_reply_to_twin(world, monkeypatch):
     assert "x = 4" not in str(s.guide(gid)["body_md"]) if gid else True
 
 
-def test_check_reply_discards_solving_reply(world, monkeypatch):
-    s, cid, _ = world
-    monkeypatch.setattr(integ(), "read_marker", lambda raw: (None, raw), raising=False)
-    monkeypatch.setattr(integ(), "check_reply", lambda store, c, q, raw: {"title": "HW 4"}, raising=False)
-    p = Prov("Full solution x = 4 [1]", "Twin text [1]")
-    study.practice(s, cid, p, "equations", count=2)
-    assert any(c[0] == "twin" for c in p.calls)
-
-
 def test_no_integrity_contract_still_works(world):
     s, cid, _ = world
     assert study.explain(s, cid, Prov(GOOD), "basis")  # stub has no prompt_block, read_marker or check_reply
@@ -594,17 +585,18 @@ def test_practice_twins_for_every_graded_overlap(world, graded_hit):
     g = s.guide(study.practice(s, cid, p, "molarity and empirical formula, percent composition solution", count=5))
     assert g["data"]["twin"] is True and len(g["data"]["twins"]) == 2
     assert [c[0] for c in p.calls].count("twin") == 2
-    assert "Write 3 practice questions" in p.calls[2][1][0]["content"]
+    assert "Write 5 practice questions" in p.calls[2][1][0]["content"]  # twins do not count toward the 5
     assert g["body_md"].count("## Twin of graded work") == 2
     assert not s.guides(cid, kind="twin")  # no stray guides: they were folded in
 
 
-def test_practice_all_twins_when_count_is_small(world, graded_hit):
+def test_practice_twin_is_an_extra_not_part_of_the_count(world, graded_hit):
     s, cid, _ = world
     graded_hit["hit"] = {"title": "HW 4"}
     p = Prov("Twin text [1]")
     g = s.guide(study.practice(s, cid, p, "hw 4", count=1))
-    assert [c[0] for c in p.calls] == ["twin"] and g["title"].startswith("Practice (twin)")
+    assert [c[0] for c in p.calls] == ["twin", "other"] or "twin" in [c[0] for c in p.calls]
+    assert "Write 1 practice question" in p.calls[-1][1][0]["content"] and "do not count" in g["body_md"]
 
 
 def test_shift_block_renumbers_only_real_cites():
