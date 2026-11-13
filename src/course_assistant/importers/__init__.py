@@ -16,7 +16,7 @@ from .common import (AUDIO_VIDEO, CAPTIONS, HTML_EXT, IMAGES, MAX_FILE_BYTES, MI
                      ImportError_, slugify)
 from .htmltext import clean_html
 
-__all__ = ["import_file", "import_text", "import_url", "reimport", "detect_kind", "find_duplicate", "link_to_lecture",
+__all__ = ["import_file", "import_text", "import_url", "reimport", "detect_kind", "find_duplicate", "keep_copy", "link_to_lecture",
            "SUPPORTED_EXTENSIONS", "ImportError_"]
 
 _SYLLABUS_WORDS = ("office hours", "grading", "midterm", "final exam", "prerequisite", "late policy",
@@ -278,6 +278,35 @@ def _mark_duplicate(store: Store, material_id: int) -> int | None:
     if dup != m.get("duplicate_of"):
         store.update_material(material_id, duplicate_of=dup)
     return dup
+
+
+def keep_copy(store: Store, material_id: int) -> int | None:
+    """Search this copy instead of the file it was matched with (a PDF has page numbers, a .md has none).
+
+    Swaps the pair: the copy becomes the searched material, the former original becomes the unsearched copy, and
+    anything else that was a copy of the original now points at this one. A lecture link or date the original had
+    moves over too. Returns the id of the former original, or None when the material was not a copy."""
+    m = store.material(material_id)
+    if not m or not m.get("duplicate_of"):
+        return None
+    orig_id = int(m["duplicate_of"])
+    orig = store.material(orig_id)
+    if not orig:
+        store.update_material(material_id, duplicate_of=None)
+        return None
+    others = [x["id"] for x in store.materials(m["course_id"]) if x.get("duplicate_of") == orig_id and x["id"] != material_id]
+    store.update_material(material_id, duplicate_of=None)
+    store.update_material(orig_id, duplicate_of=material_id)
+    for oid in others:
+        store.update_material(oid, duplicate_of=material_id)
+    moved: dict[str, Any] = {}
+    if orig.get("event_id") and not m.get("event_id"):
+        moved["event_id"] = orig["event_id"]
+    if orig.get("lecture_date") and not m.get("lecture_date"):
+        moved["lecture_date"] = orig["lecture_date"]
+    if moved:
+        store.update_material(material_id, **moved)
+    return orig_id
 
 
 # ------------------------------------------------------------------ linking a material to its lecture

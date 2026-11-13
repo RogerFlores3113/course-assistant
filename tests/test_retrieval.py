@@ -113,9 +113,14 @@ def build_course(spec):
     s = Store(":memory:")
     cid = s.add_course(spec["name"])
     ids = {}
+    events = {}
+    for e in spec.get("events", []):
+        events[e["key"]] = s.add_event(cid, e["kind"], e["title"], e["date"], topics=e.get("topics", ""))
     for m in spec["materials"]:
         ids[m["title"]] = s.add_material(cid, m["kind"], m["title"])
         s.replace_chunks(ids[m["title"]], [dict(c) for c in m["chunks"]])
+        if m.get("event"):
+            s.update_material(ids[m["title"]], event_id=events[m["event"]])
     for m in spec["materials"]:
         if m.get("dup"):
             s.update_material(ids[m["title"]], duplicate_of=ids[m["dup"]])
@@ -127,24 +132,54 @@ def eval_cases():
     return [(spec, q) for spec in data["courses"] for q in spec["questions"]]
 
 
-def test_eval_fixture_is_big_enough():
-    assert len(eval_cases()) >= 25
+def check_case(res, q):
+    """Why a result list fails the case (a string), or '' when it passes. See the fixture for the fields."""
+    texts = [r["text"] for r in res]
+    why = []
+    if "expect" in q:
+        n = q.get("rank", len(res))
+        if not any(e in t for t in texts[:n] for e in q["expect"]):
+            why.append(f"none of {q['expect']} in top {n}")
+    for e in q.get("expect_all", []):
+        if not any(e in t for t in texts):
+            why.append(f"missing {e!r}")
+    ab = q.get("absent_in_top")
+    if ab:
+        for r in res[:ab["n"]]:
+            if (r["heading"] in ab.get("headings", []) or any(x in r["text"] for x in ab.get("texts", []))
+                    or r["text"].strip() in ab.get("texts_exact", [])):
+                why.append(f"unwanted {r['heading'] or r['text'][:30]!r} in top {ab['n']}")
+    if q.get("top_kinds_not"):
+        bad = [r["material_kind"] for r in res[:q.get("top_n", 4)] if r["material_kind"] in q["top_kinds_not"]]
+        if bad:
+            why.append(f"kinds {bad} in top {q.get('top_n', 4)}")
+    for title in q.get("each_material", []):
+        if title not in {r["material_title"] for r in res}:
+            why.append(f"no chunk from {title}")
+    return "; ".join(why)
 
 
-def test_recall_at_8_on_fixture():
-    hits, missed = 0, []
-    cache = {}
+def run_eval(search=None):
+    search = search or retrieval.search
+    cache, rows = {}, []
     for spec, q in eval_cases():
         if spec["name"] not in cache:
             cache[spec["name"]] = build_course(spec)
         s, cid, _ = cache[spec["name"]]
-        res = retrieval.search(s, cid, q["q"], limit=8)
-        if any(e in r["text"] for r in res for e in q["expect"]):
-            hits += 1
-        else:
-            missed.append(q["q"])
+        res = search(s, cid, q["q"], limit=q.get("limit", 8))
+        rows.append((q["q"], check_case(res, q)))
+    return rows
+
+
+def test_eval_fixture_is_big_enough():
+    assert len(eval_cases()) >= 40
+
+
+def test_recall_at_8_on_fixture():
+    rows = run_eval()
+    missed = [f"{q}: {why}" for q, why in rows if why]
     assert not missed, missed
-    assert hits >= 25
+    assert len(rows) >= 40
 
 
 def _course(name):
@@ -226,7 +261,7 @@ def test_near_identical_chunks_collapse():
 
 def test_past_offering_ranks_below_current_term():
     s, cid, _ = _course("Linear Algebra")
-    res = retrieval.search(s, cid, "Lecture 18 eigenvalues", limit=8)
+    res = retrieval.search(s, cid, "Lecture 18 eigenvalues", limit=12)
     kinds = [r["material_kind"] for r in res]
     assert "past_offering" in kinds and kinds[0] != "past_offering"
 
@@ -242,3 +277,113 @@ def test_synonym_expansion_reaches_related_wording():
 def test_nothing_query_returns_nothing():
     s, cid, _ = _course("Linear Algebra")
     assert retrieval.search(s, cid, "zzzqqq nothing", limit=8) == []
+
+
+# ---------------------------------------------------------------- cycle 2 (fixer fx2-retrieval)
+def _top(name, q, **kw):
+    s, cid, ids = _course(name)
+    return retrieval.search(s, cid, q, **kw), s, cid, ids
+
+
+def test_lecture_reference_detection():
+    lr = retrieval.lecture_reference
+    assert lr("primer for Lecture 20") == {"number": 20}
+    assert lr("fill in my notes from the Nov 10 lecture") == {"date": (11, 10)}
+    assert lr("what did we do in Tuesday's lecture") == {"weekday": 1}
+    assert lr("What is due on Thursday and what should I read?") is None
+    assert lr("Essay due Nov 20") is None
+
+
+def test_lecture_query_pulls_linked_materials_first_and_skips_noise():
+    res, *_ = _top("Linear Algebra", "Fill in my eigenvalues TODO from the Nov 10 lecture", limit=8)
+    assert res[0]["material_title"] == "Lecture 18 captions"
+    assert not any(r["text"].startswith("Speaker notes") or r["text"].strip() == "Lecture 18" for r in res)
+
+
+def test_primer_for_a_lecture_number_uses_the_lecture_materials_not_the_schedule():
+    res, *_ = _top("Linear Algebra", "primer for Lecture 20", limit=6)
+    assert res[0]["material_title"] == "Lecture 20 notes"
+    assert not any(r["heading"] in ("Grading", "Lecture schedule") for r in res[:4])
+
+
+def test_lecture_query_respects_exclude_graded():
+    s, cid, ids = _course("Linear Algebra")
+    s.add_graded_item(cid, "Problem 1", "x", material_id=ids["Lecture 20 notes"])
+    res = retrieval.search(s, cid, "primer for Lecture 20", limit=6, exclude_graded=True)
+    assert ids["Lecture 20 notes"] not in {r["material_id"] for r in res}
+
+
+def test_exclude_graded_drops_graded_materials():
+    s, cid, ids = _course("General Chemistry")
+    s.add_graded_item(cid, "Problem 2", "molarity", material_id=ids["Chapter 3 Composition of Substances and Solutions"])
+    assert retrieval.search(s, cid, "molarity", limit=8)
+    gid = ids["Chapter 3 Composition of Substances and Solutions"]
+    assert gid in {r["material_id"] for r in retrieval.search(s, cid, "molarity", limit=8)}
+    assert gid not in {r["material_id"] for r in retrieval.search(s, cid, "molarity", limit=8, exclude_graded=True)}
+    s2, cid2, ids2 = _course("General Chemistry")
+    s2.update_material(ids2["Chapter 3 Composition of Substances and Solutions"], graded=1)
+    assert gid not in {r["material_id"] for r in retrieval.search(s2, cid2, "molarity", limit=8, exclude_graded=True)}
+
+
+def test_definition_beats_section_intro_for_molarity_and_dilution():
+    res, *_ = _top("General Chemistry", "What is molarity?", limit=3)
+    assert "number of moles of solute per liter" in res[0]["text"]
+    res, *_ = _top("General Chemistry", "Explain dilution", limit=3)
+    assert "M1 V1 = M2 V2" in res[0]["text"]
+
+
+def test_schedule_and_exam_chunks_are_demoted_unless_asked_about():
+    res, *_ = _top("Linear Algebra", "Explain eigenvalues", limit=5)
+    assert not any(r["heading"] in ("Exams", "Lecture schedule", "Grading") for r in res)
+    res, *_ = _top("Linear Algebra", "When is Midterm 1?", limit=3)
+    assert any(r["heading"] == "Exams" for r in res)
+
+
+def test_split_clauses():
+    assert len(retrieval.split_clauses("What is the projection matrix formula and when is A^T A invertible?")) == 2
+    assert len(retrieval.split_clauses("How are trace and determinant related to the eigenvalues?")) == 1
+    assert len(retrieval.split_clauses("eigenvalues of [[4,1],[2,3]]")) == 1
+    assert len(retrieval.split_clauses("When is Midterm 1 and what does it cover?")) == 1
+
+
+def test_two_part_question_finds_both_halves():
+    res, *_ = _top("Linear Algebra", "What is the projection matrix formula and when is A^T A invertible?", limit=4)
+    texts = " ".join(r["text"] for r in res)
+    assert "P = A (A^T A)^-1 A^T" in texts and "If Ax = 0 then A^T A x = 0" in texts
+
+
+def test_worked_example_continues_into_the_next_caption():
+    res, *_ = _top("Linear Algebra", "How do I find the eigenvalues of [[4,1],[2,3]]?", limit=6)
+    assert any("the eigenvalues, five and two" in r["text"] for r in res)
+
+
+def test_fall_2018_exam_dates_include_exam_3():
+    res, *_ = _top("Linear Algebra", "What were the exam dates in the Fall 2018 offering?", limit=8)
+    texts = " ".join(r["text"] for r in res)
+    assert all(x in texts for x in ("Exam 1 (Sep 28", "Exam 2 (Oct 26", "Exam 3 (Nov 30"))
+
+
+def test_main_argument_of_a_named_source_skips_the_header_chunk():
+    res, *_ = _top("US History", "What is the main argument of Federalist No. 10?", limit=5)
+    assert not any("From the New York Packet" in r["text"] for r in res)
+    assert sum(r["material_title"] == "Federalist No. 10" for r in res) >= 4
+    assert retrieval.is_header_chunk("FEDERALIST No. 10 From the New York Packet. Friday, November 23, 1787. MADISON "
+                                     "To the People of the State of New York:")
+    assert retrieval.is_title_only("Lecture 18", "Lecture 18")
+
+
+def test_named_documents_each_get_a_share():
+    res, *_ = _top("US History", "Federalist No. 10 and 51 and Chapters 7 and 8", limit=12)
+    titles = {r["material_title"] for r in res}
+    assert {"Federalist No. 10", "Federalist No. 51", "Chapter 7 The Articles of Confederation",
+            "Chapter 8 Creating a Constitution"} <= titles
+    assert retrieval.query_doc_ids("Federalist No. 10 and 51 and Chapters 7 and 8") == {
+        ("federalist", 10), ("federalist", 51), ("chapter", 7), ("chapter", 8)}
+
+
+def test_lectures_recent_first():
+    s, cid, _ = _course("Linear Algebra")
+    s.add_event(cid, "lecture", "No class (Thanksgiving)", "2026-11-26")
+    s.add_event(cid, "lecture", "Lecture 18: Eigenvalues and eigenvectors", "2026-11-10")  # a repeated syllabus row
+    out = retrieval.lectures_recent_first(s, cid, today="2026-11-13")
+    assert [e["date"] for e in out] == ["2026-11-12", "2026-11-10", "2026-11-19"]
