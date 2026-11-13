@@ -1,0 +1,736 @@
+{
+ "courses": [
+  {
+   "name": "Linear Algebra",
+   "materials": [
+    {
+     "title": "Lecture 18 captions",
+     "kind": "recording",
+     "chunks": [
+      {
+       "text": "Today we start eigenvalues. An eigenvector of A is a nonzero vector x with A x equal to lambda x, so the matrix only scales it.",
+       "heading": "",
+       "loc_label": "0:58",
+       "loc_kind": "time",
+       "loc_start": "0:58"
+      },
+      {
+       "text": "The zero vector is excluded. Zero satisfies A x equals lambda x for every lambda, so allowing it would tell us nothing.",
+       "heading": "",
+       "loc_label": "1:27",
+       "loc_kind": "time",
+       "loc_start": "1:27"
+      },
+      {
+       "text": "Let's do an example. Take A equals the two by two matrix with rows four, one and two, three. A minus lambda I has four minus lambda in the corner and the determinant is lambda squared minus seven lambda plus ten.",
+       "heading": "",
+       "loc_label": "2:56",
+       "loc_kind": "time",
+       "loc_start": "2:56"
+      },
+      {
+       "text": "So the eigenvalues are five and two. Check the trace: four plus three is seven, five plus two is seven. The product five times two is the determinant ten.",
+       "heading": "",
+       "loc_label": "3:44",
+       "loc_kind": "time",
+       "loc_start": "3:44"
+      },
+      {
+       "text": "A defective matrix is short of eigenvectors. Take rows one, one and zero, one. Lambda equals one is a double root but there is only one eigenvector, so it cannot be diagonalized.",
+       "heading": "",
+       "loc_label": "8:06",
+       "loc_kind": "time",
+       "loc_start": "8:06"
+      },
+      {
+       "text": "Why bother diagonalizing? Because A to the k equals X Lambda to the k X inverse. To get A to the hundred you only raise the diagonal entries to the hundred, which is fast.",
+       "heading": "",
+       "loc_label": "9:58",
+       "loc_kind": "time",
+       "loc_start": "9:58"
+      },
+      {
+       "text": "Announcements. Problem set 3 is due Thursday and the reading for next week is chapter six.",
+       "heading": "",
+       "loc_label": "11:20",
+       "loc_kind": "time",
+       "loc_start": "11:20"
+      }
+     ]
+    },
+    {
+     "title": "Lecture 18 slides",
+     "kind": "slides",
+     "chunks": [
+      {
+       "text": "Lecture 18",
+       "heading": "Lecture 18",
+       "loc_label": "slide 1",
+       "loc_kind": "slide",
+       "loc_start": "slide 1"
+      },
+      {
+       "text": "Eigenvalues and eigenvectors. Definition: A x = lambda x with x not zero. The zero vector is never an eigenvector.",
+       "heading": "Definition",
+       "loc_label": "slide 3",
+       "loc_kind": "slide",
+       "loc_start": "slide 3"
+      },
+      {
+       "text": "Find the eigenvalues: solve det(A - lambda I) = 0. This is the characteristic polynomial.",
+       "heading": "The characteristic polynomial",
+       "loc_label": "slide 7",
+       "loc_kind": "slide",
+       "loc_start": "slide 7"
+      }
+     ]
+    },
+    {
+     "title": "Diagonalization notes",
+     "kind": "notes",
+     "chunks": [
+      {
+       "text": "If A has n independent eigenvectors then A = X Lambda X^-1. Then A^2 = X Lambda^2 X^-1 and in general A^k = X Lambda^k X^-1. Powers of A are cheap once you diagonalize.",
+       "heading": "Diagonalization and Matrix Powers",
+       "loc_label": "p. 5",
+       "loc_kind": "page",
+       "loc_start": "p. 5"
+      },
+      {
+       "text": "The determinant of A is the product of the eigenvalues. Multiply all the lambdas.",
+       "heading": "Determinant = Product of lambda's",
+       "loc_label": "p. 4",
+       "loc_kind": "page",
+       "loc_start": "p. 4"
+      },
+      {
+       "text": "The trace of A, the sum of the diagonal, equals the sum of the eigenvalues.",
+       "heading": "Trace = Sum of lambda's",
+       "loc_label": "p. 5",
+       "loc_kind": "page",
+       "loc_start": "p. 5"
+      },
+      {
+       "text": "A matrix needs n independent eigenvectors to be diagonalizable. A defective matrix has too few.",
+       "heading": "When can we diagonalize",
+       "loc_label": "p. 6",
+       "loc_kind": "page",
+       "loc_start": "p. 6"
+      }
+     ]
+    },
+    {
+     "title": "Diagonalization notes (pdf)",
+     "kind": "notes",
+     "dup": "Diagonalization notes",
+     "chunks": [
+      {
+       "text": "If A has n independent eigenvectors then A = X Lambda X^-1. Then A^2 = X Lambda^2 X^-1 and in general A^k = X Lambda^k X^-1. Powers of A are cheap once you diagonalize.",
+       "heading": "Diagonalization and Matrix Powers",
+       "loc_label": "p. 5",
+       "loc_kind": "page",
+       "loc_start": "p. 5"
+      }
+     ]
+    },
+    {
+     "title": "Gaussian elimination slides",
+     "kind": "slides",
+     "chunks": [
+      {
+       "text": "Compute the solution by elimination. Find the pivots, subtract multiples of row one, then find the next pivot of the matrix.",
+       "heading": "Elimination",
+       "loc_label": "slide 2",
+       "loc_kind": "slide",
+       "loc_start": "slide 2"
+      },
+      {
+       "text": "How to compute quickly: use the matrix in upper triangular form and find x by back substitution. Matrix multiplication costs n cubed.",
+       "heading": "Back substitution",
+       "loc_label": "slide 5",
+       "loc_kind": "slide",
+       "loc_start": "slide 5"
+      },
+      {
+       "text": "Find the matrix E that subtracts two times row one from row two. Compute E A to see the effect.",
+       "heading": "Elimination matrices",
+       "loc_label": "slide 6",
+       "loc_kind": "slide",
+       "loc_start": "slide 6"
+      }
+     ]
+    },
+    {
+     "title": "Projections notes",
+     "kind": "notes",
+     "chunks": [
+      {
+       "text": "The projection matrix onto the column space of A is P = A (A^T A)^-1 A^T.",
+       "heading": "Projection on a subspace",
+       "loc_label": "p. 2",
+       "loc_kind": "page",
+       "loc_start": "p. 2"
+      },
+      {
+       "text": "A^T A is invertible exactly when A has linearly independent columns.",
+       "heading": "Math: (A^T A) is invertible when A has independent columns",
+       "loc_label": "p. 3",
+       "loc_kind": "page",
+       "loc_start": "p. 3"
+      }
+     ]
+    },
+    {
+     "title": "Syllabus",
+     "kind": "syllabus",
+     "chunks": [
+      {
+       "text": "Exams. Midterm 1 is Thursday Oct 1 in class and covers Lectures 1 to 8: elimination, LU, inverses, vector spaces. Midterm 2 is Nov 12. The final is cumulative.",
+       "heading": "Exams",
+       "loc_label": "Exams",
+       "loc_kind": "section",
+       "loc_start": "Exams"
+      },
+      {
+       "text": "Grading. Problem sets 20 percent, two midterms 20 percent each, final 40 percent. The lowest problem set score is dropped; psets are due Thursdays 11:59 pm.",
+       "heading": "Grading",
+       "loc_label": "Grading",
+       "loc_kind": "section",
+       "loc_start": "Grading"
+      }
+     ]
+    },
+    {
+     "title": "Fall 2018 lecture summaries",
+     "kind": "past_offering",
+     "chunks": [
+      {
+       "text": "Exam 1 Sep 28, Exam 2 Oct 26, Exam 3 Nov 30. Three exams plus a final in this offering.",
+       "heading": "Exam dates",
+       "loc_label": "Exams",
+       "loc_kind": "section",
+       "loc_start": "Exams"
+      },
+      {
+       "text": "Lecture 18 covered eigenvalues, with the example of a two by two matrix and its characteristic polynomial.",
+       "heading": "Lecture 18",
+       "loc_label": "Lecture 18",
+       "loc_kind": "section",
+       "loc_start": "Lecture 18"
+      }
+     ]
+    }
+   ],
+   "questions": [
+    {
+     "q": "How do I compute A^100 quickly?",
+     "expect": [
+      "A^k = X Lambda^k X^-1",
+      "raise the diagonal entries"
+     ]
+    },
+    {
+     "q": "How do I find the eigenvalues of [[4,1],[2,3]]?",
+     "expect": [
+      "rows four, one and two, three"
+     ]
+    },
+    {
+     "q": "What exactly is an eigenvector and why can't the zero vector be one?",
+     "expect": [
+      "The zero vector is excluded",
+      "never an eigenvector"
+     ]
+    },
+    {
+     "q": "How are trace and determinant related to the eigenvalues?",
+     "expect": [
+      "Multiply all the lambdas",
+      "equals the sum of the eigenvalues"
+     ]
+    },
+    {
+     "q": "What is a defective matrix? Give an example.",
+     "expect": [
+      "Take rows one, one and zero, one"
+     ]
+    },
+    {
+     "q": "What is the formula for the projection matrix onto the column space of A?",
+     "expect": [
+      "P = A (A^T A)^-1 A^T"
+     ]
+    },
+    {
+     "q": "When is A^T A invertible?",
+     "expect": [
+      "linearly independent columns"
+     ]
+    },
+    {
+     "q": "When is Midterm 1 and what does it cover?",
+     "expect": [
+      "Midterm 1 is Thursday Oct 1"
+     ]
+    },
+    {
+     "q": "How is my grade calculated and how many problem sets are dropped?",
+     "expect": [
+      "lowest problem set score is dropped"
+     ]
+    },
+    {
+     "q": "What were the exam dates in the Fall 2018 offering?",
+     "expect": [
+      "Exam 3 Nov 30"
+     ]
+    },
+    {
+     "q": "What did the lecture on eigenvalues say about the characteristic polynomial?",
+     "expect": [
+      "solve det(A - lambda I) = 0"
+     ]
+    },
+    {
+     "q": "What is due on Thursday and what should I read?",
+     "expect": [
+      "Problem set 3 is due Thursday"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "General Chemistry",
+   "materials": [
+    {
+     "title": "Chapter 3 Composition of Substances and Solutions",
+     "kind": "textbook",
+     "chunks": [
+      {
+       "text": "In this section we will look at molarity and dilution. Solutions are everywhere in the lab.",
+       "heading": "Molarity",
+       "loc_label": "Molarity",
+       "loc_kind": "section",
+       "loc_start": "Molarity"
+      },
+      {
+       "text": "Molarity (M) is the number of moles of solute per liter of solution: M = mol solute / L solution. A 2.0 M NaCl solution holds 2.0 mol in each liter.",
+       "heading": "Molarity",
+       "loc_label": "Molarity",
+       "loc_kind": "section",
+       "loc_start": "Molarity"
+      },
+      {
+       "text": "Dilution. When a solution is diluted the moles of solute stay the same, so M1 V1 = M2 V2. Diluting 50 mL of 6 M acid to 300 mL gives 1 M.",
+       "heading": "Dilution",
+       "loc_label": "Dilution",
+       "loc_kind": "section",
+       "loc_start": "Dilution"
+      },
+      {
+       "text": "The empirical formula is the simplest whole number ratio of atoms. Convert percent composition to grams, then to moles, divide by the smallest, and multiply to whole numbers.",
+       "heading": "Determining empirical formulas",
+       "loc_label": "Empirical",
+       "loc_kind": "section",
+       "loc_start": "Empirical"
+      },
+      {
+       "text": "Percent composition by mass is the mass of each element divided by the total mass times 100.",
+       "heading": "Percent composition",
+       "loc_label": "Percent",
+       "loc_kind": "section",
+       "loc_start": "Percent"
+      }
+     ]
+    },
+    {
+     "title": "Chapter 3 (epub)",
+     "kind": "textbook",
+     "dup": "Chapter 3 Composition of Substances and Solutions",
+     "chunks": [
+      {
+       "text": "Molarity (M) is the number of moles of solute per liter of solution: M = mol solute / L solution. A 2.0 M NaCl solution holds 2.0 mol in each liter.",
+       "heading": "Molarity",
+       "loc_label": "Molarity",
+       "loc_kind": "section",
+       "loc_start": "Molarity"
+      }
+     ]
+    },
+    {
+     "title": "Chapter 1 Chemistry in Context",
+     "kind": "textbook",
+     "chunks": [
+      {
+       "text": "Alchemists tried to turn lead into gold and made solutions and dyes with mordants.",
+       "heading": "Alchemy",
+       "loc_label": "Alchemy",
+       "loc_kind": "section",
+       "loc_start": "Alchemy"
+      },
+      {
+       "text": "The pH scale measures acidity of a solution on a logarithmic scale.",
+       "heading": "pH",
+       "loc_label": "pH",
+       "loc_kind": "section",
+       "loc_start": "pH"
+      }
+     ]
+    },
+    {
+     "title": "Lab 3 handout",
+     "kind": "handout",
+     "chunks": [
+      {
+       "text": "Materials: a spectrophotometer set to a wavelength of 635 nm, cuvettes and sample solutions.",
+       "heading": "Materials",
+       "loc_label": "Materials",
+       "loc_kind": "section",
+       "loc_start": "Materials"
+      },
+      {
+       "text": "Safety and disposal: pour copper waste into the labelled bottle in the hood, never down the drain.",
+       "heading": "Safety",
+       "loc_label": "Safety",
+       "loc_kind": "section",
+       "loc_start": "Safety"
+      }
+     ]
+    }
+   ],
+   "questions": [
+    {
+     "q": "What is molarity?",
+     "expect": [
+      "number of moles of solute per liter of solution"
+     ]
+    },
+    {
+     "q": "How do I do a dilution problem?",
+     "expect": [
+      "M1 V1 = M2 V2"
+     ]
+    },
+    {
+     "q": "How do I find an empirical formula from percent composition?",
+     "expect": [
+      "divide by the smallest"
+     ]
+    },
+    {
+     "q": "What wavelength do we use in Lab 3?",
+     "expect": [
+      "635 nm"
+     ]
+    },
+    {
+     "q": "How do I dispose of copper waste?",
+     "expect": [
+      "labelled bottle in the hood"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "US History",
+   "materials": [
+    {
+     "title": "Federalist No. 10",
+     "kind": "other",
+     "chunks": [
+      {
+       "text": "AMONG the numerous advantages promised by a well constructed Union, none deserves to be more accurately developed than its tendency to break and control the violence of faction.",
+       "heading": "",
+       "loc_label": "line 5",
+       "loc_kind": "line",
+       "loc_start": "line 5"
+      },
+      {
+       "text": "By a faction I understand a number of citizens, whether amounting to a majority or minority of the whole, who are united by some common impulse of passion, or of interest, adverse to the rights of other citizens.",
+       "heading": "",
+       "loc_label": "line 30",
+       "loc_kind": "line",
+       "loc_start": "line 30"
+      },
+      {
+       "text": "There are two methods of curing the mischiefs of faction: the one, by removing its causes; the other, by controlling its effects.",
+       "heading": "",
+       "loc_label": "line 55",
+       "loc_kind": "line",
+       "loc_start": "line 55"
+      },
+      {
+       "text": "A republic, by which I mean a government in which the scheme of representation takes place, opens a different prospect and promises the cure for which we are seeking.",
+       "heading": "",
+       "loc_label": "line 99",
+       "loc_kind": "line",
+       "loc_start": "line 99"
+      },
+      {
+       "text": "The effect of the first difference is to refine and enlarge the public views, by passing them through the medium of a chosen body of citizens.",
+       "heading": "",
+       "loc_label": "line 120",
+       "loc_kind": "line",
+       "loc_start": "line 120"
+      }
+     ]
+    },
+    {
+     "title": "Federalist No. 51",
+     "kind": "other",
+     "chunks": [
+      {
+       "text": "Ambition must be made to counteract ambition. The interest of the man must be connected with the constitutional rights of the place.",
+       "heading": "",
+       "loc_label": "line 80",
+       "loc_kind": "line",
+       "loc_start": "line 80"
+      }
+     ]
+    },
+    {
+     "title": "Federalist No. 1",
+     "kind": "other",
+     "chunks": [
+      {
+       "text": "After an unequivocal experience of the inefficiency of the subsisting federal government, you are called upon to deliberate on a new Constitution for the United States of America.",
+       "heading": "",
+       "loc_label": "line 3",
+       "loc_kind": "line",
+       "loc_start": "line 3"
+      }
+     ]
+    },
+    {
+     "title": "Chapter 8 Creating a Constitution",
+     "kind": "textbook",
+     "chunks": [
+      {
+       "text": "James Madison argued in Federalist No. 10 that a large republic would control the effects of faction. The paper is one of the most cited.",
+       "heading": "Summary",
+       "loc_label": "Summary",
+       "loc_kind": "section",
+       "loc_start": "Summary"
+      },
+      {
+       "text": "Review questions. 1. What did Federalist No. 1 say about the new Constitution? 2. Who wrote the Federalist Papers? 3. Define federalism.",
+       "heading": "Review Questions",
+       "loc_label": "Review",
+       "loc_kind": "section",
+       "loc_start": "Review"
+      },
+      {
+       "text": "The Federalist Papers were essays published in newspapers to win support for ratification.",
+       "heading": "The Federalist Papers",
+       "loc_label": "Federalist Papers",
+       "loc_kind": "section",
+       "loc_start": "Federalist Papers"
+      }
+     ]
+    },
+    {
+     "title": "Chapter 7 The Articles of Confederation",
+     "kind": "textbook",
+     "chunks": [
+      {
+       "text": "Shays's Rebellion in 1786 and 1787 convinced many leaders that the Articles of Confederation were too weak.",
+       "heading": "Shays's Rebellion",
+       "loc_label": "Shays",
+       "loc_kind": "section",
+       "loc_start": "Shays"
+      }
+     ]
+    },
+    {
+     "title": "Syllabus",
+     "kind": "syllabus",
+     "chunks": [
+      {
+       "text": "Essay 2 on the Federalist is due Nov 20. AI policy: you may not submit text written by AI.",
+       "heading": "Essays",
+       "loc_label": "Essays",
+       "loc_kind": "section",
+       "loc_start": "Essays"
+      }
+     ]
+    }
+   ],
+   "questions": [
+    {
+     "q": "Federalist No. 10",
+     "expect": [
+      "tendency to break and control the violence of faction",
+      "two methods of curing the mischiefs of faction",
+      "A republic, by which I mean"
+     ],
+     "mode": "any"
+    },
+    {
+     "q": "What does Federalist No. 10 say about a republic?",
+     "expect": [
+      "A republic, by which I mean"
+     ]
+    },
+    {
+     "q": "How does Madison define a faction in Federalist 10?",
+     "expect": [
+      "By a faction I understand"
+     ]
+    },
+    {
+     "q": "Federalist No. 51 ambition",
+     "expect": [
+      "Ambition must be made to counteract ambition"
+     ]
+    },
+    {
+     "q": "Federalist No. 1",
+     "expect": [
+      "After an unequivocal experience"
+     ]
+    },
+    {
+     "q": "Why did Shays's Rebellion matter?",
+     "expect": [
+      "Shays's Rebellion in 1786"
+     ]
+    },
+    {
+     "q": "What is the policy on using AI for the essay?",
+     "expect": [
+      "you may not submit text written by AI"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Computational Thinking",
+   "materials": [
+    {
+     "title": "Week 4 Seam carving",
+     "kind": "notes",
+     "chunks": [
+      {
+       "text": "Seam carving removes the least important pixel path. Dynamic programming computes the cheapest seam: the cost of a pixel is its energy plus the smaller cost of the three pixels above.",
+       "heading": "Dynamic programming for seams",
+       "loc_label": "Seams",
+       "loc_kind": "section",
+       "loc_start": "Seams"
+      },
+      {
+       "text": "```julia\nfunction convolve(image, kernel)\n    half_height = height ÷ 2\n    for i in 1:height\n        # slide the kernel over every neighbour pixel\n    end\nend\n```",
+       "heading": "Edge detection filter",
+       "loc_label": "Filter",
+       "loc_kind": "section",
+       "loc_start": "Filter"
+      }
+     ]
+    },
+    {
+     "title": "Week 7 Random walks",
+     "kind": "notes",
+     "chunks": [
+      {
+       "text": "A random walk takes a step left or right at random. ```julia\nfunction random_walk(n)\n    position = 0\n    for step in 1:n\n        position += rand([-1, 1])\n    end\n    position\nend\n```",
+       "heading": "Random walk code",
+       "loc_label": "Walk",
+       "loc_kind": "section",
+       "loc_start": "Walk"
+      },
+      {
+       "text": "PLUTO_MANIFEST_TOML_CONTENTS = \"\"\"\n[[deps.Images]]\nuuid = \"916415d5-f1e6-5110-898d-aaa5f9f070e0\"\nversion = \"0.25.2\"\n[[deps.Walk]]\nuuid = \"a5c9bd00-7b1e-4b0f-9d3a-0f6b4a1f9c11\"\nversion = \"1.0.0\"\n[[deps.Random]]\nuuid = \"9a3f8284-a2c9-5f02-9a11-845980a1fd5c\"\ngit-tree-sha1 = \"random walk image convolve\"\n\"\"\"",
+       "heading": "",
+       "loc_label": "End",
+       "loc_kind": "section",
+       "loc_start": "End"
+      }
+     ]
+    },
+    {
+     "title": "Syllabus",
+     "kind": "syllabus",
+     "chunks": [
+      {
+       "text": "Grading: homework 60 percent, quick questions 15 percent, final project 25 percent. The lowest homework is dropped. Late homework loses 10 percent per day for up to three days.",
+       "heading": "Grading",
+       "loc_label": "Grading",
+       "loc_kind": "section",
+       "loc_start": "Grading"
+      },
+      {
+       "text": "Homework 1 is due Friday Sep 18 at 11:59 pm.",
+       "heading": "Homework",
+       "loc_label": "Homework",
+       "loc_kind": "section",
+       "loc_start": "Homework"
+      }
+     ]
+    },
+    {
+     "title": "Week 2 Images as data",
+     "kind": "notes",
+     "chunks": [
+      {
+       "text": "An image is stored as an array of pixels. Each pixel holds red, green and blue values.",
+       "heading": "Data: Images",
+       "loc_label": "Images",
+       "loc_kind": "section",
+       "loc_start": "Images"
+      },
+      {
+       "text": "The computational science workflow: data, input, process, model, visualize, output.",
+       "heading": "Computer Science and Computational Science Working Together",
+       "loc_label": "Workflow",
+       "loc_kind": "section",
+       "loc_start": "Workflow"
+      }
+     ]
+    }
+   ],
+   "questions": [
+    {
+     "q": "How does dynamic programming come in for seam carving?",
+     "expect": [
+      "Dynamic programming computes the cheapest seam"
+     ]
+    },
+    {
+     "q": "Show me the random walk code",
+     "expect": [
+      "function random_walk(n)"
+     ]
+    },
+    {
+     "q": "How do I write the convolve function?",
+     "expect": [
+      "function convolve(image, kernel)"
+     ]
+    },
+    {
+     "q": "What is the late policy for homework?",
+     "expect": [
+      "loses 10 percent per day"
+     ]
+    },
+    {
+     "q": "How does an image get stored in a computer?",
+     "expect": [
+      "array of pixels"
+     ]
+    },
+    {
+     "q": "When is Homework 1 due?",
+     "expect": [
+      "Homework 1 is due Friday Sep 18"
+     ]
+    },
+    {
+     "q": "What is the workflow for computational science?",
+     "expect": [
+      "data, input, process, model, visualize, output"
+     ]
+    }
+   ]
+  }
+ ]
+}
