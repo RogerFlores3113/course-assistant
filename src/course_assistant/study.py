@@ -73,6 +73,12 @@ def _usable(m: dict[str, Any]) -> bool:
     return not m.get("duplicate_of") and not m.get("graded") and m["kind"] not in ("syllabus", "past_offering")
 
 
+def _rfn(name: str, *args) -> Any:
+    """A retrieval helper by name; False when this retrieval does not have it."""
+    fn = getattr(_mod("retrieval"), name, None)
+    return fn(*args) if callable(fn) else False
+
+
 def _is_noise(text: str) -> bool:
     fn = getattr(_mod("retrieval"), "is_manifest_noise", None)
     return bool(fn and fn(text))
@@ -493,6 +499,47 @@ def _topic_words(ev: dict[str, Any]) -> set[str]:
     return {w for w in re.findall(r"[a-z]{4,}", text) if w not in _GENERIC}
 
 
+def _name_tokens(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]{2,}", re.sub(r"\.[a-z0-9]{2,4}$", "", (text or "").lower().replace("_", " ")))
+            if w not in _GENERIC and not w.isdigit()}
+
+
+def _words_match(a: str, b: str) -> bool:
+    """'intro' and 'introduction', 'transpose' and 'transposes': the same word, one a prefix or plural of the other."""
+    if a == b:
+        return True
+    short, long = sorted((a, b), key=len)
+    return len(short) >= 4 and long.startswith(short[:max(4, len(short) - 1)]) and len(long) - len(short) <= 6
+
+
+def _title_score(m: dict[str, Any], ev: dict[str, Any]) -> int:
+    """How many words of the lecture's title and topics the material's title or file name carries."""
+    mat = _name_tokens(f"{m.get('title', '')}") | _name_tokens(str(m.get("original_name") or ""))
+    lec = {w for w in re.findall(r"[a-z0-9]{2,}", f"{clean_title(ev)} {ev.get('topics') or ''}".lower())
+           if w not in _GENERIC and not w.isdigit() and w not in _FILLER_WORDS and w not in {"strang", "lecture"}}
+    return sum(1 for w in mat if any(_words_match(w, x) for x in lec))
+
+
+_NOTE_KINDS = ("notes", "lecture_notes", "slides", "recording", "handout", "other", "reading")
+
+
+def link_suggestions(store: Store, course_id: int, events: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Saved notes that are not linked to any lecture but whose title or file name looks like one:
+    [{material, event, score, why}]. A material is suggested for its best lecture only, and not when two tie."""
+    evs = events if events is not None else [e for e in store.events(course_id, kinds=["lecture"]) if not is_junk_event(e)]
+    out = []
+    for m in store.materials(course_id):
+        if not _usable(m) or m["kind"] not in _NOTE_KINDS or m.get("event_id") or m.get("lecture_date"):
+            continue
+        ranked = sorted(((_title_score(m, e), e) for e in evs), key=lambda x: -x[0])
+        if not ranked or ranked[0][0] < 1 or (len(ranked) > 1 and ranked[1][0] == ranked[0][0]):
+            continue
+        score, e = ranked[0]
+        out.append({"material": m, "event": e, "score": score,
+                    "why": f"'{m['title']}' looks like {event_label(e)}"})
+    return out
+
+
 def _is_recording(m: dict[str, Any]) -> bool:
     names = " ".join(str(m.get(k, "")) for k in ("title", "original_name")).lower()
     return m["kind"] == "recording" or "caption" in names or "transcript" in names
@@ -530,12 +577,28 @@ def lecture_materials(store: Store, course_id: int, ev: dict[str, Any]) -> list[
         title_words = {w for w in re.findall(r"[a-z]{4,}", f"{m['title']} {m.get('original_name', '')}".lower())
                        if w not in _GENERIC}
         if num is None or not re.search(r"(?:lecture|lec|week)[\s_\-#.]*\d+", m["title"].lower()):
-            if len(words & title_words) >= 2 or (len(words) == 1 and words <= title_words and len(next(iter(words))) >= 6):
+            if len(words & title_words) >= 2 or (len(words) == 1 and words <= title_words and len(next(iter(words))) >= 6) \
+                    or _title_score(m, ev) >= 2:
                 add(m, "matched by title")
     return out
 
 
-def _lecture_sources(store: Store, course_id: int, ev: dict[str, Any], cap: int = 20):
+def _syllabus_rows(store: Store, course_id: int, ev: dict[str, Any], query: str, n: int = 3) -> list[dict[str, Any]]:
+    """The syllabus passages that are about this lecture (its row, its reading), not the catalog blurb or course policies."""
+    num, words = _lecture_number(ev), _topic_words(ev)
+    out = []
+    for x in _search(store, course_id, query, 6, kinds=["syllabus"]):
+        if _rfn("is_header_chunk", x["text"], x["material_title"]) or _rfn("is_title_only", x["text"], x.get("heading", "")):
+            continue
+        text = x["text"].lower()
+        about = (num is not None and re.search(rf"(?:lecture|lec|week)[\s_\-#.]*0*{num}\b", text)) or \
+                ev["date"] in text or len(words & set(re.findall(r"[a-z]{4,}", text))) >= 2
+        if about:
+            out.append(x)
+    return out[:n]
+
+
+def _lecture_sources(store: Store, course_id: int, ev: dict[str, Any], cap: int = 20, *, primer: bool = False):
     """(sources, used materials [(title, why)], note) for a lecture."""
     found = lecture_materials(store, course_id, ev)
     recs = [m for m, _ in found if _is_recording(m)]
@@ -543,12 +606,22 @@ def _lecture_sources(store: Store, course_id: int, ev: dict[str, Any], cap: int 
     ordered = [m["id"] for m in recs + others]
     own = _spread_materials(store, ordered, cap=max(4, cap - 8), per=8) if ordered else []
     query = " ".join(x for x in (clean_title(ev), ev.get("topics", "")) if x)
-    syl = _search(store, course_id, query, 3, kinds=["syllabus"])
-    found_hits = _search(store, course_id, query, 10, exclude_graded=True)
-    sources = _merge(own, found_hits, syl, cap=cap)
+    if primer:  # a primer is built before the lecture: the schedule's row and reading, then notes about the same topic
+        syl = _syllabus_rows(store, course_id, ev, query)
+        related = [x for x in _search(store, course_id, query, 14, exclude_graded=True)
+                   if x["material_kind"] not in ("past_offering", "assignment", "syllabus")
+                   and not _rfn("is_scaffold_chunk", x["text"], x.get("heading", ""))]
+        sources = _merge(own, syl, related, cap=cap)
+    else:
+        syl = _search(store, course_id, query, 3, kinds=["syllabus"])
+        found_hits = _search(store, course_id, query, 10, exclude_graded=True)
+        sources = _merge(own, found_hits, syl, cap=cap)
     used = [(m["title"], why) for m, why in found]
     if used:
         note = "Used for this lecture: " + "; ".join(f"{t} ({w})" for t, w in used) + "."
+    elif primer:
+        note = ("Nothing is linked to this lecture yet, so this primer is built from the syllabus reading for it and "
+                "your related notes. Link its notes or slides to the lecture in Materials for a closer match.")
     else:
         note = ("No saved material is linked to this lecture, so this uses a topic search of everything you saved. "
                 "Link a material to the lecture in Materials for a better result.")
@@ -559,15 +632,18 @@ def _lecture_sources(store: Store, course_id: int, ev: dict[str, Any], cap: int 
 def primer(store: Store, course_id: int, provider, *, event_id: int | None = None) -> int:
     _need(provider)
     ev = _pick_event(store, course_id, event_id, "lecture")
-    sources, used, note = _lecture_sources(store, course_id, ev)
+    sources, used, note = _lecture_sources(store, course_id, ev, primer=True)
     title = clean_title(ev) or ev["title"]
     task = (f"Write a short pre-lecture primer for {_course_name(store, course_id)}, lecture \"{title}\" on "
-            f"{ev['date']}. Topics listed: {ev.get('topics') or 'not listed'}. Use these sections: ## The big picture "
+            f"{ev['date']}. Topics and reading listed: {ev.get('topics') or 'not listed'}. Use these sections: ## The big picture "
             "(a short, broad overview), ## Key terms (each with a one-line definition), ## What to watch for in lecture, "
             "## 3 questions to keep in mind. Keep it to what a student can read in five minutes. Stay broad: this is "
-            "before the lecture, so do not go deep.")
+            "before the lecture, so do not go deep."
+            + ("" if used else " No notes or slides are linked to this lecture, so build the primer from the syllabus "
+               "reading and the related notes in the sources, call it a primer built from the schedule, and say plainly "
+               "what the sources do not cover."))
     return _generate(store, course_id, provider, "primer", f"Primer: {title}", task, sources,
-                     question=title, event_id=ev["id"], max_tokens=3000,
+                     question=title, event_id=ev["id"], max_tokens=3000, extra_note="" if used else note,
                      data={"used_materials": [{"title": t, "why": w} for t, w in used]})
 
 
@@ -578,6 +654,105 @@ def _window(store: Store, course_id: int, ev: dict[str, Any]):
     lectures = [e for e in store.events(course_id, kinds=["lecture"])
                 if not is_junk_event(e) and e["date"] <= ev["date"] and (not prev or e["date"] > prev)]
     return prev, lectures
+
+
+_LOGISTICS = re.compile(r"\b(room|building|hall|location|meets?|bring|goggles|safety|due at|submit|report due|"
+                        r"pre-?lab|lab (?:date|section)|schedule)\b", re.I)
+_LEAD_WEAK = re.compile(r"^\s*(\[(?:image|figure)|\||>|check your learning|solution\b|example\b|\*\*example)", re.I)
+
+
+def _is_logistics(c: dict[str, Any]) -> bool:
+    """A lab's date and room line, a list of due dates: not something to study."""
+    text = (c.get("text") or "").strip()
+    return len(text) < 260 and bool(_LOGISTICS.search(text)) and bool(_rfn("has_date", text) or re.search(r"\broom\b", text, re.I))
+
+
+def _usable_chunks(store: Store, m: dict[str, Any]) -> list[dict[str, Any]]:
+    return [c for c in store.chunks_of(m["id"]) if not _is_noise(c["text"])
+            and not _rfn("is_scaffold_chunk", c["text"], c.get("heading", ""))
+            and not _rfn("is_title_only", c["text"], c.get("heading", ""))
+            and not _rfn("is_header_chunk", c["text"], m.get("title", ""))
+            and not _is_logistics(c)]
+
+
+def _stem_set(text: str) -> set[str]:
+    return {w[:6] for w in re.findall(r"[a-z]{4,}", (text or "").lower()) if w not in _GENERIC and w not in _FILLER_WORDS}
+
+
+def _best_in_section(group: list[dict[str, Any]], heading: str) -> dict[str, Any]:
+    """The passage that opens a topic: prefers one that defines (bold term, 'is', 'defined') over a figure, a table
+    or a worked solution."""
+    hw = _stem_set(heading)
+
+    def score(c: dict[str, Any]) -> float:
+        t = c["text"]
+        sc = 0.0
+        sc += 2.0 if "**" in t[:600] else 0.0
+        sc += 1.0 if re.search(r"\b(?:is|are) (?:defined|called|the|a|an)\b|\bdefin(?:ed|ition)\b|\brefers? to\b", t[:500], re.I) else 0.0
+        sc += 0.5 * len(hw & _stem_set(t[:500]))
+        sc -= 3.0 if _LEAD_WEAK.match(t) else 0.0
+        return sc
+    best = group[0]
+    for c in group[1:4]:  # the opening few passages of the section only
+        if score(c) > score(best) + 0.4:
+            best = c
+    return best
+
+
+def _topic_passages(store: Store, mats: list[dict[str, Any]], topic_text: str, cap: int) -> list[dict[str, Any]]:
+    """One passage per topic heading of each material, in reading order. Headings that the exam's lectures name come
+    first when there are more headings than slots. Lead-in stubs, chapter intros, end-of-chapter exercises, glossaries
+    and summaries are left out."""
+    want = _stem_set(topic_text)
+    per_mat: list[tuple[dict[str, Any], list[tuple[int, dict[str, Any]]]]] = []
+    plain: list[dict[str, Any]] = []
+    for m in mats:
+        chunks = _usable_chunks(store, m)
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for c in chunks:
+            groups.setdefault(c.get("heading") or "", []).append(c)
+        if len([h for h in groups if h]) < 4:
+            plain.append(m)
+            continue
+        picks = []
+        for i, (h, g) in enumerate(groups.items()):
+            if sum(len(c["text"]) for c in g) < 600 and not (_stem_set(h) & want):
+                continue  # a lead-in stub that only introduces the subsections below it
+            hit = len(_stem_set(h) & want)
+            picks.append((i, hit, _best_in_section(g, h), m))
+        per_mat.append((m, picks))
+    n = max(1, len(per_mat) + len(plain))
+    share = max(2, cap // n)
+    lists = []
+    for m, picks in per_mat:
+        if len(picks) > share:
+            keep = [p for p in picks if p[1] > 0]
+            keep = keep[:share]
+            rest = [p for p in picks if p not in keep]
+            keep += _spread_pick(rest, share - len(keep))
+            picks = sorted(keep, key=lambda p: p[0])
+        lists.append([_source_from_chunk(c, m["title"], m["kind"]) for _, _, c, m in picks])
+    for m in plain:
+        chunks = _usable_chunks(store, m)
+        lists.append([_source_from_chunk(c, m["title"], m["kind"]) for c in _spread_pick(chunks, share)])
+    return _interleave(lists, cap=cap)
+
+
+def _relevant_materials(store: Store, mats: list[dict[str, Any]], topic_text: str) -> list[dict[str, Any]]:
+    """With nothing linked or chosen, the materials whose title or headings name the exam's topics; the opening
+    chapter and the rest only when nothing does."""
+    want = _stem_set(topic_text)
+    if not want:
+        return mats
+    scored = []
+    for m in mats:
+        words = _stem_set(m["title"]) | _stem_set(" ".join(c.get("heading", "") for c in store.chunks_of(m["id"])))
+        scored.append((len(words & want), m))
+    hit = [m for n, m in scored if n > 0]
+    if hit:
+        return hit
+    rest = [m for m in mats if _rfn("title_doc_id", m["title"]) != ("chapter", 1)]
+    return rest or mats
 
 
 def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None = None,
@@ -607,6 +782,18 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         d = m.get("lecture_date") or ""
         if _usable(m) and d and d <= ev["date"] and (not prev or d > prev):
             in_window.setdefault(m["id"], m)
+    suggestions = [x for x in link_suggestions(store, course_id, lectures) if x["material"]["id"] not in in_window]
+    link_note = ""
+    if suggestions and not chosen:  # unlinked notes whose title names a lecture of the window: used, and said so
+        for x in suggestions:
+            in_window.setdefault(x["material"]["id"], x["material"])
+        gone = {x["event"]["id"] for x in suggestions}
+        missing = [f"{event_label(l)} ({l['date']})" for l in lectures
+                   if l["id"] not in gone and not lecture_materials(store, course_id, l)]
+        link_note = ("Matched by title, not linked: " + "; ".join(x["why"] for x in suggestions[:6]) +
+                     ". Link them to their lectures in Materials to make this certain.")
+    topics = [" ".join(x for x in (clean_title(e), e.get("topics", "")) if x) for e in lectures]
+    topics_text = [t for t in topics if t] or [" ".join(x for x in (ev["title"], ev.get("topics", "")) if x)]
     scope_note = ""
     if chosen:
         mats = chosen
@@ -615,34 +802,47 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         mats = list(in_window.values())
         scope_note = f"Built from the materials saved for {'the lectures since ' + prev if prev else 'the course so far'}."
     else:
-        mats = [m for m in store.materials(course_id) if _usable(m)]
+        mats = _relevant_materials(store, [m for m in store.materials(course_id) if _usable(m)], " ".join(topics_text))
         scope_note = "No material is linked to the lectures before this exam, so this covers all your saved materials."
-    topics = [" ".join(x for x in (clean_title(e), e.get("topics", "")) if x) for e in lectures]
-    topics_text = [t for t in topics if t] or [" ".join(x for x in (ev["title"], ev.get("topics", "")) if x)]
     syllabus_rows = [f"{e['date']}: {event_label(e)}" for e in lectures if e.get("topics")]
     mids = [m["id"] for m in mats]
-    per_topic = [_search(store, course_id, t, 4, exclude_graded=True, **({"material_ids": mids} if mids else {}))
+    sections = _topic_passages(store, mats, " ".join(topics_text), MAX_SOURCES - 6) if mats else []
+    per_topic = [[x for x in _search(store, course_id, t, 5, exclude_graded=True, **({"material_ids": mids} if mids else {}))
+                  if not _rfn("is_scaffold_chunk", x["text"], x.get("heading", "")) and not _is_logistics(x)][:3]
                  for t in [*topics_text, *[m["title"] for m in mats]]]
-    own = _spread_materials(store, mids, cap=MAX_SOURCES - 6, per=2) if mids else []
-    # the syllabus adds exam logistics, but not when the student limited the guide to chosen materials
-    syl = [] if chosen else _search(store, course_id, " ".join([ev["title"], *topics_text[:6]]), 3, kinds=["syllabus"])
-    sources = _merge(_interleave([own, *per_topic], cap=MAX_SOURCES - 3), syl)
+    # the syllabus adds this exam's own row (what it covers, when), never grading or catalog text, and not when the
+    # student limited the guide to chosen materials
+    syl = []
+    if not chosen:
+        words = _stem_set(ev["title"])
+        syl = [x for x in _search(store, course_id, " ".join([ev["title"], *topics_text[:6]]), 4, kinds=["syllabus"])
+               if words and words <= _stem_set(x["text"] + " " + x.get("heading", "")) and not _rfn("is_header_chunk", x["text"], x["material_title"])
+               and not re.match(r"^\W*(grading|catalog|course description|academic integrity)", x.get("heading", ""), re.I)][:2]
+    sources = _merge(_interleave([sections, *per_topic], cap=MAX_SOURCES - 2), syl)
     today = _today()
+    past = False
     try:
-        days = max(0, (_date.fromisoformat(ev["date"]) - _date.fromisoformat(today)).days)
+        delta = (_date.fromisoformat(ev["date"]) - _date.fromisoformat(today)).days
+        past, days = delta < 0, max(0, delta)
     except ValueError:
         days = 0
     plan_days = [(_date.fromisoformat(today) + timedelta(days=i)).isoformat() for i in range(min(days, 14) + 1)] \
-        if re.match(r"\d{4}-\d{2}-\d{2}$", ev["date"]) else []
+        if re.match(r"\d{4}-\d{2}-\d{2}$", ev["date"]) and not past else []
     graded = _mod("integrity").match_graded(store, course_id, " ".join(topics_text))
-    notes = [scope_note]
+    notes = [scope_note, link_note]
+    if past:
+        notes.append(f"This exam was on {ev['date']}, so this is a review of what it covered.")
     if missing:
         notes.append("No saved materials for: " + "; ".join(missing) + ". Add them to cover those topics.")
     if graded:
         notes.append("Practice questions below are original twins with different numbers. Questions you marked as "
                      "graded are not solved here.")
+    when = (f"this exam was on {ev['date']}, so it is already over (today is {today})" if past
+            else f"{days} days from today, {today}")
+    plan = ("## Review plan (the exam is over: three short bullets on what to revisit; no day-by-day schedule)" if past else
+            "## Study plan (one line per day from these dates: " + f"{', '.join(plan_days) or ev['date']}; spread the topics, put review and rest near the end)")
     task = (f"Write an exam study guide for {_course_name(store, course_id)}: \"{ev['title']}\" on {ev['date']} "
-            f"({days} days from today, {today}). Window: {'since the previous exam on ' + prev if prev else 'the start of the course'}.\n"
+            f"({when}). Window: {'since the previous exam on ' + prev if prev else 'the start of the course'}.\n"
             f"Materials used: {', '.join(m['title'] for m in mats) or 'none'}.\n"
             f"Lecture topics in the window:\n- " + "\n- ".join(topics_text) +
             ("\nSyllabus rows:\n- " + "\n- ".join(syllabus_rows) if syllabus_rows else "") +
@@ -652,11 +852,12 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
             "mistakes, ## Practice set (4 to 6 short questions; put each answer in a block with <details> on its own "
             "line, then <summary>Answer</summary> on the next line, the answer, then </details> on its own line; make "
             "up new numbers and never copy a graded problem; if a graded problem would be the natural question, write "
-            "a twin with different numbers instead), ## Study plan (one line per day from "
-            f"these dates: {', '.join(plan_days) or ev['date']}; spread the topics, put review and rest near the end).")
+            f"a twin with different numbers instead), {plan}.")
     return _generate(store, course_id, provider, "exam_guide", f"Exam guide: {ev['title']}", task, sources,
                      question=ev["title"], event_id=ev["id"],
-                     data={"topics": topics, "previous_exam": prev, "missing_lectures": missing,
+                     data={"topics": topics, "previous_exam": prev, "missing_lectures": missing, "past": past,
+                           "link_suggestions": [{"material_id": x["material"]["id"], "event_id": x["event"]["id"],
+                                                 "why": x["why"]} for x in suggestions],
                            "materials": [m["title"] for m in mats], "syllabus_rows": syllabus_rows},
                      max_tokens=5000, extra_note=" ".join(n for n in notes if n))
 
@@ -736,9 +937,9 @@ def _scoped_sources(store: Store, pool: list[dict[str, Any]], scope: str, cap: i
     texts: dict[int, list[dict[str, Any]]] = {}
     for m in named:
         chunks = [c for c in store.chunks_of(m["id"]) if not _is_noise(c["text"])
-                  and not r.is_scaffold_chunk(c["text"], c.get("heading", ""))
-                  and not r.is_title_only(c["text"], c.get("heading", ""))
-                  and not r.is_header_chunk(c["text"], m.get("title", ""))]
+                  and not _rfn("is_scaffold_chunk", c["text"], c.get("heading", ""))
+                  and not _rfn("is_title_only", c["text"], c.get("heading", ""))
+                  and not _rfn("is_header_chunk", c["text"], m.get("title", ""))]
         texts[m["id"]] = chunks or [c for c in store.chunks_of(m["id"]) if not _is_noise(c["text"])]
     df: dict[str, int] = {}
     for m in named:

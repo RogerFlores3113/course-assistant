@@ -220,7 +220,7 @@ def _prose_title(sentence: str) -> str:
     for rx in (_QUIZ, _EXAM, _ASSIGN, _LECTURE):
         m = rx.search(sentence)
         if m:
-            before = sentence[:m.start()].split()[-2:]
+            before = [w for w in sentence[:m.start()].split() if not re.fullmatch(r"[\d,.;:]+", w)][-2:]  # not the tail of a date
             after = re.match(r"\s*(\d{1,2})\b", sentence[m.end():])
             t = " ".join([*before, m.group(0)] + ([after.group(1)] if after else []))
             t = re.sub(r"^(?:the|a|an|your|our)\s+", "", t, flags=re.I)
@@ -303,6 +303,8 @@ def _finish_title(title: str, notes: str, kind: str) -> tuple[str, str]:
 
 def _good_title(title: str) -> bool:
     letters = sum(c.isalpha() for c in title)
+    if re.match(r"^\d{1,2}[ ,]+(?:19|20)\d{2}\b", title):
+        return False  # "3 2026, Midterm 1": the tail of a date
     if (letters < 3 and not re.match(r"(?i)^(hw|ps|q|lec|wk)\s*\d", title)) or _JUNK_TITLE.match(title):
         return False
     return not re.fullmatch(r"(?:(?:mon|tue|wed|thu|fri|sat|sun)\w*[ ,.]*|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*"
@@ -573,6 +575,8 @@ def _line_events(line: str, dates: list[dict[str, Any]], ctx: _Ctx, prev_text: s
         paren = re.search(r"\(([^)]*)\)", work)
         t2 = f"No {nc.group(1).lower()}" + (f" ({paren.group(1).strip()})" if paren and paren.group(1).strip() else "")
         return [{"title": t2, "kind": "other", "date": iso}]
+    if sentence_prose and len(work.split()) > 28:
+        return []  # a long paragraph that mentions dates is not a schedule line
     if sentence_prose:
         t2 = _prose_title(work)
         if not t2:

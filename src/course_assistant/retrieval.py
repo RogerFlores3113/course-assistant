@@ -1207,7 +1207,7 @@ def around(store, chunk_id: int, before: int = 1, after: int = 1) -> list[dict]:
 # ---------------------------------------------------------------- searching the materials list
 def _snippet(text: str, terms: list[str], width: int = 110) -> str:
     """A short stretch of the passage around the first word of the search that appears in it."""
-    flat = re.sub(r"\s+", " ", re.sub(r"[`*#>$]", "", text or "")).strip()
+    flat = re.sub(r"\s+", " ", re.sub(r"(?<=[A-Za-z0-9])\*(?=[A-Za-z0-9])", "\u00d7", re.sub(r"[`#>$]|(?<![A-Za-z0-9])\*+|\*+(?![A-Za-z0-9])", "", text or ""))).strip()
     low = flat.lower()
     at = min((i for i in (low.find(t) for t in terms) if i >= 0), default=0)
     start = max(0, at - width // 3)

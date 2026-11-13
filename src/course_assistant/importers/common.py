@@ -245,7 +245,17 @@ def split_text(text: str, max_words: int = MAX_WORDS) -> list[str]:
     return [t for t, _, _ in pack_blocks(parse_blocks(text), max_words)]
 
 
+_EMPTY_PARENS = re.compile(r"(?<=[^\s(])[ \t]+\([ \t]*\)|^[ \t]*\([ \t]*\)[ \t]*", re.M)
+
+
+def strip_artifacts(text: str) -> str:
+    """Empty '()' left where a PDF or a conversion dropped a date or a link: 'Thomas Jefferson ()' becomes 'Thomas
+    Jefferson'. A call such as f() (no space before the bracket) is code and stays."""
+    return _EMPTY_PARENS.sub("", text) if "()" in text.replace("( )", "()") else text
+
+
 def chunk(text: str, loc_kind: str, loc_start: Any, *, heading: str = "", loc_end: Any = "") -> dict[str, Any]:
+    text, heading = strip_artifacts(text), strip_artifacts(heading)
     return {"text": text, "loc_kind": loc_kind, "loc_start": loc_start, "loc_end": loc_end, "heading": heading,
             "loc_label": locations.label(loc_kind, loc_start, heading)}
 

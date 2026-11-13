@@ -383,7 +383,7 @@ def strip_markdown(text: str) -> str:
     t = re.sub(r"<[^>]+>", " ", t)
     t = re.sub(r"&nbsp;", " ", t)
     t = re.sub(r"(\*\*|__|\*|`|~~)", "", t)
-    t = re.sub(r"(?<!\w)_|_(?!\w)", "", t)
+    t = re.sub(r"(?<![\w}])_(?=\w)|(?<=[\w.,;:!?)])_(?=\s|$)", "", t)  # emphasis underscores, not the one in c_{ij}
     return re.sub(r"\s+", " ", t).strip(" \t#:-")
 
 
@@ -601,7 +601,7 @@ def chunk_plain(text: str, title: str = "") -> list[dict[str, Any]]:
         c = chunk(body if body is not None else "\n\n".join(g["text"] for g in group), "line", a_,
                   heading=(f"{title}, {head}" if title else head) if head != "lines" else title, loc_end=b_)
         c["loc_label"] = rng if head == "lines" else f"{head}, {rng}"
-        if head == "lines" and not out:  # said once per file: citing a line range is all the reader can do
+        if head == "lines":  # on every label, since a citation shows only its own: a line range is all the reader can cite
             c["loc_label"] += " (no paragraph numbers in this file)"
         out.append(c)
 

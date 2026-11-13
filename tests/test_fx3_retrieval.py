@@ -162,8 +162,7 @@ def test_fx3_plain_text_without_paragraph_numbers_says_so_once(env):
     import_file(s, cid, p, kind="reading", title="Fed 51")
     mid = s.materials(cid)[0]["id"]
     labels = [c["loc_label"] for c in s.chunks_of(mid)]
-    assert sum("no paragraph numbers in this file" in x for x in labels) == 1
-    assert "no paragraph numbers" in labels[0]
+    assert all("no paragraph numbers in this file" in x for x in labels)  # every citation shows it, not only the first
 
 
 def test_fx3_markdown_labels_are_unique_within_a_material(env):
