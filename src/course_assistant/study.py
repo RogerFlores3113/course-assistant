@@ -99,6 +99,12 @@ def _material_sources(store: Store, material_id: int, limit: int = 12, *, spread
     if not m:
         return []
     chunks = [c for c in store.chunks_of(material_id) if not _is_noise(c["text"])]
+    if spread:  # sampling across a file: skip bare titles and byline blocks, which only say who wrote it
+        r = _mod("retrieval")
+        is_title, is_head = getattr(r, "is_title_only", None), getattr(r, "is_header_chunk", None)
+        body = [c for c in chunks if not (is_title and is_title(c["text"], c.get("heading", "")))
+                and not (is_head and is_head(c["text"], m.get("title", "")))]
+        chunks = body or chunks
     chunks = _spread_pick(chunks, limit) if spread else chunks[:limit]
     return [_source_from_chunk(c, m["title"], m["kind"]) for c in chunks]
 

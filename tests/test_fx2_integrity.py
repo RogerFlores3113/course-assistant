@@ -334,3 +334,17 @@ def test_mode_is_concepts_when_no_twin_was_produced():
     a = integrity.twin(s, c, P1, FakeProvider(["no twin format here [1]"]), g)
     assert a.mode == "concepts" and a.twin is False
     assert s.guide(a.guide_id)["data"]["mode"] == "concepts"
+
+
+def test_concept_map_sampling_skips_header_chunks():
+    s = Store(":memory:")
+    c = s.add_course("History")
+    mid = s.add_material(c, "reading", "Federalist 10")
+    s.replace_chunks(mid, [
+        {"text": "FEDERALIST No. 10\n\nFor the New York Packet. Friday, November 23, 1787.\nMADISON", "loc_kind": "section",
+         "loc_start": 1, "loc_label": "header"},
+        {"text": "Among the numerous advantages promised by a well constructed Union, none deserves to be more accurately "
+                 "developed than its tendency to break and control the violence of faction, a dangerous vice of popular governments.",
+         "loc_kind": "section", "loc_start": 2, "loc_label": "paragraph 1"}])
+    got = study._material_sources(s, mid, 2, spread=True)
+    assert [g["loc_label"] for g in got] == ["paragraph 1"]

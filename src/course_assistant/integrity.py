@@ -1358,7 +1358,7 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
     has_math = bool(re.search(r"\d", clean)) and bool(re.search(r"[=\u2248]|\d\s*(?:ml|l|g|kg|mg|mol|mmol)\b", clean, re.I)
                                                      or r.mrows or matrix_rows(clean))
     topical = [it for it in problems if len(content_tokens(clean) & _Text(it["body"]).tok) >= 1]
-    if problems and _prose_word_count(clean) <= 14 and (has_math or topical):
+    if problems and _prose_word_count(clean) <= 14 and (has_math or (topical and bool(numbers(clean)))):
         return _hit((topical or problems)[0], "answer_only")
     # an answer given in another language: numbers or topic words of a graded item inside a non-English body
     if not english:
