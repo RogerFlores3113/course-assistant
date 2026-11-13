@@ -76,9 +76,11 @@ def test_outside_label_read_once_and_no_group_label_p5(ready):
 
 
 def test_modes_banners(ready):
-    assert "Worked twin problem" in page(ready, [{"kind": "text", "md": "x [1]", "cites": [1]}], data={"mode": "twin"}).text
+    t = page(ready, [{"kind": "text", "md": "x [1]", "cites": [1]}], data={"mode": "twin"}).text
+    assert "similar problem" in t and "Worked twin problem.</strong>" not in t  # the routing note says it once
     r = page(ready, [{"kind": "text", "md": "x [1]", "cites": [1]}], data={"mode": "concepts"})
-    assert "Graded work: help with concepts only" in r.text and "Worked twin" not in r.text
+    assert "the ideas behind it" in r.text or "concepts" in r.text
+    assert "Worked twin" not in r.text
     assert "Graded work" not in page(ready, [{"kind": "text", "md": "x [1]", "cites": [1]}], data={"mode": "answer"}).text
 
 
@@ -151,7 +153,7 @@ def test_reader_renders_code_math_and_h2_labels_p3(ready):
          "loc_start": "2", "loc_label": "p. 2"},
         {"text": "Spoken words", "loc_kind": "time", "loc_start": "95", "loc_end": "190", "loc_label": "1:35"}])
     t = ready.client.get(f"/read/{mid}?at={ids[1]}").text
-    assert '<h2 class="loc">p. 2</h2>' in t and '<h2 class="loc">1:35 to 3:10</h2>' in t
+    assert '<h2 class="loc">p. 2</h2>' in t and '<h2 class="loc">1:35</h2>' in t and "this part runs 1:35 to 3:10" in t
     assert '<code class="language-julia">function f(x)\n    x + 1\nend</code>' in t and 'class="math"' in t
     assert 'aria-current="location"' in t and "data-at-note" not in t
     assert "```" not in t

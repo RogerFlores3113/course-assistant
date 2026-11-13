@@ -8,7 +8,7 @@ from typing import Any
 from . import disclaimer
 import itertools
 
-from .web_md import count_marks, render, shallowest_heading, source_map, split_outside
+from .web_md import clean_label, count_marks, render, shallowest_heading, source_map, split_outside
 
 # Accent colours: each passes AA as a bar or dot on the page background and as text on its tinted card.
 PALETTE = {
@@ -287,10 +287,8 @@ def _merge_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     two cited passages from the same section show once with [2][5]."""
     rows: dict[tuple[str, str], dict[str, Any]] = {}
     for s in sorted(items, key=lambda x: x["n"]):
-        label = s.get("label") or ""
         title = s.get("title") or ""
-        if label and (label == title or title.endswith(", " + label) or title.endswith(": " + label)):
-            label = ""
+        label = clean_label(title, s.get("label") or "")
         key = (title, label)
         row = rows.get(key)
         if row is None:
@@ -302,6 +300,37 @@ def _merge_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 ROUTING_FALLBACK = {"twin": "This looks like your graded work, so here is a similar problem with different numbers.",
                     "concepts": "This looks like your graded work, so this covers the ideas behind it."}
+
+
+PARTLY_COVERED_NOTE = "Part of your question is not covered by your saved materials."
+_INTRO_NOTE = re.compile(r"This was marked graded \(|This looks like your own draft for ")
+
+
+def routing_note_src(data: dict[str, Any]) -> str:
+    return str((data or {}).get("routing_note") or "")
+
+
+def _list_only(md: str) -> bool:
+    lines = [ln for ln in md.splitlines() if ln.strip()]
+    return bool(lines) and all(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", ln) or ln.startswith((" ", "\t")) for ln in lines) \
+        and bool(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", lines[0]))
+
+
+def _merge_list_blocks(raw: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Neighbouring parts of one kind that are each only a list (an answer cut item by item so uncited ones could
+    be labelled) go back to one list, so a screen reader hears one list and numbering carries on."""
+    out: list[dict[str, str]] = []
+    for b in raw:
+        if out and out[-1]["kind"] == b["kind"] and _list_only(out[-1]["md"]) and _list_only(b["md"]):
+            out[-1] = {"kind": b["kind"], "md": out[-1]["md"].rstrip() + "\n" + b["md"].strip()}
+        else:
+            out.append(dict(b))
+    return out
+
+
+def _head_twin(md: str) -> str:
+    """The bold lines "Twin problem" and "Worked solution of the twin" become headings, so heading navigation finds them."""
+    return re.sub(r"(?m)^\*\*(Twin problem|Worked solution of the twin)\*\*\s*$", r"## \1", md)
 
 
 def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: list[Any] | None = None,
@@ -338,14 +367,35 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
                 keep = b["md"][:head.start()].strip()
                 raw = raw[:i] + ([{"kind": b["kind"], "md": keep}] if keep else [])
                 break
+    if mode in ("twin", "concepts"):
+        is_twin, is_concepts = mode == "twin", mode == "concepts"
+    else:
+        is_twin, is_concepts = bool(twin), False
+    routed = is_twin or is_concepts
+    dropped_note = ""
+    if routed:  # the page says why once (the routing note); the intro block that said it again goes
+        for i, b in enumerate(raw[:1]):
+            m_intro = _INTRO_NOTE.match(b["md"].strip())
+            if b["kind"] == "text" and m_intro and "cannot say whether" not in b["md"]:
+                sents = re.split(r"(?<=[.!?])\s+", b["md"].strip())
+                dropped_note = " ".join(x for x in sents[1:] if x.lower() not in (routing_note_src(data) or "").lower())
+                raw = raw[1:]
+    for b in raw:
+        if b["kind"] == "outside" and grounding.is_non_claim(b["md"], calc=is_twin):
+            b["kind"] = "text"  # advice, questions, honest gaps and a twin's own arithmetic are not factual claims
+    raw = _merge_list_blocks(raw)
     for b in raw:
         if b["kind"] == "text":
             b["md"] = _missing_as_list(b["md"])
+    if is_twin:
+        for b in raw:
+            b["md"] = _head_twin(b["md"])
     top = shallowest_heading(*[b["md"] for b in raw])
     uid = next(_UID)
     out_blocks: list[dict[str, Any]] = []
+    numbering: dict[str, Any] = {}
     for b in raw:
-        html = render(b["md"], smap, base_level=base_level, shallowest=top)
+        html = render(b["md"], smap, base_level=base_level, shallowest=top, numbering=numbering)
         if b["kind"] == "outside" and out_blocks and out_blocks[-1]["kind"] == "outside":
             out_blocks[-1]["html"] = type(html)(f"{out_blocks[-1]['html']}{html}")  # one box for a run of outside parts
         else:
@@ -368,14 +418,12 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
     # the saved flag counts only when nothing is cited; a cited answer that ends "your materials don't list more" is covered
     not_covered = bool(raw) and (grounding.is_not_covered(gb, len(sources)) or (bool(data.get("not_covered")) and not any_cited))
     has_outside = any(b["kind"] == "outside" for b in raw)
-    if mode in ("twin", "concepts"):
-        is_twin, is_concepts = mode == "twin", mode == "concepts"
-    else:
-        is_twin, is_concepts = bool(twin), False
-    routed = is_twin or is_concepts
+    partly = any_cited and any(b["kind"] == "text" and not grounding.cited_numbers(b["md"]) and grounding.says_gap(b["md"])
+                               for b in raw)
     routing_note = str(data.get("routing_note") or "").strip() if routed else ""
     if routed and not routing_note:
         routing_note = ROUTING_FALLBACK["twin" if is_twin else "concepts"]
+    routing_note = (routing_note + " " + dropped_note).strip() if routed and dropped_note else routing_note
     parts = []
     if removed:
         parts.append(f"{removed} citation{'s' if removed != 1 else ''} removed")
@@ -390,6 +438,7 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
             "twin": is_twin, "concepts": is_concepts,
             "routing_note": routing_note, "ask_normal": ask_normal,
             "outside": has_outside, "not_covered": not_covered and not routed,
+            "partly_covered": bool(partly and not routed), "partly_covered_note": PARTLY_COVERED_NOTE,
             "not_covered_note": NOT_COVERED_NOTE + (NOT_COVERED_EXTRA if has_outside else ""),
             "removed_citations": removed, "unverified_quotes": unverified, "base_level": base_level,
             "check_line": ("Check: " + ", ".join(parts)) if parts else "",
@@ -530,3 +579,28 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
             f"link{'s' if len(edges) != 1 else ''}. The same concepts and links are in the text list above the diagram.")
     return {"forest": forest, "cross": cross, "boxes": list(boxes.values()), "edges": shown_edges,
             "width": width, "height": height, "empty": not nodes, "aria": aria}
+
+
+# ---------------------------------------------------------------- search snippets
+def snippet_text(text: str) -> str:
+    """A materials-search snippet as plain text: links keep their words (a link cut off by the snippet's width is
+    cut cleanly), emphasis, code ticks, math dollars and heading marks go, and a snippet that starts or ends in the
+    middle of a word drops that word so it begins and ends on a whole one."""
+    t = str(text or "")
+    t = re.sub(r"!\[([^\]]*)\]\([^)\s]*\)?", r"\1", t)
+    t = re.sub(r"\[([^\]]+)\]\([^)\s]*(?:\)|\.\.\.|$)", r"\1", t)   # a link, closed or cut off in its address
+    t = re.sub(r"\[([^\]]+)\](?=\s|$)", r"\1", t)
+    t = re.sub(r"\bhttps?://\S+", "", t)
+    t = re.sub(r"(\*{1,3}|_{1,3})(?=\S)([^*_\n]+?)(?<=\S)\1", r"\2", t)
+    t = re.sub(r"(?m)^\s*#{1,6}\s+", "", t)
+    t = re.sub(r"[`$]", "", t)
+    t = re.sub(r"(?<![\w*])\*+|\*+(?![\w*])", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    lead, trail = t.startswith("..."), t.endswith("...")
+    core = t[3:].strip() if lead else t
+    core = core[:-3].strip() if trail else core
+    if lead and " " in core and not core[:1].isupper():
+        core = core.split(" ", 1)[1]
+    if trail and " " in core and not re.search(r"[.!?]$", core):
+        core = core.rsplit(" ", 1)[0]
+    return ("..." if lead else "") + core.strip() + ("..." if trail else "")

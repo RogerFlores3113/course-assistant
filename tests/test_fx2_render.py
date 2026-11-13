@@ -167,7 +167,7 @@ def test_problem8_outside_group_semantics(ready):
 def test_problem8_banners_only_from_mode(ready):
     b = [{"kind": "text", "md": "x [1]", "cites": [1]}]
     t = page(ready, b, data={"mode": "concepts"}, kind="twin").text
-    assert "Graded work: help with concepts only" in t and "Worked twin problem.</strong>" not in t
+    assert "Worked twin problem.</strong>" not in t and "data-routing-note" in t  # one note, not a banner as well
 
 
 # 9 guide subtitle and sources list

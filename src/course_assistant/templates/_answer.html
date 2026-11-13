@@ -1,11 +1,12 @@
 {% macro source_list(items) %}<ul class="src-list">{% for s in items %}<li><span class="src-n">{% for x in s.ns %}<a class="src-mark" href="{{ x.href }}" aria-label="Source {{ x.n }}: {{ s.title }}{% if s.label %}, {{ s.label }}{% endif %}{% if s.past %}, {{ s.past }}{% endif %}">[{{ x.n }}]</a>{% endfor %}</span> <a href="{{ s.ns[0].href }}">{{ s.title }}{% if s.label %}, {{ s.label }}{% endif %}</a>{% if s.past %} <span class="past-tag">({{ s.past }})</span>{% endif %}</li>{% endfor %}</ul>{% endmacro %}
 {% macro answer(view) %}
-<div class="answer">
+<div class="answer"{% if view.partly_covered %} data-partly-covered{% endif %}>
   {% if view.check_line %}<p class="check-line" data-check-line><strong>{{ view.check_line }}.</strong> The marked spots are in the text below.</p>{% endif %}
-  {% if view.twin %}<p class="twin-note"><strong>Worked twin problem.</strong> This is a similar problem with different numbers, solved step by step. Your original graded problem is left for you to solve.</p>{% endif %}
-  {% if view.concepts %}<p class="twin-note"><strong>Graded work: help with concepts only.</strong> This looks like part of your graded work, so this covers the ideas behind it and leaves the solving to you.</p>{% endif %}
+  {% if view.twin and not view.routing_note %}<p class="twin-note"><strong>Worked twin problem.</strong> This is a similar problem with different numbers, solved step by step. Your original graded problem is left for you to solve.</p>{% endif %}
+  {% if view.concepts and not view.routing_note %}<p class="twin-note"><strong>Graded work: help with concepts only.</strong> This looks like part of your graded work, so this covers the ideas behind it and leaves the solving to you.</p>{% endif %}
   {% if view.routing_note %}<p class="notice routing-note" data-routing-note>{{ view.routing_note }}</p>
-  {% if view.ask_normal %}<form method="post" action="/courses/{{ view.ask_normal.course_id }}/ask" class="inline-form" data-ask-normally><input type="hidden" name="question" value="{{ view.ask_normal.question }}"><input type="hidden" name="normal" value="1"><button class="btn ghost small" type="submit">Ask normally</button> <span class="muted small">Not about graded work? This asks the same question with no graded-work routing.</span></form>{% endif %}{% endif %}
+  {% if view.ask_normal %}<form method="post" action="/courses/{{ view.ask_normal.course_id }}/ask" class="inline-form" data-ask-normally><input type="hidden" name="question" value="{{ view.ask_normal.question }}"><input type="hidden" name="normal" value="1"><button class="btn ghost small" type="submit">Ask normally (graded answers and essays are still not written for you)</button> <span class="muted small">Not about graded work? This asks the same question with no graded-work routing.</span></form>{% endif %}{% endif %}
+  {% if view.partly_covered %}<p class="notice">{{ view.partly_covered_note }}</p>{% endif %}
   {% if view.not_covered %}<p class="notice" data-not-covered>{{ view.not_covered_note }}</p>{% endif %}
   {% for b in view.blocks %}
     {% if b.kind == 'outside' %}<div class="outside" role="group" aria-labelledby="{{ b.id }}"><p class="outside-label" id="{{ b.id }}">Not from your materials</p>{{ b.html }}</div>

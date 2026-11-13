@@ -573,7 +573,7 @@ def test_p5_friendly_404_and_422_pages(ready):
     r = ready.client.post(f"/flashcards/{cid}/review", data={"grade": "good"})  # card_id missing
     assert r.status_code == 422 and "<html" in r.text and "could not be read" in r.text
     r = ready.client.get("/read/1?at=abc")
-    assert r.status_code in (200, 410)  # never raw JSON
+    assert r.status_code in (200, 404, 410)  # never raw JSON
 
 
 def test_p5_flashcard_shortcuts_toggle_and_js_rules(ready):

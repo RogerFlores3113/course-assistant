@@ -132,13 +132,34 @@ def format_sources(sources: list[Source]) -> str:
     return "\n\n".join(parts)
 
 
+_HISTORY_TAGS = re.compile(r"\{\{/?(?:citation-removed|quote-not-found|outside)\}\}")
+_HISTORY_NOTES = re.compile(
+    r"\s*\((?:citation removed|not from your materials)\)|\s*\[quote not found in the cited source\]", re.I)
+
+
+def history_text(content: str) -> str:
+    """An earlier answer as the model should see it: the app's own markers (a removed citation, a quote that was not
+    found, an outside note), the "Not from your materials" label and the footer are left out. The sources and the
+    answer's words stay."""
+    t = content or ""
+    for foot in (disclaimer.FOOTER, disclaimer.AI_APP_FOOTER):
+        t = t.replace(foot, "")
+    t = _HISTORY_TAGS.sub("", t)
+    t = _HISTORY_NOTES.sub("", t)
+    t = re.sub(r"\*\*" + re.escape(OUTSIDE_LABEL) + r":\*\*\s*", "", t)
+    t = re.sub(r"(?m)^>\s?", "", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
 def build_messages(question: str, sources: list[Source], *, depth: str = "standard",
                    history: list[dict] | None = None, integrity_block: str = "") -> tuple[str, list[dict]]:
     """(system, messages). history is earlier {role, content} turns; only user/assistant roles are kept."""
     messages: list[dict] = []
     for h in (history or [])[-8:]:
         if h.get("role") in ("user", "assistant") and (h.get("content") or "").strip():
-            messages.append({"role": h["role"], "content": h["content"]})
+            content = history_text(h["content"]) if h["role"] == "assistant" else h["content"]
+            if content.strip():
+                messages.append({"role": h["role"], "content": content})
     user = f"{format_sources(sources)}\n\nQUESTION:\n{question.strip()}"
     if messages and messages[-1]["role"] == "user":  # keep roles alternating
         messages.append({"role": "assistant", "content": "(no reply)"})
@@ -651,7 +672,7 @@ def _parse(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool]:
 def _uncited_blocks(cleaned: str, n_sources: int) -> tuple[list[Block], bool]:
     """Blocks for one paragraph with no valid citation, and whether it only said the materials do not cover it."""
     if _says_not_covered(cleaned):
-        return [], True
+        return [Block("text", cleaned, [])], True  # kept as plain text; _parse_inner drops it when nothing is cited
     if _DETAILS_OPEN.search(cleaned):
         out: list[Block] = []
         for kind, seg in _details_segments(cleaned):
@@ -685,6 +706,7 @@ def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool
 
     blocks: list[Block] = []
     said_not_covered = False
+    gap_notes: list[Block] = []  # "the sources do not cover X" lines, kept only next to cited text
     for kind, seg in segments:
         seg = _STRAY_TAG.sub("", seg)
         for para in _paragraphs(seg):
@@ -695,6 +717,8 @@ def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool
                     continue
                 if _says_not_covered(stripped):
                     said_not_covered = True
+                    gap_notes.append(Block("text", stripped, []))
+                    blocks.append(gap_notes[-1])
                     continue
                 if (meta := _is_meta(stripped))[0]:
                     said_not_covered = said_not_covered or meta[1]
@@ -718,8 +742,12 @@ def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool
             else:
                 more, said = _uncited_blocks(cleaned, n_sources)
                 said_not_covered = said_not_covered or said
+                if said and len(more) == 1 and _says_not_covered(cleaned):
+                    gap_notes.append(more[0])
                 blocks.extend(more)
     used = sorted({c for b in blocks if b.kind == "text" for c in b.cites})
+    if not used and gap_notes:  # nothing is cited: the page's own "not covered" note says it, so the line is not repeated
+        blocks = [b for b in blocks if not any(b is g for g in gap_notes)]
     return blocks, used, said_not_covered
 
 
@@ -746,6 +774,89 @@ def is_not_covered(blocks: list[Block], n_sources: int, said: bool = False) -> b
     out = sum(len(b.md) for b in blocks if b.kind == "outside")
     total = out + cited
     return bool(total) and out * 2 > total
+
+
+# ---- what is a factual claim? Only a claim about the subject is labelled "Not from your materials".
+_COACH_START = re.compile(
+    r"^\W*(?:read|reread|re-read|work\s+through|practi[cs]e|redo|review|focus\s+on|spend|rest|take\s+a\s+break|go\s+back|"
+    r"write\s+down|say|notice|pay\s+attention|compare|look\s+back|come\s+back|sleep|stop|pause|breathe|"
+    r"don't\s+forget|do\s+not\s+forget|be\s+sure|try\s+to)\b", re.I)
+_PRONOUN_GAP = re.compile(
+    r"\b(?:they|these|those|it)\s+(?:do(?:es)?\s*n[o']t|don't|doesn't|never)\s+"
+    r"(?:include|contain|cover|say|mention|list|have|give|show|provide|explain)\b", re.I)
+_SOURCES_ONLY = re.compile(
+    r"\b(?:sources?|materials?|notes|passages?|excerpts?)\b[^.!?]*\b(?:only\s+(?:show|give|say|mention|list|include|cover|state)|"
+    r"I\s+(?:was|were)\s+given|you\s+(?:gave|shared))", re.I)
+_TRANSITION = re.compile(r"^\W*(?:here\s+(?:is|are)|here's|below|next|now|let's|let\s+us|first|then|finally|"
+                         r"to\s+(?:start|begin)|so\s+far)\b", re.I)
+_PLAIN = re.compile(r"[*_`>#]")
+_PLAN_WORD = re.compile(r"^\W*(?:rest|review|break|sleep|relax|recap|reflect|buffer|catch[\s-]*up|free|off|light|easy)\b", re.I)
+
+
+def _gap_sentence(x: str) -> bool:
+    """A sentence saying that the materials do not cover something."""
+    return bool(_NOT_COVERED.search(x) or _NOT_COVERED_2.search(x) or _META_COVERAGE.search(x)
+                or _PRONOUN_GAP.search(x) or (_SOURCES_ONLY.search(x) and re.search(r"\bonly\b|\bgiven\b", x)))
+
+
+def says_gap(md: str) -> bool:
+    """True when the text is a short honest line that the materials do not cover (part of) the question."""
+    plain = _PLAIN.sub("", _strip_cites(md or "")).strip()
+    if not plain or "\n" in plain or len(plain.split()) > 45:
+        return False
+    return any(_gap_sentence(x) for x in _sentences(plain))
+
+
+def _claimless_sentence(x: str, calc: bool) -> bool:
+    plain = x.strip()
+    words = len(plain.split())
+    if not plain:
+        return True
+    if plain.endswith("?"):
+        return True  # a question to the student, with or without an equation in it
+    if _gap_sentence(plain) or _META_REFUSAL.search(plain) or _META_ADVICE.search(plain) or _COACH_START.match(plain):
+        return True
+    if plain.endswith(":") and words <= 25:
+        return True
+    no_fact = not re.search(r"[0-9=$]", plain)
+    if words <= 4 and no_fact and _PLAN_WORD.match(plain):
+        return True  # "Rest." "Review day."
+    if _TRANSITION.match(plain) and words <= 14 and no_fact and plain.rstrip().endswith((".", ":")):
+        return True
+    if calc and (re.search(r"[=$0-9]", plain)):
+        return True  # a step of arithmetic in a worked twin is the app's own working, not a claim about the course
+    return False
+
+
+def is_non_claim(md: str, *, calc: bool = False) -> bool:
+    """True when nothing in md claims a fact about the subject: questions to the student (an equation inside is
+    fine), study advice, plan lines like "Rest.", lead-ins, honest lines that the materials do not cover something,
+    the empty-reply notice and, with calc=True (a worked twin), steps of arithmetic. Such text is never labelled
+    "Not from your materials"."""
+    text = (md or "").strip()
+    if not text:
+        return False
+    if text == EMPTY_REPLY:
+        return True
+    if "$$" not in text and _is_stems(text):
+        return True
+    seen = False
+    for line in text.splitlines():
+        line = _LIST_ITEM.sub("", _PLAIN.sub("", line), count=1).strip()
+        if not line:
+            continue
+        line = _LABEL_ONLY.sub("", line, count=1).strip() if _LABEL_ONLY.match(line) else line
+        if not line:
+            seen = True
+            continue
+        for x in _sentences(line):
+            seen = True
+            if not _claimless_sentence(x, calc):
+                return False
+    return seen
+
+
+_LABEL_ONLY = re.compile(r"^(?:day|step|part|week)\s*\d+\s*[:.)\-\u2013]\s*", re.I)
 
 
 def plain_marks(md: str) -> str:
@@ -813,10 +924,13 @@ def verify_quotes(blocks: list[Block], sources: list[Source], *, min_words: int 
         masked = _mask(b.md)
         hits = []
         for m in _QUOTE.finditer(masked):
-            if "\x01" in m.group(0):
-                continue
             inner = b.md[m.start(1) if m.group(1) is not None else m.start(2):
                          m.end(1) if m.group(1) is not None else m.end(2)]
+            if "\x01" in m.group(0):
+                # a quote with a symbol in it: the words around each math span must be in the source, in order
+                inner = re.sub(r"\s+", " ", _PROTECT.sub(" ... ", inner)).strip()
+                if len([w for w in inner.replace("...", " ").split() if w]) < min_words:
+                    continue
             if len(inner.split()) >= min_words and not quote_in_sources(inner, texts):
                 hits.append((m.start(), m.end()))
         for s0, e0 in reversed(hits):

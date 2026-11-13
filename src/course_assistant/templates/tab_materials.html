@@ -36,7 +36,7 @@
   <span class="badge kind-{{ m.kind }}">{{ m.kind_label }}</span> <span class="muted small file-type">{{ ftype(m) }}{% if m.original_name %}: {{ m.original_name }}{% endif %}</span>
   {% if m.graded %}<span class="badge warn-b">Graded work</span>{% endif %}
   {% if m.added_by == 'ai_app' %}<span class="badge">Added by your AI app</span>{% endif %}<br>
-  {% if q and found.get(m.id) %}<span class="muted small">Matched: {{ found[m.id].how | join(', ') }}{% if found[m.id].snippet %}: <a href="/read/{{ m.id }}?at={{ found[m.id].chunk_id }}#c{{ found[m.id].chunk_id }}">{{ found[m.id].snippet }}</a>{% endif %}</span><br>{% endif %}
+  {% if q and found.get(m.id) %}<span class="muted small">Matched: {{ found[m.id].how | join(', ') }}{% if found[m.id].snippet %}: <a href="/read/{{ m.id }}?at={{ found[m.id].chunk_id }}#c{{ found[m.id].chunk_id }}">{{ found[m.id].snippet | snippet }}</a>{% endif %}</span><br>{% endif %}
   <span class="muted small">{{ m.chunk_count }} passage{{ '' if m.chunk_count == 1 else 's' }}{% if m.lecture_date %} &middot; lecture {{ m.lecture_date | day }}{% endif %}</span>
   {% if m.lecture_link %}<br><span class="muted small">Linked to {{ m.lecture_link }}</span>{% endif %}
   {% if m.copy_of %}<br><span class="status-note"><strong>Copy of <a href="/read/{{ m.copy_of.id }}">{{ m.copy_of.title }}</a>.</strong> Answers use that one only: this copy is not searched or cited. {% if m.original_name and m.original_name.lower().endswith('.pdf') %}This copy is a PDF, so it has page numbers for citations. {% endif %}Keep this copy instead to search it (the other one is then skipped), press Not a copy to search both, or delete one.</span>
