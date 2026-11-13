@@ -41,6 +41,10 @@
     var id = (location.hash || "").slice(1);
     var el = id && document.getElementById(id);
     if (!el) { el = document.querySelector(".chunk.hit"); }
+    if (el && el.querySelector) {  // "Add exam": land on the Title field, not on the card that holds it
+      var title = el.querySelector("[data-focus-title]");
+      if (title) { el = title; }
+    }
     if (el) {
       el.scrollIntoView({ block: "center", behavior: reduced ? "auto" : "smooth" });
       el.focus({ preventScroll: true });
@@ -293,6 +297,20 @@
       } catch (err) { no(err); }
     });
   }
+  // Every code block and its button get a name that tells them apart ("Copy julia code, block 2 of 3"), so a list of
+  // buttons or of tab stops is not a row of identical "Copy this code".
+  function nameCodeBlocks() {
+    var wraps = document.querySelectorAll(".copy-wrap");
+    Array.prototype.forEach.call(wraps, function (wrap, i) {
+      var pre = wrap.querySelector("pre"), b = wrap.querySelector(".copy-btn");
+      if (!pre || !b) { return; }
+      var lang = ((pre.getAttribute("data-lang") || "").replace(/[^A-Za-z0-9+#. -]/g, "").trim());
+      var which = wraps.length > 1 ? ", block " + (i + 1) + " of " + wraps.length : "";
+      pre.setAttribute("role", "group");
+      pre.setAttribute("aria-label", (lang ? lang + " code" : "Code") + which);
+      b.setAttribute("aria-label", "Copy " + (lang ? lang + " code" : "code") + which);
+    });
+  }
   function addCopyButtons(root) {
     var pres = (root || document).querySelectorAll("pre");
     Array.prototype.forEach.call(pres, function (pre) {
@@ -301,7 +319,7 @@
       var wrap = document.createElement("div"); wrap.className = "copy-wrap";
       pre.parentNode.insertBefore(wrap, pre); wrap.appendChild(pre);
       var b = document.createElement("button"); b.type = "button"; b.className = "btn small ghost copy-btn";
-      b.textContent = "Copy"; b.setAttribute("aria-label", "Copy this code");
+      b.textContent = "Copy"; b.setAttribute("aria-label", "Copy code");
       b.addEventListener("click", function () {
         var code = pre.querySelector("code") || pre;
         copyText(code.textContent).then(function () {
@@ -311,6 +329,7 @@
       });
       wrap.appendChild(b);
     });
+    nameCodeBlocks();
   }
   addCopyButtons(document);
   document.body.addEventListener("htmx:afterSwap", function (e) { addCopyButtons(e.target || document); });
