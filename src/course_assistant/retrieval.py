@@ -890,6 +890,9 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
         if (present == 0 and not titles.get(r["material_id"]) and cid not in boost and r["material_id"] not in named
                 and not any(_has_term(t, set(bwords), body) for t in [*core, *related])):
             continue  # found by a stray token (the 'ta' in A^TA), not by a word of the question
+        if (len(core) >= 3 and present <= 1 and wpresent < 0.2 and not titles.get(r["material_id"]) and cid not in boost
+                and r["material_id"] not in named):
+            continue  # matches only the most common word of a long question ('problem' in 'the TA problem session')
         score = BASE_W * (base.get(cid, 0.0) / top)
         score += (COV_W if present == len(cs) else 0.6 * COV_W * wpresent)
         score += HEAD_W * whead
