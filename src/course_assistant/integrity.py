@@ -1312,7 +1312,7 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
 # --------------------------------------------------------------------------- post-check of what the model wrote
 _CITE_RX = re.compile(r"\[(\d+(?:\s*[,;–-]\s*\d+)*)\]")
 # a marker that is not a row of a matrix: no '[' or ', ' before it and no ']' or ',' right after it
-_CITE_SOFT_RX = re.compile(r"(?<![\[,])(?<!\[\s)(?<!,\s)\[(\d+(?:\s*[,;–-]\s*\d+)*)\](?![\],])")
+_CITE_SOFT_RX = re.compile(r"(?<![\[,])(?<!\[\s)(?<!,\s)\[(\d+(?:\s*[,;–-]\s*\d+)*)\](?!\])(?!,\s*[\[\d(-])")
 _MAX_SOURCES = 30  # when the number of sources is not known
 
 
@@ -1649,6 +1649,8 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         return None
     if question and not is_check_ask(question):
         reply, with_cites = _mask_asked(reply, question), _mask_asked(with_cites, question)
+    if data is None:
+        data = _data_map(store, items, sources)  # molar masses the item, its handout or the cited sources print
     if _quoted_example(items, question or "", with_cites, reply, sources, force_item):
         return None
     k = _reply_key_item(items, question or "", reply, with_cites, force_item, n_cites, data)
@@ -3960,7 +3962,7 @@ def item_data(store, it: dict[str, Any]) -> set[str]:
     return out
 
 
-_QUANTITY = {"multiplier": r"[lm]\d\d", "pivot": r"u(\d)\1|p\d", "eigenvalue": r"(?:lambda|lam|ev|e)\d*"}
+_QTY_KEYS = {"multiplier": r"[lm]\d\d", "pivot": r"u(\d)\1|p\d", "eigenvalue": r"(?:lambda|lam|ev|e)\d*"}
 _QTY_LIST = re.compile(r"\b(multipliers?|pivots?|eigenvalues?)\b[^.?!\n]{0,40}?(?:\bare\b|\bis\b|=|:|\bwere\b|\bcome\s+out\s+(?:to|as)\b|\bturn\s+out\s+to\s+be\b)"
                        r"\s*((?:-?\d[\d./]*)(?:\s*(?:,|;|\band\b|\s)\s*-?\d[\d./]*)+)", re.I)
 
@@ -3972,7 +3974,7 @@ def quantity_list_leak(text: str, item: dict[str, Any] | None) -> bool:
         return False
     names = key_names(item)
     for m in _QTY_LIST.finditer(_norm_hay(text)):
-        pat = _QUANTITY.get(m.group(1).lower().rstrip("s"))
+        pat = _QTY_KEYS.get(m.group(1).lower().rstrip("s"))
         if not pat:
             continue
         keyed = sorted(n for n in names if re.fullmatch(pat, n))

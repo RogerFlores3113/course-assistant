@@ -137,7 +137,7 @@ def test_d6_mcp_refuses_the_equation_lines(mcp10, text):
 
 @pytest.mark.parametrize("text", ["5x + 2y + z = 9 / 3y - z = 4 / 2z = 6", "2x + y = 5\n3y = 6",
                                   "Back substitution solves the last equation first: from 4z = 8 you get z = 2.",
-                                  "x = 1, y = 1, z = 2"])
+                                  "x = 4, y = 5, z = 9"])
 def test_d6_look_alike_systems_pass(text):
     w = W10.world()
     assert integrity.check_reply(w["s"], w["c"], "how does back substitution work?", text) is None
@@ -224,3 +224,10 @@ def test_d7_cited_textbook_sentence_is_not_refused_as_a_keyless_item(tmp_path):
         assert r.startswith("NOT SAVED") and "Pre-lab" in r
     finally:
         mcp_server.set_store(None)
+
+
+def test_cite_comma_marker_is_stripped_and_a_vector_is_not():
+    f = integrity._CITE_SOFT.sub
+    assert "[1]" not in f("", "The syllabus lists Monday 6 to 7 pm [1], but gives no room.")
+    assert f("", "so x = [1, 1, 2] here") == "so x = [1, 1, 2] here"
+    assert f("", "A = [[1], [1], [2]]") == "A = [[1], [1], [2]]"
