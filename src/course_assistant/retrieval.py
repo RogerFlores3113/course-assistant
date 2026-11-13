@@ -90,6 +90,7 @@ def _stem(w: str) -> str:
 
 _SPOKEN = {"100": "hundred", "1000": "thousand", **{str(i): w for w, i in {
     "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}.items()}}
+_WEAK_RAW = "compute calculate quickly quick fast find work use get make long way".split()
 _WEAK = frozenset(_stem(w) for w in "compute calculate quickly quick fast find work use get make long way".split())
 
 
@@ -714,6 +715,9 @@ def lectures_recent_first(store, course_id: int, today: str | None = None) -> li
 
 
 # ---------------------------------------------------------------- clauses
+_NUM_RUN = re.compile(r"(?<![\w.])-?\d+(?:\s*(?:,|and|then)?\s*-?\d+)+(?![\w.])", re.I)
+
+
 def _mask_matrices(q: str) -> tuple[str, list[str]]:
     held: list[str] = []
 
@@ -721,7 +725,12 @@ def _mask_matrices(q: str) -> tuple[str, list[str]]:
         held.append(m.group(0))
         return f"\x00{len(held) - 1}\x00"
 
-    return _MATRIX.sub(keep, q), held
+    # a matrix typed in words ('rows 4 1 and 2 3', 'rows four, one and two, three') is one thing, not two clauses
+    def keep_run(m):  # four or more numbers; 'Federalist No. 10 and 51' is a list of documents, not a matrix
+        return keep(m) if len(re.findall(r"\d+|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+                                          m.group(0), re.I)) >= 4 else m.group(0)
+
+    return _NUM_RUN.sub(keep_run, _SPOKEN_RUN.sub(keep_run, _MATRIX.sub(keep, q))), held
 
 
 def _unmask(q: str, held: list[str]) -> str:
@@ -950,6 +959,16 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
                 if has_date(r["text"] + " " + r["heading"]) and (not topic or topic & words):
                     add([(r, 0.0)])
                     boost[r["id"]] = max(boost.get(r["id"], 0.0), 3.5 if topic & head else 2.0)
+    if len(qnums) >= 3:
+        # the passage where the lecturer sets up this very matrix may share no word with the question (it says 'the
+        # matrix with rows four, one and two, three', the question asks for the eigenvectors): find it by its numbers
+        carriers = []
+        for r in store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE 1=1{extra}", fparams):
+            if _number_score(qnums, r["text"]) >= 3.0 and not is_manifest_noise(r["text"]):
+                carriers.append(r)
+        for r in carriers[:6]:
+            add([(r, 0.0)])
+            boost[r["id"]] = max(boost.get(r["id"], 0.0), 1.0)
     if not pool:
         return []
     top = max(base.values()) or 1.0
@@ -981,7 +1000,8 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
         filler = (not intent["overview"] and _is_intro_chunk(r)) or (not intent["practice"] and _is_exercise_chunk(r))
         score += HEAD_W * whead * (0.3 if filler else 1.0)  # 'Chapter ... Exercises' shares words with every chapter title
         score += (1.0 if filler else 4.5) * titles.get(r["material_id"], 0.0)  # asking for a chapter is not asking for its intro or exercises
-        score += _number_score(qnums, r["text"])
+        nscore = _number_score(qnums, r["text"])
+        score += nscore + (1.0 if nscore >= 3.0 and len(qnums) >= 4 else 0.0)
         score += boost.get(cid, 0.0)
         if defterms:
             score += 1.5 * _definition_score(defterms, r)
@@ -1019,12 +1039,14 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
         # that solves it; checked for each such passage among the leading results, not only the first one. The solving
         # passage can be a few chunks on (a caption that sets the matrix up, then finds the eigenvalues, then the
         # eigenvectors), so the next three are weighed by the question's own words and the best one or two come along.
-        wanted = {*(_stem(t) for t in core), *(_stem(t) for t in related)} - {_stem(t) for t in _GENERIC_TOPIC}
+        generic = {_stem(t) for t in _GENERIC_TOPIC}
+        asked = {_stem(t) for t in core} - generic - {_stem(t) for t in _WEAK_RAW} - {"matrix"}
+        wanted = {*(_stem(t) for t in core), *(_stem(t) for t in related)} - generic
         hits = [i for i in range(min(len(ranked), 8)) if _number_score(qnums, ranked[i][1]["text"]) >= 3.0][:3]
         for pos in reversed(hits):
             cands = store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE c.material_id = ? "
                                 f"AND c.ord > ? AND c.ord <= ?{extra} ORDER BY c.ord",
-                                [ranked[pos][1]["material_id"], ranked[pos][1]["ord"], ranked[pos][1]["ord"] + 3, *fparams]) \
+                                [ranked[pos][1]["material_id"], ranked[pos][1]["ord"], ranked[pos][1]["ord"] + 8, *fparams]) \
                 if "ord" in ranked[pos][1] else []
             if not cands:
                 nxt = store._row("SELECT id FROM chunks WHERE material_id = ? AND ord = (SELECT ord + 1 FROM chunks WHERE id = ?)",
@@ -1036,8 +1058,11 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
             if len(cands) > 1:
                 def overlap(r):
                     ws = {_stem(w) for w in _words(r["text"])}
-                    return len(wanted & ws) + (1 if r is cands[0] else 0)
-                cands = sorted(cands, key=lambda r: (-overlap(r), r["ord"]))[:2]
+                    # what the question asks for (the pair, the eigenvectors) outweighs the setting-up words, so a
+                    # walk-through a few passages on is chosen over a nearer passage that only repeats the setup
+                    return 3 * len(asked & ws) + len(wanted & ws) + (1 if r is cands[0] else 0)
+                near = [r for r in cands if r["ord"] <= ranked[pos][1]["ord"] + 3 or asked & {_stem(w) for w in _words(r["text"])}]
+                cands = sorted(near or cands[:1], key=lambda r: (-overlap(r), r["ord"]))[:2]
             for k, row in enumerate(cands):  # the lines after a matching worked example are where it is solved
                 at = min(pos + 1 + k, max(0, limit - 1))
                 rest = [x for x in ranked if x[1]["id"] != row["id"]]

@@ -1546,6 +1546,22 @@ def _card_worthy(sources: list[dict[str, Any]], *, topic_search: bool = False) -
     return kept or sources
 
 
+def card_source_label(title: str, loc: str = "") -> str:
+    """'Title, place' for a card's source line. A place that only repeats the title (a section named like its
+    material) is left out, and a label saved earlier as 'Title, Title' is read back as 'Title'."""
+    title, loc = (title or "").strip(), (loc or "").strip()
+    if not title and "," in loc:
+        title, loc = (x.strip() for x in loc.split(",", 1))
+    if "," in title and not loc:  # an old saved label, 'Title, Title'
+        a, b = (x.strip() for x in title.rsplit(",", 1))
+        if a.lower() == b.lower():
+            return a
+        return title
+    if not loc or loc.lower() == title.lower():
+        return title
+    return f"{title}, {loc}"
+
+
 def make_flashcards(store: Store, course_id: int, provider, *, material_id: int | None = None, topic: str = "",
                     count: int = 12) -> FlashcardResult:
     _need(provider)
@@ -1630,7 +1646,7 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
     for front, back, cite in (first + rest)[:count]:
         s = sources[cite - 1]
         res.append(store.add_flashcard(course_id, front, back, deck=deck, chunk_id=s["chunk_id"],
-                                       source_label=f"{s['material_title']}, {s['loc_label']}"))
+                                       source_label=card_source_label(s["material_title"], s["loc_label"])))
     bits = [f"Made {len(res)} card{'s' if len(res) != 1 else ''}."]
     if res.dropped:
         bits.append(f"{res.dropped} card{'s were' if res.dropped != 1 else ' was'} dropped because "

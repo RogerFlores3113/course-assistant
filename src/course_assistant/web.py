@@ -54,6 +54,9 @@ MEDIA_EXT = {".mp3": "audio", ".m4a": "audio", ".wav": "audio", ".mp4": "video",
 INLINE_TYPES = ("application/pdf", "audio/", "video/", "image/png", "image/jpeg", "image/gif", "image/webp", "text/plain")
 GRADED_KINDS = {"problem": "Problem", "proof": "Proof", "essay": "Essay or paper"}
 FLASH_DRAFT_MAX = 800
+FLASH_REPORT_LINES = 40
+FLASH_REPORT_LINE = 160
+FLASH_REPORT_BYTES = 3600
 log = logging.getLogger(__name__)
 
 
@@ -189,17 +192,33 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         ctx.setdefault("notice", flash.get("notice", ""))
         ctx.setdefault("error", flash.get("error", ""))
         ctx.setdefault("draft", flash.get("draft", ""))
+        if flash.get("report") and name.startswith("course"):  # the per-file import report, after a plain form post
+            ctx.setdefault("import_report", [str(x) for x in flash["report"]][:FLASH_REPORT_LINES])
         resp = templates.TemplateResponse(request, name, ctx, status_code=status_code)
         if raw:
             resp.delete_cookie(FLASH, path="/")
         return resp
 
-    def redirect(url: str, notice: str = "", error: str = "", draft: str = "") -> RedirectResponse:
+    def redirect(url: str, notice: str = "", error: str = "", draft: str = "", report: list[str] | None = None) -> RedirectResponse:
         resp = RedirectResponse(url, status_code=303)
         if notice or error:
-            data = {"notice": notice[:500], "error": error[:500]}
+            data: dict[str, Any] = {"notice": notice[:500], "error": error[:500]}
             if draft:  # so a plain (no JavaScript) form post does not lose what the student typed
                 data["draft"] = draft[:FLASH_DRAFT_MAX]
+            if report:  # one line per imported file; a cookie holds about 4 KB, so keep what fits and say how many are left
+                lines = [str(x)[:FLASH_REPORT_LINE] for x in report]
+                keep: list[str] = []
+                for x in lines[:FLASH_REPORT_LINES]:
+                    if len(quote(json.dumps({**data, "report": [*keep, x]}))) > FLASH_REPORT_BYTES:
+                        break
+                    keep.append(x)
+                if len(keep) < len(lines):
+                    more = f"And {len(lines) - len(keep)} more file{'s' if len(lines) - len(keep) != 1 else ''}, listed on the Materials page."
+                    while keep and len(quote(json.dumps({**data, "report": [*keep, more]}))) > FLASH_REPORT_BYTES:
+                        keep.pop()
+                        more = f"And {len(lines) - len(keep)} more files, listed on the Materials page."
+                    keep.append(more)
+                data["report"] = keep
             resp.set_cookie(FLASH, quote(json.dumps(data)), max_age=120, httponly=True, samesite="strict", path="/")
         return resp
 
@@ -696,7 +715,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             if field and error:
                 extra["field_error"] = {"form": field[0], "field": field[1], "message": error}
             return course_page(request, cid, tab, 400 if error and not notice else 200, notice, error, **extra)
-        return redirect(course_url(cid, tab), notice=notice, error=error, draft=str(extra.get("draft") or ""))
+        return redirect(course_url(cid, tab), notice=notice, error=error, draft=str(extra.get("draft") or ""),
+                        report=extra.get("import_report") or None)
 
     @app.get("/courses/{course_id}", response_class=HTMLResponse)
     def course_materials(request: Request, course_id: int):
@@ -779,13 +799,14 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                          + (f" Linked to {clean_event_title(lecture['title'])}." if lecture else ""))
         if already:
             parts.append(f"Already saved, nothing added: {', '.join(already)}.")
-        # one line per file: what it was taken for, how many passages it made and anything left out. A page swap shows
-        # them as a list under the notice; a plain post folds the files that had something left out into the notice.
+        # one line per file: what it was taken for, how many passages it made and anything left out, listed under the
+        # notice on the Materials page after a page swap and after a plain post's redirect alike.
         if is_htmx(request):
             return after(request, course_id, "materials", notice=" ".join(parts), error=" ".join(errors),
                          import_report=[r["line"] for r in reports])
-        left_out = [r["line"] for r in reports if r["skipped"] and not r["already_saved"]]
-        return after(request, course_id, "materials", notice=" ".join([*parts, *left_out]), error=" ".join(errors))
+        # a plain post gets the same list after the redirect, so the report reads alike with or without JavaScript
+        return after(request, course_id, "materials", notice=" ".join(parts), error=" ".join(errors),
+                     import_report=[r["line"] for r in reports])
 
     @app.post("/courses/{course_id}/materials/url")
     async def add_url(request: Request, course_id: int, url: str = Form(""), kind: str = Form("website")):
@@ -1589,6 +1610,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                        "weak": sorted(weak.items(), key=lambda kv: (-kv[1], kv[0])),
                        "redo_url": flashcard_url(course_id, True, mat, only=[c["id"] for c in wrong]) if wrong else "",
                        "again_url": flashcard_url(course_id, True, mat)}
+        if shown and shown.get("source_label"):
+            shown = {**shown, "source_label": _mod("study").card_source_label(shown["source_label"])}
         return page(request, "flashcards.html", course=course, accent=course_color(course), card=shown,
                     summary=summary, material_total=material_total, missed=",".join(str(i) for i in missed_ids), only=",".join(str(i) for i in only_ids),
                     source_href=card_source_href(shown) if shown else "",

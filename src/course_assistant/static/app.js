@@ -41,6 +41,10 @@
     var id = (location.hash || "").slice(1);
     var el = id && document.getElementById(id);
     if (!el) { el = document.querySelector(".chunk.hit"); }
+    if (el && el.querySelector) {  // "Add exam": land on the Title field, not on the card that holds it
+      var title = el.querySelector("[data-focus-title]");
+      if (title) { el = title; }
+    }
     if (el) {
       el.scrollIntoView({ block: "center", behavior: reduced ? "auto" : "smooth" });
       el.focus({ preventScroll: true });
