@@ -268,6 +268,22 @@ def _shape_texts(shapes) -> list[str]:
     return out
 
 
+def _norm_words(t: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", t.lower()))
+
+
+def _new_notes(notes: str, slide_text: str) -> str:
+    """The speaker notes without the sentences that are already on the slide. Notes that only repeat the slide
+    come back empty, so searching a deck does not list the same passage twice."""
+    slide = _norm_words(slide_text)
+    keep = []
+    for sent in re.split(r"(?<=[.!?:])\s+|\n+", notes):
+        n = _norm_words(sent)
+        if n and n not in slide:
+            keep.append(sent.strip())
+    return " ".join(keep).strip()
+
+
 def extract_pptx(path: Path) -> Result:
     from pptx import Presentation
 
@@ -294,6 +310,9 @@ def extract_pptx(path: Path) -> Result:
                 notes = slide.notes_slide.notes_text_frame.text.strip()
         except Exception:  # noqa: BLE001
             pass
+        notes = re.sub(r"^\s*speaker notes:\s*", "", notes, flags=re.I)  # some decks type the label into the notes
+        if notes:
+            notes = _new_notes(notes, f"{title} {body}")
         text = "\n\n".join(x for x in (title, body, f"Speaker notes: {notes}" if notes else "") if x)
         chunks.extend(chunks_for(text, "slide", i, heading=title))
     if not chunks:
@@ -411,14 +430,19 @@ def chunk_markdown(text: str) -> list[dict[str, Any]]:
     if not heads:
         return chunk_lines(lines)
     seen: set[str] = set()
-    sections: list[tuple[str, str, str]] = []
-    prev_end, anchor, heading = 0, "top", ""
+    sections: list[tuple[str, ...]] = []
+    prev_end, anchor, heading, parent, level_ = 0, "top", "", "", 0
+    trail: list[tuple[int, str]] = []  # the headings above the current one: (level, text)
     for idx, level, htext in heads:
-        sections.append((anchor, heading, "\n".join(lines[prev_end:idx])))
+        sections.append((anchor, heading, "\n".join(lines[prev_end:idx]), parent))
         heading = strip_markdown(htext) or htext
+        while trail and trail[-1][0] >= level:
+            trail.pop()
+        parent = trail[-1][1] if trail else ""
+        trail.append((level, heading))
         anchor = unique_slug(heading, seen)
         prev_end = idx + 1
-    sections.append((anchor, heading, "\n".join(lines[prev_end:])))
+    sections.append((anchor, heading, "\n".join(lines[prev_end:]), parent))
     return section_chunks(sections)
 
 
@@ -577,6 +601,8 @@ def chunk_plain(text: str, title: str = "") -> list[dict[str, Any]]:
         c = chunk(body if body is not None else "\n\n".join(g["text"] for g in group), "line", a_,
                   heading=(f"{title}, {head}" if title else head) if head != "lines" else title, loc_end=b_)
         c["loc_label"] = rng if head == "lines" else f"{head}, {rng}"
+        if head == "lines" and not out:  # said once per file: citing a line range is all the reader can do
+            c["loc_label"] += " (no paragraph numbers in this file)"
         out.append(c)
 
     cur: list[dict[str, Any]] = []

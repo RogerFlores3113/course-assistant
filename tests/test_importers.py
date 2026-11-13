@@ -243,7 +243,7 @@ def test_plain_text_line_ranges(env):
     ch = s.chunks_of(mid)
     assert len(ch) >= 2
     assert all(c["loc_kind"] == "line" for c in ch)
-    assert ch[0]["loc_start"] == "1" and ch[0]["loc_label"] == f"lines 1 to {ch[0]['loc_end']}"
+    assert ch[0]["loc_start"] == "1" and ch[0]["loc_label"].startswith(f"lines 1 to {ch[0]['loc_end']}")
     assert int(ch[1]["loc_start"]) == int(ch[0]["loc_end"]) + 1
 
 
@@ -622,8 +622,9 @@ def test_text_without_paragraph_breaks_is_labelled_by_lines_only():
         lines += [b, ""]
     chunks = chunk_plain("\n".join(lines), "Federalist No. 51")
     assert len(chunks) > 3
-    assert all("paragraph" not in c["loc_label"] and "paragraph" not in c["heading"] and "part " not in c["heading"]
-               for c in chunks)
+    note = " (no paragraph numbers in this file)"
+    assert all("paragraph" not in c["loc_label"].replace(note, "") and "paragraph" not in c["heading"]
+               and "part " not in c["heading"] for c in chunks)
     assert all(c["loc_label"].startswith("line") for c in chunks)
 
 
