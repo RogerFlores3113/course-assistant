@@ -352,7 +352,11 @@ def normalize_details(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip("\n")
 
 
-_EMPTY_DETAILS = re.compile(r"<details>\s*(?:<summary>.*?</summary>)?\s*</details>[ \t]*", re.S | re.I)
+# an empty stub removes only itself: the summary pattern cannot cross "</summary>" or "<details>", and a stub cut off at
+# the end of the reply (no closing tag, or a half-written summary) goes too
+_EMPTY_DETAILS = re.compile(
+    r"<details>\s*(?:<summary>(?:(?!</summary>|<details>|</details>).)*</summary>)?\s*</details>[ \t]*"
+    r"|<details>\s*(?:<summary>(?:(?!</summary>|<details>|</details>).)*(?:</summary>)?)?\s*\Z", re.S | re.I)
 
 
 def drop_empty_details(text: str) -> str:
@@ -399,7 +403,19 @@ def tidy_practice(before: str, after: str, scrubbed: int, note: str) -> tuple[st
             continue
         kept.append(seg.strip())
     if not gone:
-        return after, scrubbed, note
+        # questions that are not numbered "1." (a bold or "Question 1" stem): count what disappeared by block, so one
+        # dropped question with its solution never reads as "2 parts"
+        a_set = {seg.strip() for seg, _ in segs}
+        b_segs = paras(before)
+        lost_q = sum(1 for seg, has_det in b_segs if not seg.lower().lstrip().startswith("<details>") and seg.strip() not in a_set
+                     and has_det)
+        lost_d = sum(1 for seg, _ in b_segs if seg.lower().lstrip().startswith("<details>") and seg.strip() not in a_set)
+        loose = lost_q or (lost_d if not any(not seg.lower().lstrip().startswith("<details>") and seg.strip() not in a_set
+                                             for seg, _ in b_segs) else 0)
+        if not loose or not note or not _SCRUB_HEAD.match(note):
+            return after, scrubbed, note
+        word = f"{loose} practice question{'s were' if loose != 1 else ' was'} left out because"
+        return after, loose, _SCRUB_HEAD.sub(word, note)
     n = 0
     renum = []
     for seg in kept:
@@ -965,7 +981,7 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
     # touch those topics are not part of this exam, so they are neither used nor warned about
     typed = " ".join(str(ev.get("topics") or "").split())
     typed_stems = _stem_set(typed)
-    typed_parts = [t.strip(" .") for t in re.split(r"[,;\n]|\band\b", typed) if t.strip(" .")] if typed else []
+    typed_parts = [t.strip(" .") for t in re.split(r"[,;\n]", typed) if t.strip(" .")] if typed else []
     if typed_stems:
         lectures = [l for l in lectures if _stem_set(f"{clean_title(l)} {l.get('topics', '')}") & typed_stems]
     chosen: list[dict[str, Any]] = []
