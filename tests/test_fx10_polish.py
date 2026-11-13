@@ -41,15 +41,19 @@ MAP = {"nodes": [{"id": "a", "label": "Seed", "cites": [1]}, {"id": "b", "label"
 def test_concept_map_says_each_edge_label_once(ready):
     gid = ready.store.add_guide(ready.cid, "concept_map", "Map", "", sources=sources(3), data=MAP)
     html = ready.client.get(f"/guides/{gid}").text
-    assert html.count("germinates into") == 1 and html.count("matures into") == 1
-    svg = html.split("<svg")[1].split("</svg>")[0]
-    assert "germinates" not in svg and "<path" in svg and "Sprout" in svg
+    # said once in the readable text; the diagram repeats it only inside aria-hidden SVG text for sighted readers
+    pre, svg_post = html.split("<svg", 1)
+    svg, post = svg_post.split("</svg>", 1)
+    assert (pre + post).count("germinates into") == 1 and (pre + post).count("matures into") == 1
+    assert '<text class="edge-label" text-anchor="middle" aria-hidden="true">' in svg and "<path" in svg
 
 
 def test_concept_map_cross_links_keep_their_label(ready):
     data = dict(MAP, edges=MAP["edges"] + [{"a": "a", "b": "c", "label": "also becomes", "cites": [3]}])
     gid = ready.store.add_guide(ready.cid, "concept_map", "Map", "", sources=sources(3), data=data)
-    assert ready.client.get(f"/guides/{gid}").text.count("also becomes") == 1
+    html = ready.client.get(f"/guides/{gid}").text
+    pre, svg_post = html.split("<svg", 1)
+    assert (pre + svg_post.split("</svg>", 1)[1]).count("also becomes") == 1
 
 
 STUB = "1. Name one cause of rust.\n\n<details>\n<summary>Show solution</summary>\n\n</details>\n\n2. Why does salt speed it up?\n\n<details>\n<summary>Show solution</summary>\n\nSalt makes the water carry current better [1].\n\n</details>"

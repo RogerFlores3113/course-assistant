@@ -169,7 +169,7 @@ def test_summary_scrub_hides_the_start_of_a_sentence_with_numbers():
 
 def test_map_labels_are_hidden_from_the_text_flow():
     t = Path("src/course_assistant/templates/guide.html").read_text()
-    assert t.count('<text') == 1 and 'edge-label' not in t
+    assert t.count('<text') == 2 and t.count('<text class="edge-label" text-anchor="middle" aria-hidden="true">') == 1
     assert 'text-anchor="middle" aria-hidden="true">{% for ln in b.lines %}' in t
 
 
