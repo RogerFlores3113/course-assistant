@@ -2594,6 +2594,12 @@ def _entry_in(h: "_Hay", e: _Entry) -> bool:
     return False
 
 
+def _echoed(vec, asked) -> bool:
+    """The vector's entries appear, in order and next to each other, among the numbers the student typed."""
+    a, n = list(asked), len(vec)
+    return n > 0 and any(all(num_eq(a[i + k], vec[k]) for k in range(n)) for i in range(len(a) - n + 1))
+
+
 def key_leak(reply, item=None, ctx=None):
     """Does the reply give away the item's answer? Returns what matched (a list of names; [] when it is fine).
     ctx: named (the question pastes or names the item, or the text is a saved guide or card), sticky (the chat
@@ -2615,11 +2621,13 @@ def key_leak(reply, item=None, ctx=None):
     h = _Hay(reply)
     named, sticky = bool(c.get("named")), bool(c.get("sticky"))
     loose = 2 if (c.get("vec") or sticky or (named and not c.get("guide"))) else (1 if named and c.get("small") else 0)
+    asked = c.get("asked") or ()
     for comp in ix.comps:
+        if comp.kind == "vec" and _echoed(comp.rows[0], asked):
+            continue  # the student typed this vector in their own question: echoing it back is not a leak
         if _comp_hit(h, comp, _given_seqs(item), loose):
             return [comp.name or "value"]
     nums = [n for _, n, _ in h.nums]
-    asked = c.get("asked") or ()
     # data: numbers the cited materials give as constants (a molar mass, a gas constant): reference data, never a key value
     data = {_canon(x) for x in numbers(" ".join(str(d) for d in (c.get("data") or ())))} if c.get("data") else set()
     seen: list[str] = []
