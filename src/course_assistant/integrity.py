@@ -206,6 +206,8 @@ _LOGI_RX = [re.compile(x, re.I) for x in (
     r"exams?|quiz(?:zes)?|midterms?)\s*#?\s*\d{1,3}"
     r"(?:\s*(?:,|and|or|to|through|thru|&|[-\u2013])\s*\d{1,3})*(?![\d]|\.\d|/\d)",
     r"\b\d{1,3}(?:st|nd|rd|th)\b",
+    r"\b\d{1,3}\s+(?:problem\s+sets?|psets?|homeworks?|assignments?|exams?|quiz(?:zes)?|midterms?|finals?|lectures?|weeks?|"
+    r"chapters?|sections?|labs?|classes|days|students|pages|credits?)\b",                                      # 11 problem sets
     r"\b\d{1,3}(?:\.\d+)?\s*(?:points?|pts?\b|marks?|credits?)\b|\bworth\s+(?:up\s+to\s+)?\d{1,3}\b",
     r"(?m)^[ \t]*(?:[-*]\s+)?\d{1,2}[.)](?=\s)",                                                              # 1. list markers
 )]
@@ -378,6 +380,9 @@ def _row_entries(seg: str, loose: bool = False) -> list[str]:
     return out if sum(1 for e in out if not _SYMBOL.match(e)) >= 2 else []
 
 
+_NAME_PREFIX = re.compile(r"^\s*(?:`|\$)*\s*[A-Za-z][A-Za-z0-9_]{0,3}\s*(?:=|:=|:)\s*(?=[-+\u2212\d.(])")
+
+
 def matrix_rows(text: str) -> list[list[str]]:
     """Rows of any matrix-looking text: [[a,b],[c,d]], [a b; c d], a b / c d lines, \\begin{bmatrix}, 'rows (1,2), (3,4)'."""
     rows: list[list[str]] = []
@@ -394,6 +399,7 @@ def matrix_rows(text: str) -> list[list[str]]:
             rows.append(_row_entries(seg, loose=True))
     for line in t.splitlines():
         stripped = re.sub(r"[\[\]|]", " ", line)
+        stripped = _NAME_PREFIX.sub("", stripped, count=1)
         rows.append(_row_entries(stripped))
     seen, out = set(), []
     for r in rows:
@@ -1022,6 +1028,16 @@ def is_draft_feedback(question: str) -> bool:
 
 
 _SET_WORD = re.compile(r"\b(?:problem\s*set|problem\s*sheet|pset|p-set|homework|hw|worksheet|assignment)s?\b", re.I)
+_NEG_SET = re.compile(r"\b(?:not|isn'?t|aren'?t|wasn'?t|never|no|nothing\s+to\s+do\s+with|unrelated\s+to|other\s+than|rather\s+than|"
+                      r"instead\s+of|outside\s+of?)\s+(?:(?:the|my|our|this|that|a|an|from|on|in|of|for|about|part|any|your)\s+)*"
+                      + _SET_WORD.pattern, re.I)
+
+
+def drop_negated_sets(text: str) -> str:
+    """'not the pset', 'this isn't homework', 'not from the problem set': a negated mention of a problem set is no mention."""
+    return _NEG_SET.sub(" ", text or "")
+
+
 _SET_WORDS_PFX = frozenset({"probl", "set", "pset", "homew", "hw", "works", "sheet", "assig"})
 
 
@@ -1029,6 +1045,7 @@ def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[
     """'I'm stuck on the LU question from my problem set': the request names a problem set without a number and one of
     the topic words of a graded set. It touches every item of that set (a concepts-only stand-in with `members`), so
     follow-ups about its entries are guarded though no single item was named."""
+    question = drop_negated_sets(question)
     if not _SET_WORD.search(question) or is_logistics(question):
         return None
     stripped = _SET_WORD.sub(" ", question)
@@ -1146,6 +1163,8 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
 
 # --------------------------------------------------------------------------- post-check of what the model wrote
 _CITE_STRIP = re.compile(r"\[\d+(?:\s*[,;–-]\s*\d+)*\]")
+# a marker that is not a row of a matrix: no '[' or ', ' before it and no ']' or ',' right after it
+_CITE_SOFT = re.compile(r"(?<![\[,])(?<!\[\s)(?<!,\s)\[\d+(?:\s*[,;–-]\s*\d+)*\](?![\],])")
 _WORKED = re.compile(r"[=≈]|\\frac|\btherefore\b|\bhence\b|\bthus\b|\bso\s+[a-z]\w*\s+(?:is|are)\b|\banswer\b", re.I)
 _COACHING = re.compile(r"\b(you|your|yours|you're|the student|students|rubric|assignment|should|could|consider|try to|"
                        r"ask yourself|a strong|a good|a clear|e\.g\.|for example|make sure|aim to|remember)\b", re.I)
@@ -1218,12 +1237,32 @@ def _leaks_essay(it: dict[str, Any], reply: str, question: str, force_asked: boo
     return essay.level(it, reply, question, force_asked, sources) > 0
 
 
-def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
-    if not _PROOF_END.search(reply):
+_P_OPEN = re.compile(r"\b(?:suppose|assume|let|if|given|take|consider)\b", re.I)
+_P_STEP = re.compile(r"\b(?:then|therefore|thus|hence|so|since|because|implies|it follows|we (?:have|get|see|obtain|know)|"
+                     r"consequently|contradiction|which (?:shows|means|proves|gives))\b", re.I)
+_P_END = re.compile(r"\b(?:therefore|thus|hence|so|it follows|which (?:shows|means|proves)|this shows|consequently|"
+                    r"this proves|we conclude)\b", re.I)
+
+
+def proof_shaped(reply: str) -> bool:
+    """A step-by-step derivation ('Suppose ... Then ... Hence ... Therefore ...') whether or not it ends with QED: four
+    or more sentences that carry a proof step, one that opens it and one that closes it, with an equation in a step
+    or at least five steps."""
+    sents = [x for x in re.split(r"(?<=[.!?])\s+|\n+", _CITE_STRIP.sub("", reply or "")) if x.strip() and "?" not in x]
+    steps = [x for x in sents if _P_STEP.search(x)]
+    if len(steps) < 4 or not any(_P_OPEN.search(x) for x in sents) or not any(_P_END.search(x) for x in steps[-2:]):
         return False
+    return any("=" in x for x in steps) or len(steps) >= 5
+
+
+def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
     b = _Text(it.get("body") or "")
-    return bool(b.tok) and (len(b.tok & content_tokens(reply)) / len(b.tok) >= 0.5
-                            or score_text(_Text(question), b) >= 0.5)
+    if not b.tok:
+        return False
+    share = len(b.tok & content_tokens(reply)) / len(b.tok)
+    if not _PROOF_END.search(reply):
+        return proof_shaped(reply) and share >= 0.3
+    return share >= 0.5 or score_text(_Text(question), b) >= 0.5
 
 
 def _tool_howto(question: str) -> bool:
@@ -1306,10 +1345,56 @@ def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with
         if not item_key(it):
             continue
         ctx = reply_ctx(it, question, reply, forced.get(it["id"]))
-        n = len(_kl(reply, it, ctx) or _kl(with_cites, it, ctx))
+        n = len(_kl(reply, it, ctx) or _kl(_CITE_SOFT.sub("", with_cites), it, ctx))
         if n > top:
             best, top = it, n
     return best
+
+
+_EQ_IN_Q = re.compile(r"(?:[A-Za-z0-9_.()^]+\s*[+\-*/\u2212]\s*)*[A-Za-z0-9_.()^]+\s*=\s*[-\u2212]?[\w./^()]+(?:\s*[+\-*/]\s*[\w./^()]+)*")
+
+
+def _mask_asked(reply: str, question: str) -> str:
+    """Blank every equation the student typed in the question ('2x + y = 5') wherever the reply restates it: the
+    student's own example is not a value the reply gives away."""
+    out = reply or ""
+    for m in _EQ_IN_Q.finditer(question or ""):
+        toks = re.findall(r"[A-Za-z0-9_.]+|[^\sA-Za-z0-9_.]", m.group(0))
+        if len(toks) < 3:
+            continue
+        pat = r"\s*".join(re.escape(t) for t in toks)
+        out = re.sub(r"(?<![\w.])" + pat + r"(?!\w|\.\d)", " ", out, flags=re.I)
+    return out
+
+
+def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str, reply: str,
+                    sources: list[Any] | None, force_item: dict | None) -> bool:
+    """A worked example the reply takes from the cited course sources: every number it states is in the cited
+    passages, none of the cited passages holds a graded item's own givens, and the student neither named the item
+    nor asked to check an answer. It is the course's example, not the student's graded problem."""
+    if not sources or not force_item or force_item.get("reason") != "sticky" or is_check_ask(question or ""):
+        return False
+    cited = {int(n) for m in re.finditer(r"\[(\d+(?:\s*[,;\u2013-]\s*\d+)*)\]", with_cites or "")
+             for n in re.findall(r"\d+", m.group(1))}
+    texts = []
+    for n in sorted(cited):
+        if 1 <= n <= len(sources) and isinstance(sources[n - 1], dict):
+            texts.append(chunk_text(sources[n - 1]))
+    if not texts:
+        return False
+    for it in items:
+        if names_item(question or "", it):
+            return False
+        b = _Text((it.get("body") or ""))
+        for t in texts:
+            if it["kind"] == "problem" and (_row_hits(_Text(t), b) >= 2 or copies_item(t, it, rows=True)):
+                return False
+    src_nums = set()
+    for t in texts:
+        src_nums |= _numbers_of(t)
+    own = set(_reply_numbers(question or ""))
+    stated = [c for c in _reply_numbers(reply) if c not in ("0", "1", "-1")]
+    return bool(stated) and all(c in src_nums or c in own or any(num_eq(c, x) for x in src_nums) for c in stated)
 
 
 def check_reply(store, course_id: int, question: str, raw_reply: str, force_item: dict | None = None, *,
@@ -1325,6 +1410,10 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         return None
     items = graded_view(store, course_id)
     if not items:
+        return None
+    if question and not is_check_ask(question):
+        reply, with_cites = _mask_asked(reply, question), _mask_asked(with_cites, question)
+    if _quoted_example(items, question or "", with_cites, reply, sources, force_item):
         return None
     k = _reply_key_item(items, question or "", reply, with_cites, force_item)
     if k:
@@ -1484,7 +1573,7 @@ _PIPE_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$")
 _NUMROW = r"-?(?:\d+/\d+|\d*\.?\d+)"
 _SLASH_ROWS = re.compile(r"(?<![\w./])(" + _NUMROW + r"(?:[ \t]+" + _NUMROW + r")+)((?:[ \t]*[/;][ \t]*" + _NUMROW +
                          r"(?:[ \t]+" + _NUMROW + r")+)+)(?![\w./])")
-_LINE_ROW = re.compile(r"^[ \t>]*(?:[\[(|]\s*)?(" + _NUMROW + r"(?:[ \t,|&]+" + _NUMROW + r")+)\s*[\])|]?[ \t]*,?[ \t]*$")
+_LINE_ROW = re.compile(r"^[ \t>]*(?:[A-Za-z][A-Za-z0-9_]{0,3}[ \t]*:?=[ \t]*)?(?:[\[(|]\s*)?(" + _NUMROW + r"(?:[ \t,|&]+" + _NUMROW + r")+)\s*[\])|]?[ \t]*,?[ \t]*$")
 
 
 def _bracket_rows(rows: list[list[str]]) -> str:
@@ -1502,9 +1591,13 @@ def _tables_to_brackets(t: str) -> str:
             while j < len(lines) and _PIPE_ROW.match(lines[j]):
                 j += 1
             rows: list[list[str]] = []
+            pairs: list[str] = []
             for ln in lines[i:j]:
                 cells = [re.sub(r"[$`*\s]|\\[,;! ]", "", c) for c in ln.strip().strip("|").split("|")]
                 if all(re.fullmatch(r"[:\-]*", c) for c in cells):
+                    continue
+                if len(cells) == 2 and re.fullmatch(r"[A-Za-z]\d{0,3}", cells[0]) and re.fullmatch(_NUMROW, cells[1]):
+                    pairs.append(f"{cells[0]} = {cells[1]}")  # a table of unknowns and their values: 'x | -3/2'
                     continue
                 if cells and not re.fullmatch(_NUMROW, cells[0]) and all(re.fullmatch(_NUMROW, c) for c in cells[1:]) and len(cells) > 2:
                     cells = cells[1:]
@@ -1512,6 +1605,8 @@ def _tables_to_brackets(t: str) -> str:
                     rows.append(cells)
             if rows:
                 out.append(_bracket_rows(rows))
+            elif len(pairs) >= 2:
+                out.append(", ".join(pairs))
             else:
                 out.extend(lines[i:j])
             i = j
@@ -1540,7 +1635,7 @@ def _tables_to_brackets(t: str) -> str:
 
 
 def _norm_hay(text: str) -> str:
-    t = (text or "").replace("\u2212", "-").translate(_SUB_DIGITS)
+    t = (text or "").replace("\u2212", "-").replace("\u2044", "/").replace("\u2215", "/").translate(_SUB_DIGITS)
 
     def mat(m):
         body = re.sub(r"\\hline|\\\[[^\]]*\]", "", m.group(1))
@@ -1553,6 +1648,8 @@ def _norm_hay(text: str) -> str:
     t = re.sub(r"_\{?([A-Za-z0-9]+)\}?", r"\1", t)
     t = re.sub(r"\\(?:text|textrm|textit|mathrm|mathit|mbox|rm)\{([^{}]*)\}", r" \1", t)  # unit wrappers: \text{mL}
     t = re.sub(r"\\(?:left|right|top|quad|qquad|,|;|!|:)|(?<!\\)\\ |~|\^\{?[Tt]\}?|\*\*|[$`]", " ", t)
+    t = re.sub(r"\\[dt]frac", r"\\frac", t)
+    t = re.sub(r"\\frac\s*(-?\d)\s*(\d)(?!\d)", r"\1/\2", t)  # \frac32
     t = re.sub(r"\\frac\{(-?\d+)\}\{(\d+)\}", r"\1/\2", t)
     t = _words_to_digits(t)
     return re.sub(r"\b(?:minus|negative)\s+(\d)", r"-\1", t, flags=re.I)
@@ -1935,14 +2032,14 @@ def _numbers_of(text: str) -> set[str]:
     return {c for _, c, _ in _Hay(text).nums}
 
 
-def component_leak(item: dict[str, Any] | None, reply: str, question: str = "") -> str:
+def component_leak(item: dict[str, Any] | None, reply: str, question: str = "", letters: bool = False) -> str:
     """A reply in a chat about this item that gives a value for one of the item's own unknowns: an explicit statement
     ('x3 = 2'), or, when the question named an unknown, a short reply that carries a value the key holds for it (or,
     with no key, any number the question did not already hold). Returns the unknown's name, else ''."""
     hit = states_unknown(item, reply)
     if hit:
         return hit
-    named = question_names(item, question)
+    named = question_names(item, question) | (_front_letters(item, question) if letters else set())
     if not named:
         return ""
     plain = _CITE_STRIP.sub("", reply or "")
@@ -1955,6 +2052,8 @@ def component_leak(item: dict[str, Any] | None, reply: str, question: str = "") 
             vals = _entry_numbers(keyed[nm])
         elif re.fullmatch(r"[a-z]\d{1,3}", nm) and nm[0] in keyed:
             vals = _entry_numbers(keyed[nm[0]])
+        elif re.fullmatch(r"[a-z]", nm) and any(k[0] == nm and re.fullmatch(r"[a-z]\d{1,3}", k) for k in keyed):
+            vals = set().union(*(_entry_numbers(v) for k, v in keyed.items() if k[0] == nm and re.fullmatch(r"[a-z]\d{1,3}", k)))
         else:
             vals = set()
         given = _index(item).given
@@ -2343,6 +2442,13 @@ def key_leak(reply, item=None, ctx=None):
     if len(seen) >= 2 or (seen and (named or sticky or c.get("lone"))):
         return seen
     bound = _bound_names(h, ix)
+    same = {}
+    for e in ix.entries:  # one parameter given two of its key values ('d = 10 ... d = 11'): the whole list of its answers
+        if e.name and e.unit != "atom" and e.val not in _TRIV and not _is_const(e.val) and h.named(e.name, e.val):
+            same.setdefault(e.name, set()).add(e.val)
+    for nm, vals in same.items():
+        if len(vals) >= 2:
+            return [nm]
     if len(bound) >= 3:  # three of the key's own names given their values is the answer, small values included
         return bound
     gate = bool(c.get("small", named)) or sticky
@@ -2988,6 +3094,11 @@ def _topic_of(graded: dict[str, Any], twin_problem: str, problem_text: str) -> s
 _REPLY_WHY = ("reply", "key", "sticky", "soft_essay", "normal_reply")
 
 
+def reworded_note(graded: dict[str, Any]) -> str:
+    """The one line shown above a retried ordinary answer: it was written again to stay clear of the graded item."""
+    return f"I reworded this answer to stay clear of your graded {_item_name(graded)}, so it may be less detailed than you asked for."
+
+
 def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = False, has_answer: bool | None = None) -> str:
     """The one sentence the page shows for why this question got a similar problem or concepts help. It never says
     'a similar problem' for a page that shows none, and it blames the reply, not the question, when the reply was
@@ -3365,6 +3476,14 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
     return None
 
 
+def _front_letters(it: dict[str, Any], front: str) -> set[str]:
+    """A card front that names one of the key's own letters as a word ('Singular d', 'x for problem 3', 'what is z'):
+    the back of such a card is that unknown's value."""
+    keyed = set(key_names(it)) | {n[0] for n in key_names(it) if re.fullmatch(r"[a-z]\d{1,3}", n)}
+    words = {w for w in re.findall(r"(?<![\w'])[A-Za-z](?![\w'])", _norm_hay(front))}
+    return {w.lower() for w in words if w.lower() in keyed and w.lower() not in ("a", "i")}
+
+
 def check_card(store, course_id: int, front: str, back: str) -> dict | None:
     """The graded item a flashcard gives away: one of its answer-key values, or its own numbers in the card (worked or
     not). Cards are short, so unlike check_guide this does not treat a brief back as an answer fragment."""
@@ -3375,9 +3494,9 @@ def check_card(store, course_id: int, front: str, back: str) -> dict | None:
         return _hit(k, "key")
     for it in items:  # 'x3 -> 2', 'l21 -> 2', 'd for problem 1 -> ten': the front names an unknown, the back is its value
         if item_key(it) and len(back.split()) <= 6:
-            named = question_names(it, front)
-            if named and (any(re.fullmatch(r"[a-z]\d{1,3}", n) for n in named) or touches(text, it)) \
-                    and component_leak(it, back, front):
+            named = question_names(it, front) | _front_letters(it, front)
+            if named and (any(re.fullmatch(r"[a-z]\d{0,3}", n) for n in named) or touches(text, it)) \
+                    and component_leak(it, back, front, letters=True):
                 return _hit(it, "key")
     for it in items:  # 'd for problem 1 -> ten', 'carbon atoms in the formula -> 3': a bare value of the item's own entries
         if item_key(it) and len(back.split()) <= 3 and touches(text, it):
