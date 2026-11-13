@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import re
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Any
 
 from . import essay, grounding, retrieval
@@ -87,6 +88,9 @@ def graded_view(store, course_id: int) -> list[dict[str, Any]]:
     out = []
     for it in sorted(store.graded_items(course_id), key=lambda r: r["id"]):
         out.append(dict(it, kind=_item_kind(it)))
+    rows = {it["id"]: _body_given_rows(it.get("body") or "") for it in out if it["kind"] == "problem"}
+    for it in out:  # the other items' own givens: restating Problem 2's matrix is not a leak of Problem 3
+        it["_sib"] = tuple(r for i, rs in rows.items() if i != it["id"] for r in rs)
     return out
 
 
@@ -380,7 +384,7 @@ def _row_entries(seg: str, loose: bool = False) -> list[str]:
     return out if sum(1 for e in out if not _SYMBOL.match(e)) >= 2 else []
 
 
-_NAME_PREFIX = re.compile(r"^\s*(?:`|\$)*\s*[A-Za-z][A-Za-z0-9_]{0,3}\s*(?:=|:=|:)\s*(?=[-+\u2212\d.(])")
+_NAME_PREFIX = re.compile(r"^\s*(?:`|\$)*\s*[A-Za-z][A-Za-z0-9_]{0,15}\s*(?:=|:=|:)\s*(?=[-+\u2212\d.(])")
 
 
 def matrix_rows(text: str) -> list[list[str]]:
@@ -670,21 +674,44 @@ class _Text:
 
 
 _ROW_SEP = r"\s*(?:,|;|&|\\&|\||\s)\s*"
+# between a row and the extra entries of an augmented row: never a row break (a semicolon or a new line)
+_TAIL_SEP = r"[ \t]*(?:,|&|\\&|\||[ \t])[ \t]*"
 
 
 def _row_regex(row: list[str], extra: int = 0) -> "re.Pattern[str]":
     nums = [re.escape(x) + (r"(?:\.0+)?" if "." not in x else "0*") for x in row]
     body = _ROW_SEP.join(nums)
-    tail = (r"(?:" + _ROW_SEP + r"-?\d+(?:\.\d+)?){0,%d}" % extra) if extra else ""
+    tail = (r"(?:" + _TAIL_SEP + r"-?\d+(?:\.\d+)?){0,%d}" % extra) if extra else ""
     return re.compile(r"[\[(]?\s*(?<![\d.])" + body + tail + r"(?![\d.]*\d)\s*[\])]?")
+
+
+@lru_cache(maxsize=256)
+def _body_given_rows(body: str) -> tuple[tuple[str, ...], ...]:
+    b = _Text(body)
+    rows = [r for r in [*b.mrows, *b.erows] if len(r) >= 3 and all(re.fullmatch(_NUM.pattern, x) for x in r)]
+    return tuple(sorted({tuple(r) for r in rows}, key=lambda r: -len(r)))
 
 
 def given_rows(item: dict[str, Any] | None) -> list[list[str]]:
     """The item's own statement as rows of numbers (matrix rows, vectors, the columns of its equations), whole rows of
     three or more entries only."""
-    b = _Text((item or {}).get("body") or "")
-    rows = [r for r in [*b.mrows, *b.erows] if len(r) >= 3 and all(re.fullmatch(_NUM.pattern, x) for x in r)]
-    return [list(r) for r in sorted({tuple(r) for r in rows}, key=lambda r: -len(r))]
+    return [list(r) for r in _body_given_rows((item or {}).get("body") or "")]
+
+
+def _key_rows(item: dict[str, Any]) -> set[tuple[str, ...]]:
+    """Every row, column and vector the item's own key holds, as tuples."""
+    out: set[tuple[str, ...]] = set()
+    for comp in _index(item).comps:
+        for r in comp.rows:
+            out.add(tuple(r))
+        if comp.kind == "mat" and comp.rows and all(len(r) == len(comp.rows[0]) for r in comp.rows):
+            out.update(tuple(col) for col in zip(*comp.rows))
+    return out
+
+
+def _blank_keep_lines(m: "re.Match[str]") -> str:
+    """A blanked given row keeps its line breaks, so the next given row cannot run on into the line below it."""
+    return " " + "\n" * m.group(0).count("\n")
 
 
 def mask_givens(text: str, item: dict[str, Any] | None) -> str:
@@ -695,7 +722,13 @@ def mask_givens(text: str, item: dict[str, Any] | None) -> str:
     if not item or not (item.get("body") or "").strip() or not t.strip():
         return t
     for row in given_rows(item):
-        t = _row_regex(row, extra=3 if len(row) <= 4 else 0).sub(" ", t)
+        t = _row_regex(row, extra=3 if len(row) <= 4 else 0).sub(_blank_keep_lines, t)
+    sib = item.get("_sib") or ()
+    if sib:  # another item's givens are data here too, unless the row is one of this item's own key values
+        keep = _key_rows(item)
+        for row in sib:
+            if tuple(row) not in keep:
+                t = _row_regex(list(row), extra=3 if len(row) <= 4 else 0).sub(_blank_keep_lines, t)
     for line in (item.get("body") or "").splitlines():
         flat = re.sub(r"[\s`*]+", "", line)
         if "=" in flat and re.search(r"\d", flat) and len(flat) >= 6 and not re.search(r"[A-Za-z]{4,}", flat):
@@ -1162,9 +1195,44 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
 
 
 # --------------------------------------------------------------------------- post-check of what the model wrote
-_CITE_STRIP = re.compile(r"\[\d+(?:\s*[,;–-]\s*\d+)*\]")
+_CITE_RX = re.compile(r"\[(\d+(?:\s*[,;–-]\s*\d+)*)\]")
 # a marker that is not a row of a matrix: no '[' or ', ' before it and no ']' or ',' right after it
-_CITE_SOFT = re.compile(r"(?<![\[,])(?<!\[\s)(?<!,\s)\[\d+(?:\s*[,;–-]\s*\d+)*\](?![\],])")
+_CITE_SOFT_RX = re.compile(r"(?<![\[,])(?<!\[\s)(?<!,\s)\[(\d+(?:\s*[,;–-]\s*\d+)*)\](?![\],])")
+_MAX_SOURCES = 30  # when the number of sources is not known
+
+
+def _is_cite(m: "re.Match[str]", text: str, n: int | None) -> bool:
+    """A citation marker is a bracket of source ids: whole numbers from 1 to the number of sources (a short list rises
+    or is a range), and not the right-hand side of 'name =' or ':' ('x = [1, 1, 2]' is a vector, never a marker)."""
+    inner = m.group(1)
+    nums = [int(x) for x in re.findall(r"\d+", inner)]
+    top = n if n is not None else _MAX_SOURCES
+    if any(v < 1 or v > top for v in nums):
+        return False
+    prefix = text[max(0, m.start() - 24):m.start()]
+    if re.search(r"(?:=|:|\u2192|->)[ \t]*$", prefix):
+        return False
+    if len(nums) > 1:
+        if any(b <= a for a, b in zip(nums, nums[1:])):
+            return False
+        if re.search(r"\b(?:is|are|equals?|gives?|be|was|were|vector|solution|answer)[ \t]*$", prefix, re.I):
+            return False
+    return True
+
+
+class _CiteStrip:
+    """Drops citation markers and nothing that is a bracketed vector. sub(repl, text, n) mirrors re.Pattern.sub."""
+
+    def __init__(self, rx: "re.Pattern[str]"):
+        self.rx = rx
+
+    def sub(self, repl: str, text: str, n: int | None = None) -> str:
+        text = text or ""
+        return self.rx.sub(lambda m: repl if _is_cite(m, text, n) else m.group(0), text)
+
+
+_CITE_STRIP = _CiteStrip(_CITE_RX)
+_CITE_SOFT = _CiteStrip(_CITE_SOFT_RX)
 _WORKED = re.compile(r"[=≈]|\\frac|\btherefore\b|\bhence\b|\bthus\b|\bso\s+[a-z]\w*\s+(?:is|are)\b|\banswer\b", re.I)
 _COACHING = re.compile(r"\b(you|your|yours|you're|the student|students|rubric|assignment|should|could|consider|try to|"
                        r"ask yourself|a strong|a good|a clear|e\.g\.|for example|make sure|aim to|remember)\b", re.I)
@@ -1339,7 +1407,7 @@ def force_map(items: list[dict[str, Any]], force_item: dict | None) -> dict[int,
 
 
 def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with_cites: str,
-                    force_item: dict | None) -> dict[str, Any] | None:
+                    force_item: dict | None, n_cites: int | None = None) -> dict[str, Any] | None:
     """The item whose key the reply gives away (most matches), judged with each item's own chat context."""
     best, top = None, 0
     forced = force_map(items, force_item)
@@ -1347,7 +1415,7 @@ def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with
         if not item_key(it):
             continue
         ctx = reply_ctx(it, question, reply, forced.get(it["id"]))
-        n = len(_kl(reply, it, ctx) or _kl(_CITE_SOFT.sub("", with_cites), it, ctx))
+        n = len(_kl(reply, it, ctx) or _kl(_CITE_SOFT.sub("", with_cites, n_cites), it, ctx))
         if n > top:
             best, top = it, n
     return best
@@ -1376,6 +1444,8 @@ def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str,
     nor asked to check an answer. It is the course's example, not the student's graded problem."""
     if not sources or not force_item or force_item.get("reason") != "sticky" or is_check_ask(question or ""):
         return False
+    if (force_item.get("kind") or _item_kind(force_item)) != "problem" or proof_shaped(reply):
+        return False  # a cited proof or essay passage is still the student's graded work; only numeric examples are quoted
     cited = {int(n) for m in re.finditer(r"\[(\d+(?:\s*[,;\u2013-]\s*\d+)*)\]", with_cites or "")
              for n in re.findall(r"\d+", m.group(1))}
     texts = []
@@ -1400,14 +1470,17 @@ def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str,
 
 
 def check_reply(store, course_id: int, question: str, raw_reply: str, force_item: dict | None = None, *,
-                sources: list[Any] | None = None, keys_only: bool = False, given_ok: bool = False) -> dict | None:
+                sources: list[Any] | None = None, keys_only: bool = False, given_ok: bool = False,
+                n_cites: int | None = None) -> dict | None:
     """Return the graded item when the reply solves it (one of its answer-key values, its numbers in worked steps, a
     finished proof, or submittable essay prose for a graded essay), else None. Callers discard the reply and route to
     twin / concepts mode. Every item's key is checked. force_item: an item the chat is already about (see
     sticky_item). keys_only: only the answer keys (used when the student turned routing off). sources: the numbered
     sources the reply cited, so cited restatements of a source are not read as essay prose."""
     _, with_cites = read_marker(raw_reply or "")
-    reply = _CITE_STRIP.sub("", with_cites)
+    if n_cites is None and sources:
+        n_cites = len(sources)
+    reply = _CITE_STRIP.sub("", with_cites, n_cites)
     if not reply.strip():
         return None
     items = graded_view(store, course_id)
@@ -1417,7 +1490,7 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         reply, with_cites = _mask_asked(reply, question), _mask_asked(with_cites, question)
     if _quoted_example(items, question or "", with_cites, reply, sources, force_item):
         return None
-    k = _reply_key_item(items, question or "", reply, with_cites, force_item)
+    k = _reply_key_item(items, question or "", reply, with_cites, force_item, n_cites)
     if k:
         return _hit(k, "key")
     if keys_only:
@@ -1573,9 +1646,10 @@ def item_key(item: dict[str, Any] | None) -> list[str]:
 _ENV = re.compile(r"\\begin\{(?:[bpvBV]?matrix|array|smallmatrix)\}(?:\{[^{}]*\})?(.*?)\\end\{(?:[bpvBV]?matrix|array|smallmatrix)\}", re.S)
 _PIPE_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$")
 _NUMROW = r"-?(?:\d+/\d+|\d*\.?\d+)"
-_SLASH_ROWS = re.compile(r"(?<![\w./])(" + _NUMROW + r"(?:[ \t]+" + _NUMROW + r")+)((?:[ \t]*[/;][ \t]*" + _NUMROW +
-                         r"(?:[ \t]+" + _NUMROW + r")+)+)(?![\w./])")
-_LINE_ROW = re.compile(r"^[ \t>]*(?:[A-Za-z][A-Za-z0-9_]{0,3}[ \t]*:?=[ \t]*)?(?:[\[(|]\s*)?(" + _NUMROW + r"(?:[ \t,|&]+" + _NUMROW + r")+)\s*[\])|]?[ \t]*,?[ \t]*$")
+_ROWSEP = r"(?:[ \t]*\|[ \t]*|[ \t]+)"  # entries of one row: spaces, or an augmented bar
+_SLASH_ROWS = re.compile(r"(?<![\w./])(" + _NUMROW + r"(?:" + _ROWSEP + _NUMROW + r")+)((?:[ \t]*[/;][ \t]*" + _NUMROW +
+                         r"(?:" + _ROWSEP + _NUMROW + r")+)+)(?![\w./])")
+_LINE_ROW = re.compile(r"^[ \t>]*(?:[A-Za-z][A-Za-z0-9_]{0,15}[ \t]*(?::=|=|:)[ \t]*)?(?:[\[(|]\s*)?(" + _NUMROW + r"(?:[ \t,|&]+" + _NUMROW + r")+)\s*[\])|]?[ \t]*,?[ \t]*$")
 
 
 def _bracket_rows(rows: list[list[str]]) -> str:
@@ -1821,7 +1895,7 @@ class _Hay:
         for m in re.finditer(r"(?<![\w.])-?\d[\d./]*(?:\s*(?:[,;:]|\band\b)\s*-?\d[\d./]*){2,}", self.t):  # 3 : 4 : 3, 2, -8 and 1
             self.seqs.append((m.start(), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(0))]))
         # a flat run of entries with spaces or commas between them ("1 0 0 2 1 0 -1 -1 1 and 2 1 1 0 -8 -2 0 0 1")
-        for m in re.finditer(r"(?<![\w.])-?\d[\d./]*(?:(?:\s*(?:[,;:]|\band\b)\s*|\s+)-?\d[\d./]*){3,}", self.t):
+        for m in re.finditer(r"(?<![\w.])-?\d[\d./]*(?:(?:\s*(?:[,;:|]|\band\b)\s*|\s+)-?\d[\d./]*){3,}", self.t):
             self.seqs.append((m.start(), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(0))]))
 
     def _matrices(self, groups: list[tuple[int, int, str]]) -> None:
@@ -2208,6 +2282,29 @@ def _build_index(raws: tuple[str, ...], body: str) -> _Index:
         n = len(vs)
         if letter not in have and n >= 3 and set(vs) == set(range(1, n + 1)):
             ix.comps.append(_Comp(letter, "vec", [[vs[i] for i in range(1, n + 1)]]))
+    ucell: dict[tuple[int, int], str] = {}
+    cval: dict[int, str] = {}
+    for nm, v in explicit.items():
+        m2 = re.fullmatch(r"u(\d)(\d)", nm)
+        m1 = re.fullmatch(r"c(\d)", nm)
+        if m2:
+            ucell[(int(m2.group(1)), int(m2.group(2)))] = v
+        elif m1:
+            cval[int(m1.group(1))] = v
+    for comp in ix.comps:
+        if comp.name == "u" and comp.kind == "mat":
+            for i, row in enumerate(comp.rows, 1):
+                for j, v in enumerate(row, 1):
+                    if j >= i:
+                        ucell.setdefault((i, j), v)
+        if comp.name == "c" and comp.kind == "vec":
+            for i, v in enumerate(comp.rows[0], 1):
+                cval.setdefault(i, v)
+    n = max([j for _, j in ucell] + list(cval) or [0])
+    srows = [["0"] * (i - 1) + [ucell[(i, j)] for j in range(i, n + 1)] + [cval[i]]
+             for i in range(1, n + 1) if i in cval and all((i, j) in ucell for j in range(i, n + 1))]
+    if n >= 3 and srows:  # the triangular system [U | c]: its rows are answer rows even when one is a given
+        ix.comps.append(_Comp("system", "sys", srows))
     for fm in forms_map(body).values():
         ix.given |= fm
     ix.given |= set(numbers(body)) | given_constants(body)
@@ -2325,6 +2422,9 @@ def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None)
         if _stated(comp.rows[0], given):
             return False
         return any(_vec_hit(s, comp.rows[0], True, bool(comp.name) and h.named_before(comp.name, p)) for p, s in live)
+    if comp.kind == "sys":  # a row of the triangular system that the problem does not state itself
+        return any(sum(1 for x in r if x not in ("0", "-0")) >= 2 and not _stated(r, given)
+                   and any(_vec_hit(sq, r, True) for sq in seqs) for r in comp.rows)
     rows = comp.rows
     flat = [x for r in rows for x in r]
     cols = [list(c) for c in zip(*rows)] if rows and all(len(r) == len(rows[0]) for r in rows) else []
@@ -2333,7 +2433,11 @@ def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None)
         return True  # the whole matrix, rows as they stand
     if any(_vec_hit(s, flat, True) for s in seqs):
         return True
-    return any(_vec_hit(s, v, False) for v in [*rows, *cols] if not _stated(v, given) for s in seqs)
+    pieces = list(dict.fromkeys(tuple(v) for v in [*rows, *cols] if not _stated(v, given)))
+    got = [v for v in pieces if any(_vec_hit(s, list(v), False) for s in seqs)]
+    # one row or column of small whole numbers is a coincidence (a twin's b = (1, 2, 3) is a column of any 3x3 factor):
+    # it counts with a distinctive entry, or when a second row or column of the same matrix is there too
+    return any(any(_distinct_val(x) for x in v) for v in got) or len(got) >= 2
 
 
 def _ordinal_pairs(text: str) -> list[tuple[int, str, str]]:
@@ -3429,14 +3533,14 @@ def pure_conversion(text: str) -> bool:
     return found and not re.search(r"\d", _CONV_PAIR.sub(" ", t))
 
 
-def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
+def check_guide(store, course_id: int, title: str, body: str, n_cites: int | None = None) -> dict | None:
     """The graded item a guide saved by the AI app works or gives away, or None. Every item's answer key is checked
     against the whole body however long it is, then the stricter no-key rules (a labelled answer, a bare final answer,
     a fragment, a translation, an essay outline or prose). The hit carries `sentence`, the sentence that collided."""
     items = graded_view(store, course_id)
     if not items:
         return None
-    clean = _CITE_STRIP.sub("", body or "")
+    clean = _CITE_STRIP.sub("", body or "", n_cites)
 
     def out(it, reason):
         h = _hit(it, reason)
@@ -3446,7 +3550,7 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
     k = _text_key_item(items, f"{title}\n{body or ''}", clean) or _text_key_item(items, f"{title}\n{body or ''}", body or "")
     if k:
         return out(k, "key")
-    hit = check_reply(store, course_id, title, body)
+    hit = check_reply(store, course_id, title, body, n_cites=n_cites)
     if hit:
         return out(hit, hit.get("reason", "reply"))
     r = _Text(clean)
