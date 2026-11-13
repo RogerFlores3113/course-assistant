@@ -413,7 +413,7 @@ def matrix_rows_matched(q_rows: list[list[str]], g_rows: list[list[str]]) -> int
 
 # --------------------------------------------------------------------------- splitting a material into problems
 _WORD_HEAD = re.compile(r"^[ \t>]*(?:#{1,6}[ \t]*)?(?:\*\*)?[ \t]*(Problem|Question|Exercise|Prob|Q|Task)\b[ \t]*\.?[ \t]*#?"
-                        r"[ \t]*(\d{1,3}[A-Za-z]?)\b(?!\.\d)[ \t]*(?:[.:)\-\u2013*]|\(|$)", re.I | re.M)
+                        r"[ \t]*(\d{1,3}[A-Za-z]?|(?-i:[A-D]))\b(?!\.\d)[ \t]*(?:[.:)\-\u2013*]|\(|$)", re.I | re.M)
 _HEAD_WORD = {"problem": "Problem", "prob": "Problem", "question": "Question", "q": "Question",
               "exercise": "Exercise", "task": "Task"}
 _NUM_HEAD = re.compile(r"^[ \t]*(?:#{1,6}[ \t]*)?(\d{1,2})[.)][ \t]+\S", re.M)
@@ -487,10 +487,11 @@ _ITEM_POINTS = re.compile(r"\(\s*\d+\s*(?:points?|pts?|marks?)\s*\)", re.I)
 def expected_items(text: str) -> int:
     """How many problems the text's own numbering implies: the highest 'Problem N' heading, or the number of
     '(N points)' markers (a lone '(100 points)' rubric line does not count)."""
-    nums = [int(re.match(r"\d+", m.group(2)).group(0)) for m in _WORD_HEAD.finditer(text or "")]
+    heads = [m.group(2) for m in _WORD_HEAD.finditer(text or "")]
+    nums = [int(re.match(r"\d+", h).group(0)) for h in heads if h[:1].isdigit()]
     pts = len(_ITEM_POINTS.findall(text or ""))
-    if nums:
-        return max(max(nums), len(nums), pts)
+    if heads:  # lettered headings (Question A, Question B) count one each
+        return max(max(nums or [0]), len(heads), pts)
     if pts >= 2:
         return pts
     secs = _question_sections(text or "")
@@ -771,6 +772,19 @@ def topic_overlap(question: str, item: dict[str, Any]) -> int:
     have = _pfx_set(f"{item.get('title', '')} {item.get('body', '')}")
     have |= {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", f"{item.get('title', '')} {item.get('body', '')}")}
     return len(words & have)
+
+
+def names_item(text: str, item: dict[str, Any]) -> bool:
+    """The request names this graded item: its number or label, its own matrix rows or equations, one of its
+    distinctive numbers, or three of its distinctive content words. A bare topic ('LU factorization') never does."""
+    if _own_ref(text, item) or _reference_match(text, item):
+        return True
+    q, b = _Text(text), _Text(item.get("body") or "")
+    if any(b.fm.get(n, {n}) & q.forms for n in b.sig if _distinctive(n)):
+        return True
+    if _row_hits(q, b) >= 1 and (b.mrows or b.erows):
+        return True
+    return len(q.tok & b.tok) >= 3
 
 
 def _own_ref(question: str, item: dict[str, Any]) -> bool:
@@ -1807,10 +1821,17 @@ def logistics_sources(store, course_id: int, question: str) -> list[dict]:
         text = _material_text(store, mid)
         if not text or not chunks:
             continue
-        heads = [(m.start(), m.group(0).strip()) for m in _WORD_HEAD.finditer(text)]
+        heads = []
+        for m in _WORD_HEAD.finditer(text):  # the whole heading line, so "## Problem 3 (20 points)" keeps its points
+            end = text.find("\n", m.start())
+            heads.append((m.start(), text[m.start(): end if end >= 0 else len(text)].strip()))
+        first_head = heads[0][0] if heads else 0
+        if q_probs:
+            mine = [h for h in heads if _prob_refs(plain_text(h[1])) & q_probs]
+            heads = mine or heads
         lines: list[str] = []
         if heads:
-            lines.append(text[:heads[0][0]].strip())
+            lines.append(text[:first_head].strip())
             lines += [plain_text(h) for _, h in heads]
         else:
             lines += [ln.strip() for ln in text.splitlines() if _LOGI_LINE.search(ln)][:8]
@@ -2301,6 +2322,10 @@ SCRUBBED = ("_A part of this guide was left out because it repeated an answer to
             "problem with different numbers instead._")
 
 
+SCRUBBED_MANY = ("_{n} parts of this guide were left out because they repeated graded work. Ask for similar problems "
+                 "with different numbers instead._")
+
+
 def scrub_markdown(store, course_id: int, text: str, question: str = "") -> tuple[str, int]:
     """Drop and replace only the parts (paragraphs, list items, a <details> solution) of a model-written guide that
     state a graded item's answer: an answer-key value, or its own numbers worked. Returns (text, parts replaced)."""
@@ -2322,7 +2347,14 @@ def scrub_markdown(store, course_id: int, text: str, question: str = "") -> tupl
         if leaky:
             n += 1
             hit = check_reply(store, course_id, question, seg)
-            out.append(essay.SCRUBBED if hit and hit.get("kind") == "essay" else SCRUBBED)
+            note = essay.SCRUBBED if hit and hit.get("kind") == "essay" else SCRUBBED
+            if n == 1:
+                first = len(out)
+                out.append(note)
+            else:
+                out.append("")  # the note shows once per page
         else:
             out.append(seg)
-    return "".join(out), n
+    if n > 1:
+        out[first] = SCRUBBED_MANY.format(n=n)
+    return re.sub(r"\n{3,}", "\n\n", "".join(out)), n

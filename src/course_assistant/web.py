@@ -535,13 +535,15 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         plain = getattr(integ, "plain_text", None) or (lambda t: " ".join((t or "").split()))
         klabel = getattr(integ, "kind_label", None)
         has_key = getattr(integ, "item_key", lambda i: [])
+        key_state = getattr(integ, "key_state", lambda i, connected: "on" if has_key(i) else ("failed" if connected else "off"))
+        connected = provider() is not None
         rows = []
         for i in sorted(items, key=lambda r: r["id"]):
             row = {k: v for k, v in i.items() if k != "answer_key"}  # the key is never sent to a page
             row.update({"kind_label": klabel(i) if callable(klabel) else GRADED_KINDS.get(i.get("kind") or "problem", "Problem"),
                         "material_title": titles.get(i.get("material_id") or 0, ""),
                         "excerpt": plain(i.get("body") or "")[:160],
-                        "answer_check": bool(has_key(i)) if (i.get("kind") or "problem") == "problem" else None})
+                        "answer_check": key_state(i, connected) if (i.get("kind") or "problem") == "problem" else None})
             rows.append(row)
         warnings = []
         report = getattr(integ, "split_report", None)
@@ -836,9 +838,27 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
     def graded_edit(request: Request, item_id: int):
         it = graded_or_404(item_id)
         integ = _safe_mod("integrity")
-        on = bool(getattr(integ, "item_key", lambda i: [])(it))
+        state = getattr(integ, "key_state", lambda i, connected: "off")(it, provider() is not None)
         return page(request, "graded_form.html", item={k: v for k, v in it.items() if k != "answer_key"},
-                    course=require_course(it["course_id"]), page_title="Edit graded item", answer_check=on)
+                    course=require_course(it["course_id"]), page_title="Edit graded item", answer_check=state)
+
+    @app.post("/graded/{item_id}/key")
+    def graded_key_retry(request: Request, item_id: int):
+        """Try again: one more model call to make the item's answer key."""
+        it = graded_or_404(item_id)
+        p = provider()
+        if p is None:
+            return after(request, it["course_id"], "materials", error="Connect an AI first, then try again.")
+        build = getattr(_safe_mod("integrity"), "build_answer_key", None)
+        ok = False
+        if callable(build):
+            try:
+                ok = bool(build(store, item_id, p))
+            except Exception:
+                ok = False
+        if ok:
+            return after(request, it["course_id"], "materials", notice="Answer check is on for this item.")
+        return after(request, it["course_id"], "materials", error="The answer check still could not be made. Try again in a moment.")
 
     @app.post("/graded/{item_id}/edit")
     def graded_update(request: Request, item_id: int, kind: str = Form("problem"), label: str = Form(""),

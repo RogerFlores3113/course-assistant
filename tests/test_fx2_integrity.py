@@ -253,10 +253,10 @@ def test_flashcard_back_with_graded_answer_is_dropped():
     assert len(res) == 1 and res.guarded == 1
 
 
-def test_practice_topic_meets_graded_item_by_key_term_and_adds_real_twin():
+def test_practice_topic_that_names_the_graded_item_adds_real_twin():
     s, c, m = course()
     p = FakeProvider([TWIN_OK, TWIN_OK, "1. Q [1]"])
-    gid = study.practice(s, c, p, "empirical formula", count=3)
+    gid = study.practice(s, c, p, "empirical formula, problem 2", count=3)
     g = s.guide(gid)
     assert "Twin of graded work" in g["body_md"] or "Coaching for graded work" in g["body_md"]
     if g["data"]["twin"]:
