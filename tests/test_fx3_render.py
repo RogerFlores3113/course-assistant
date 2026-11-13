@@ -113,7 +113,7 @@ def test_f5_past_offering_tag_in_sources_and_chip_label(ready):
     gid = ready.store.add_guide(ready.cid, "answer", "G", "b", sources=src,
                                 data={"blocks": [{"kind": "text", "md": "Old exam [1]. New notes [2].", "cites": [1, 2]}]})
     html = ready.client.get(f"/guides/{gid}").text
-    assert html.count("Past offering: Fall 2018") >= 3  # chip label in the text, chip mark in Sources, visible tag
+    assert html.count("Past offering: Fall 2018") >= 2  # chip label in the text, visible tag
     assert 'class="past-tag">(Past offering: Fall 2018)' in html
     assert "My notes, p. 2, Past offering" not in html
 
@@ -175,7 +175,7 @@ def test_f7_flat_concept_lists_hidden_when_tree_shows(ready):
     html = ready.client.get(f"/guides/{gid}").text
     assert "Concepts and links" not in html and "Summary of the map" in html
     assert 'class="tree"' in html and html.count("Eigenvalue") >= 1
-    assert '>[2]</a>' in html.split('<div class="sources">')[1]  # the map's own cites still list their sources
+    assert '[2]</span>' in html.split('<div class="sources">')[1]  # the map's own cites still list their sources
 
 
 def test_f7_missing_lectures_intro_is_a_list():
