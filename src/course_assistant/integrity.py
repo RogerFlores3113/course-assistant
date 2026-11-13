@@ -1028,8 +1028,11 @@ _CHECK_VERB = re.compile(
     r"i\s+(?:got|get|found|came up with|calculated|computed|ended up with|think (?:it|the answer) is))\b", re.I)
 # "is that right?", "..., correct?", "my answer": a check ask only when the message also states a value or a draft
 _CHECK_WEAK = re.compile(
-    r"\b((?:is|was|are)\b[^.?!\n]{0,60}\b(?:right|correct|wrong|incorrect|good)\b|"
-    r"(?:right|correct|ok(?:ay)?)\s*\?|my\s+(?:answer|solution|result|work|attempt|value))\b|(?:right|correct|ok(?:ay)?)\s*\?", re.I)
+    r"\b((?:is|was|are)\b(?:[^.?!\n]|\.(?=\d)){0,60}\b(?:right|correct|wrong|incorrect|good)\b|"
+    r"(?:right|correct|ok(?:ay)?)\s*\?|my\s+(?:answer|solution|result|work|attempt|value))\b|(?:right|correct|ok(?:ay)?)\s*\?|"
+    # confirm-style: 'Is 2.50 g okay for the pre-lab mass?', 'Would 5.1 g work?', 'is 0.088 mol fine for the salt problem'
+    r"\b(?:is|was|are|would|will|does|do|can|could)\b(?:[^.?!\n]|\.(?=\d)){0,60}\b(?:ok(?:ay)?|fine|alright|all\s+right|acceptable|good\s+enough|"
+    r"close\s+enough|reasonable|work(?:s)?)\b", re.I)
 _CHECK_ASK = _CHECK_VERB  # kept for callers that import the name: the strong forms
 
 
@@ -1621,12 +1624,8 @@ def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str,
         for t in texts:
             if it["kind"] == "problem" and (_row_hits(_Text(t), b) >= 2 or copies_item(t, it, rows=True)):
                 return False
-    src_nums = set()
-    for t in texts:
-        src_nums |= _numbers_of(t)
     own = set(_reply_numbers(question or ""))
-    stated = [c for c in _reply_numbers(reply) if c not in ("0", "1", "-1")]
-    return bool(stated) and all(c in src_nums or c in own or any(num_eq(c, x) for x in src_nums) for c in stated)
+    return shown_in(reply, texts, own)  # the chunk itself must show each binding: bare small digits never qualify
 
 
 def check_reply(store, course_id: int, question: str, raw_reply: str, force_item: dict | None = None, *,
@@ -1890,10 +1889,14 @@ _COUNT_PHRASE = re.compile(r"(?<![\w.])(?<![\d,;/\-]\s)(?<![\d,;/\-])(" + "|".jo
                            r"|\d{1,2})(?![\d.]|\s*[,;/])(?=\s+" + _COUNT_MOD + _COUNT_NOUN + r"\b)", re.I)
 
 
+_MATRIX_SIZE = re.compile(r"(?<![\w.])\d{1,2}(?:\s*-?\s*by\s*-?\s*|\s?[x\u00d7]\s?)\d{1,2}(?![\w.]|\s*[=+*/^-]\s*\d)", re.I)
+
+
 def blank_counts(text: str) -> str:
     """Blank the number of 'one unknown', 'only one pivot', '1 solution', 'two equations' (same length): a number that
     counts things is prose, not a value."""
-    return _COUNT_PHRASE.sub(lambda m: " " * len(m.group(0)), text or "")
+    text = _MATRIX_SIZE.sub(lambda m: " " * len(m.group(0)) if re.search(r"by|x\d|\u00d7", m.group(0), re.I) else m.group(0), text or "")
+    return _COUNT_PHRASE.sub(lambda m: " " * len(m.group(0)), text)
 
 
 def _norm_hay(text: str) -> str:
@@ -2039,6 +2042,14 @@ def _solve_triangular(rows: list[list[str]]) -> list[list[str]]:
     return out
 
 
+def _eq_raw(raw: str, c: str, k: str) -> bool:
+    """num_eq for a number as written: '2.50' keeps its three significant figures (the canonical '2.5' has two)."""
+    if num_eq(c, k):
+        return True
+    r = raw.replace(",", "").replace("\u2212", "-").strip()
+    return r != c and bool(re.fullmatch(r"-?\d+\.\d+", r)) and num_eq(r, k)
+
+
 class _Hay:
     """Everything key matching needs from one piece of text."""
 
@@ -2157,7 +2168,7 @@ class _Hay:
 
     def unit_num(self, k: str, unit: str, ksig: int = 0) -> bool:
         for st, c, en in self.nums:
-            if num_eq(c, k) and not _thin(self.t[st:en], ksig):
+            if _eq_raw(self.t[st:en], c, k) and not _thin(self.t[st:en], ksig):
                 m = re.match(r"\s*([A-Za-z]+)", self.t[en:])
                 if m and _UNIT_ALIASES.get(m.group(1).lower()) == unit:
                     return True
@@ -2205,7 +2216,7 @@ def _hit_one(h: _Hay, kv: _KeyVal) -> bool:
         if kv.unit and h.unit_num(k, kv.unit, kv.sig):
             return True
         if _strong(k):
-            return any(num_eq(c, k) and (_sig(c) >= 2) and not _thin(h.t[st:en], kv.sig) for st, c, en in h.nums)
+            return any(_eq_raw(h.t[st:en], c, k) and (_sig(c) >= 2) and not _thin(h.t[st:en], kv.sig) for st, c, en in h.nums)
     return False
 
 
@@ -2749,7 +2760,7 @@ def _entry_in(h: "_Hay", e: _Entry) -> bool:
     """The reply holds the entry's value. An entry with a unit is unit-aware: '100 g' is not 100.0 mL and '0.10 M' is not
     0.1000 L; a bare number matches it only when it is a precise decimal or bound to the entry's own name."""
     for st, c, en in h.nums:
-        if not num_eq(c, e.val):
+        if not _eq_raw(h.t[st:en], c, e.val):
             continue
         if _thin(h.t[st:en], e.sig) and not (e.name and h.named(e.name, e.val)):
             continue
@@ -2786,7 +2797,7 @@ def _alias_bound(h: "_Hay", ix: _Index, data: frozenset | set = frozenset()) -> 
 
 
 # the words that stand for a family of the key's own names (lambda1, lambda2 ...): 'lambda = 5', 'the eigenvalues are 5 and 2'
-_FAMILY_WORDS = {"lambda": r"lambda|\u03bb|eigen\s*values?|eigenvalues?", "sigma": r"sigma|\u03c3|singular\s+values?",
+_FAMILY_WORDS = {"lambda": r"lambda|\u03bb|eigen\s*values?|eigenvalues?|(?:characteristic\s+)?roots?", "sigma": r"sigma|\u03c3|singular\s+values?",
                  "mu": r"mu|\u03bc", "eig": r"eig|eigen\s*values?"}
 _ORD_WORD = r"(?:(?:first|second|third|fourth|larger|largest|smaller|smallest|other|dominant|remaining)\s+)?"
 
@@ -2814,6 +2825,67 @@ def _family_bound(h: "_Hay", ix: _Index, data: frozenset | set = frozenset()) ->
             if any(num_eq(a, b) for a in nums for b in vals):
                 out.append(fam)
                 break
+    return out
+
+
+def _rounded_unit_bound(h: "_Hay", ix: _Index, data: "frozenset | set" = frozenset(), asked=()) -> list[str]:
+    """A value with the key entry's own unit that equals the key rounded to the digits the reply gives, even at two
+    significant figures ('about 5.1 g' for 5.11 g). Callers use it only when the chat or the text is about the item; an
+    untouched reply keeps the three significant figure rule."""
+    out: list[str] = []
+    for e in ix.entries:
+        if not e.unit or e.unit == "atom" or "." not in e.val or e.val in ix.given or e.val in data or _is_const(e.val):
+            continue
+        kv = _val(e.val)
+        if kv is None:
+            continue
+        for st, c, en in h.nums:
+            if "." not in c or _sig(c) < 2 or any(num_eq(a, c) for a in asked):
+                continue
+            m = re.match(r"\s*([A-Za-z]+)", h.t[en:])
+            if not (m and _UNIT_ALIASES.get(m.group(1).lower()) == e.unit):
+                continue
+            tv = _val(c)
+            if tv is not None and _sig(c) <= _sig(e.val) and _round_sig(kv, _sig(c)) == tv:
+                out.append(e.name or "value")
+                break
+    return list(dict.fromkeys(out))
+
+
+_EIGEN_CUE = re.compile(r"eigen|characteristic|\u03bb|lambda|\bv\d\b", re.I)
+_FOR_VALUE = re.compile(r"^\s*[,.;]?\s*(?:for|with|when|at|corresponding\s+to|belongs?\s+to|goes\s+with)\s+(?:the\s+)?(?:\u03bb|lambda|eigenvalue|root|value)?\s*"
+                        r"(?:=|is|of)?\s*(-?\d[\d./]*)", re.I)
+
+
+def _pair_vec_bound(h: "_Hay", ix: _Index, given: set[tuple[str, ...]], asked=()) -> list[str]:
+    """A two-entry key vector ((1, 1), (1, -2): the eigenvectors of a 2 by 2 matrix) written in the key's order in a
+    touched or named context, with a cue that it is the item's own vector: the text names eigenvectors, binds the vector
+    to its key name ('v1 = (1, 1)') or gives it to one of the key's values ('(1, 1) for 5'). Two small numbers in a
+    pair turn up everywhere, so without a cue (a point, a row of some example) they are never a hit."""
+    out: list[str] = []
+    key_vals = {e.val for e in ix.entries if e.name and e.unit != "atom" and len(e.name) >= 3 and not re.fullmatch(r"[a-z]\d{1,2}", e.name)}
+    pairs = [c for c in ix.comps if c.kind == "vec" and len(c.rows[0]) == 2 and not _stated(c.rows[0], given)
+             and not _echoed(c.rows[0], asked)]
+    found: dict[int, str] = {}  # index of the pair comp -> how it was cued: 'strong' or 'cue'
+    for i, comp in enumerate(pairs):
+        for pos, seq in h.seqs:
+            if len(seq) != 2 or not all(num_eq(a, b) for a, b in zip(seq, comp.rows[0])):
+                continue
+            before = h.low[max(0, pos - 90):pos]
+            m = re.match(r"[\[(][^\[\]()]*[\])]", h.t[pos:])
+            after = h.t[pos + m.end():pos + m.end() + 60] if m else ""
+            fv = _FOR_VALUE.match(after)
+            if (comp.name and h.named_before(comp.name, pos)) or \
+                    (fv and any(num_eq(_canon(fv.group(1).rstrip("./")), v) for v in key_vals)):
+                found[i] = "strong"
+                break
+            if _EIGEN_CUE.search(before):
+                found.setdefault(i, "cue")
+    for i, how in found.items():
+        weak = all(x in ("0", "1", "-1") for x in pairs[i].rows[0])
+        # a pair of 0, 1 and -1 turns up in any example: it needs its name or its eigenvalue, or the other vector with it
+        if how == "strong" or not weak or len(found) >= 2:
+            out.append(pairs[i].name or "vector")
     return out
 
 
@@ -2877,6 +2949,12 @@ def key_leak(reply, item=None, ctx=None):
         return bound
     gate = bool(c.get("small", named)) or sticky
     if gate or named:
+        coarse = _rounded_unit_bound(h, ix, data, asked)  # 'about 5.1 g' for the key's 5.11 g, in a context about the item
+        if coarse:
+            return coarse
+        pair = _pair_vec_bound(h, ix, _given_seqs(item), asked)  # 'the eigenvectors are (3, 1) and (1, -3)', '(1, 1) for 5'
+        if pair:
+            return pair
         letters = _alias_bound(h, ix, data)  # 'z = 2, then y = 1, then x = 1' for x = (1, 1, 2)
         if len(set(letters) | set(bound)) >= 2 and letters:
             return letters
@@ -3227,7 +3305,10 @@ _ORIGINAL_RESULT = re.compile(
     r"\b(?:your|the original|the graded)\s+(?:own\s+)?(?:answer|result|solution)\s+(?:is|should be|would be|comes|equals|=)\b)", re.I)
 _ORIGINAL_RESULT_TAIL = re.compile(r"(?:\bis\b|\bare\b|=|\bequals\b|\bgives\b|\bcomes\b|\bresult\b|\banswer\b|\bsolution\b)"
                                    r"[^\n]{0,60}?[-\u2212(]?\d|=\s*[\w(\[-]", re.I)
-_CONFIRMS = re.compile(r"\b(?:your\s+(?:answer|result|value|solution|work)\s+(?:is|looks|seems)\s+(?:right|correct|wrong|incorrect|good)|"
+_CONFIRMS = re.compile(r"\b(?:your\s+(?:answer|result|value|solution|work)\s+(?:is|looks|seems)\s+(?:right|correct|wrong|incorrect|good|fine|ok|okay)|"
+                       r"(?:that|this|it)(?:'s|\s+is)\s+(?:fine|ok|okay|good|acceptable|good\s+enough)|"
+                       r"(?<![\w.])\d[\d.,]*\s*(?:[a-z]{1,4}(?:/[a-z]{1,4})?\s+)?(?:is|works|would\s+work|looks|seems)\s+(?:fine|ok|okay|good|acceptable|right|correct)|"
+                       r"yes,?\s+(?:that|this|your|it)\b[^.\n]{0,30}\b(?:fine|ok|okay|works|acceptable)|"
                        r"(?:that|this|it)(?:'s|\s+is)\s+(?:right|correct|wrong|incorrect)|"
                        r"yes,?\s+(?:that|this|your|it)\b[^.\n]{0,30}\b(?:correct|right)|"
                        r"you(?:'re|\s+are)\s+(?:right|correct|wrong)|you\s+got\s+it\s+(?:right|wrong))\b", re.I)
@@ -3881,10 +3962,21 @@ def _outline_sentences(it: dict[str, Any], body: str) -> list[str]:
     return essay.outline_sentences(it, body)
 
 
+_LONE_MARKER = re.compile(r"^\s*(?:\[\d+(?:\s*[,;\u2013-]\s*\d+)*\]\s*)+[.!?]?\s*$")
+
+
 def _sentences_of(text: str) -> list[str]:
+    """Sentences and lines of text. A citation marker that stands alone after the full stop ('... (1, 1, 2). [1]') belongs
+    to the sentence before it, so it is judged exactly like one with no full stop ('... (1, 1, 2) [1]')."""
     out = []
     for line in re.split(r"\n+", text or ""):
-        out += [x.strip() for x in re.split(r"(?<=[.!?])\s+", line) if x.strip()]
+        for x in re.split(r"(?<=[.!?])\s+", line):
+            if not x.strip():
+                continue
+            if out and _LONE_MARKER.match(x) and not _LONE_MARKER.match(out[-1]) and line.strip().endswith(x.strip()):
+                out[-1] = out[-1] + " " + x.strip()
+            else:
+                out.append(x.strip())
     return out
 
 
@@ -3928,41 +4020,116 @@ def _labelled_answer(it: dict[str, Any], text: str) -> bool:
     return False
 
 
-_SENT_SPAN = re.compile(r"[^.!?\n]+(?:[.!?]+(?=\s|$)|$)|\n+")
+_SENT_SPAN = re.compile(r"[^\n]+?(?:[.!?]+(?=\s|$)|(?=\n|$))|\n+")
 
 
-def _source_forms(sources: list[Any] | None, n: int) -> set[str] | None:
-    """The number forms of cited source n when it is a chunk that is not graded work, else None."""
-    if not sources or not 1 <= n <= len(sources):
-        return None
-    src = sources[n - 1]
-    text, graded = (src.get("text"), src.get("graded")) if isinstance(src, dict) else (str(src or ""), False)
-    return None if graded or not (text or "").strip() else _all_forms(text)
+def _source_texts(sources: list[Any] | None, cites: list[int]) -> list[str]:
+    """The text of each cited source n that is a chunk of the course materials (not graded work)."""
+    out = []
+    for n in cites:
+        if sources and 1 <= n <= len(sources):
+            src = sources[n - 1]
+            text, graded = (src.get("text"), src.get("graded")) if isinstance(src, dict) else (str(src or ""), False)
+            if not graded and (text or "").strip():
+                out.append(text)
+    return out
+
+
+_NOT_VAR = {"it", "is", "as", "at", "in", "of", "to", "so", "we", "he", "be", "by", "do", "if", "or", "on", "up", "us", "my",
+            "an", "no", "go", "am", "a", "i", "me", "the"}
+_VAR_BIND = re.compile(r"(?<![a-z0-9_.])([a-z]{1,2}\d{0,3}|lambda\d*|lam\d*)\s*(?:=|:|≈|\bis\b|\bequals?\b|\bare\b)\s*"
+                       r"(?:about\s+|approximately\s+)?(-?\d[\d./]*)")
+_NAME_BEFORE = re.compile(r"(?<![a-z0-9_.])([a-z]{1,2}\d{0,3}|lambda\d*|lam\d*)\s*(?:=|:|≈|\bis\b|\bequals?\b|\bare\b)\s*[\[(]?\s*$")
+
+
+def _plain_small(n: str) -> bool:
+    """A whole number of at most 12 in size: it appears in any small example, so it never shows a binding on its own."""
+    return bool(re.fullmatch(r"-?\d{1,2}", n)) and abs(int(n)) <= 12
+
+
+def _seq_in(seq: list[str], h: "_Hay") -> list[int]:
+    """Positions in h where the run seq appears, in the same order, inside one of its sequences."""
+    n = len(seq)
+    out = []
+    for pos, s2 in h.seqs:
+        for i in range(0, len(s2) - n + 1):
+            if all(num_eq(a, b) or num_eq(b, a) for a, b in zip(seq, s2[i:i + n])):
+                out.append(pos)
+                break
+    return out
+
+
+def shown_in(text: str, source_texts: list[str], own: "set[str] | frozenset[str]" = frozenset()) -> bool:
+    """Is every number the text states shown by the cited course sources with the same binding, and is at least one of
+    them shown? A run of numbers (a vector, a matrix row, a list) must be printed in the same order by one source; a
+    variable bound to a value ('x = 3', 'l21 = 2', 'd = 11') must be bound to it there too; any other number must be
+    printed. A whole number of at most 12 shows nothing on its own: bare digits that turn up somewhere in a chunk never
+    qualify. own: numbers the student typed, which count as printed."""
+    if not source_texts or not (text or "").strip():
+        return False
+    hs = _Hay(strip_constants(text))
+    srcs = [_Hay(t) for t in source_texts]
+    anchored = False
+    for pos, seq in hs.seqs:
+        if len(seq) < 2 or all(c in own for c in seq):
+            continue
+        mname = _NAME_BEFORE.search(hs.low[max(0, pos - 40):pos])
+        name = mname.group(1) if mname and mname.group(1) not in _NOT_VAR else ""
+        ok = False
+        for h in srcs:
+            for tpos in _seq_in(seq, h):
+                if not name or h.named_before(name, tpos):
+                    ok = True
+        if not ok:
+            return False
+        anchored = True
+    for m in _VAR_BIND.finditer(hs.low):
+        name, val = m.group(1), _canon(m.group(2))
+        if name in _NOT_VAR or val in own:
+            continue
+        if not any(h.named(name, val) for h in srcs):
+            return False
+        anchored = True
+    printed = [c for h in srcs for _, c, _ in h.nums]
+    for _, c, _ in hs.nums:
+        if _plain_small(c) or c in own:
+            continue
+        if not any(c == t or num_eq(c, t) or num_eq(t, c) for t in printed):
+            return False
+        anchored = True
+    return anchored
 
 
 def _all_in_source(text: str, source: Any) -> bool:
-    forms = _source_forms([source], 1)
-    fm = forms_map(strip_constants(text or ""))
-    return bool(fm) and forms is not None and all(fm[k] & forms or k in forms for k in fm)
+    texts = _source_texts([source], [1])
+    return bool(texts) and shown_in(text or "", texts)
 
 
 def data_sentences(text: str, sources: list[Any] | None) -> str:
-    """The text with the sentences that cite a chunk of the course materials (not graded work) and carry only numbers
-    that chunk prints blanked: a worked example or a constant quoted from the textbook is data, whatever it equals."""
+    """The text with the sentences that cite a chunk of the course materials (not graded work) and state only what that
+    chunk itself shows (see shown_in) blanked: a worked example or a constant quoted from the textbook is data, whatever
+    it equals. Bare digits that merely appear in the chunk never qualify."""
     if not sources or not text:
         return text
     out, last = [], 0
+    spans: list[list[int]] = []
     for m in _SENT_SPAN.finditer(text):
-        sent = m.group(0)
+        # a marker standing alone after the full stop belongs to the sentence before it
+        if spans and _LONE_MARKER.match(m.group(0)) and text[spans[-1][1]:m.start()].strip() == "" \
+                and "\n" not in text[spans[-1][1]:m.start()] and text[spans[-1][0]:spans[-1][1]].strip():
+            spans[-1][1] = m.end()
+        else:
+            spans.append([m.start(), m.end()])
+    for st, en in spans:
+        sent = text[st:en]
         cites = [int(n) for cm in _CITE_RX.finditer(sent) for n in re.findall(r"\d+", cm.group(1))]
         if cites and len(sent.split()) >= 4:
             body = _CITE_RX.sub(" ", sent)
-            fm = forms_map(strip_constants(body))
-            forms = [f for f in (_source_forms(sources, n) for n in cites) if f is not None]
-            if fm and forms and all(any(fm[k] & f or k in f for f in forms) for k in fm):
-                out.append(text[last:m.start()])
+            texts = _source_texts(sources, cites)
+            if texts and shown_in(body, texts):
+                out.append(text[last:st])
                 out.append(re.sub(r"[^\s]", " ", sent))  # same length, so nothing shifts
-                last = m.end()
+                last = en
     out.append(text[last:])
     return "".join(out)
 
