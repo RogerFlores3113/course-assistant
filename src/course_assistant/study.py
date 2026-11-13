@@ -949,8 +949,11 @@ def _section_chunks(store: Store, chunk_id: int, cap: int = 4) -> list[dict[str,
 
 def _card_gives_away(store: Store, course_id: int, front: str, back: str) -> bool:
     integ = _mod("integrity")
-    guard = getattr(integ, "check_guide", None) or getattr(integ, "check_reply", None)
-    return bool(guard and guard(store, course_id, front, f"{front}\n{back}"))
+    card = getattr(integ, "check_card", None)
+    if card:
+        return bool(card(store, course_id, front, back))
+    reply = getattr(integ, "check_reply", None)
+    return bool(reply and reply(store, course_id, front, f"{front}\n{back}"))
 
 
 def make_flashcards(store: Store, course_id: int, provider, *, material_id: int | None = None, topic: str = "",

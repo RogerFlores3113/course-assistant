@@ -733,7 +733,8 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
         else:
             sc = score_text(q, b)
             if sc == 0 and check and it["kind"] in ("problem", "proof"):
-                shared = len(q.tok & b.tok)
+                shared = len(q.tok & b.tok) + sum(1 for a in set(re.findall(r"\b[A-Z]{2,4}\b", q.raw))
+                                                  if re.search(rf"\b{a}\b", b.raw))
                 if shared >= 2 or (shared >= 1 and _POSSESSIVE.search(q.raw)):
                     sc = 0.6
         if sc > 0:
@@ -1370,4 +1371,19 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
     for it in essays:
         if _outline_sentences(it, clean) and (len(content_tokens(f"{title} {clean}") & _essay_topic_tokens(it)) >= 2):
             return _hit(it, "outline")
+    return None
+
+
+def check_card(store, course_id: int, front: str, back: str) -> dict | None:
+    """The graded item a flashcard gives away (its own numbers in the card, worked or not), or None. Cards are short,
+    so unlike check_guide this does not treat a brief back as an answer fragment."""
+    text = f"{front}\n{back}"
+    hit = check_reply(store, course_id, front, text)
+    if hit:
+        return hit
+    r = _Text(_CITE_STRIP.sub("", text))
+    for it in graded_view(store, course_id):
+        if it["kind"] == "problem" and (it.get("body") or "").strip() and \
+                _leaks_problem(r, _Text(it["body"]), text, True, worked_required=False):
+            return _hit(it, "card")
     return None
