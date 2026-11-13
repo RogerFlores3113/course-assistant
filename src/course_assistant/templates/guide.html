@@ -11,6 +11,7 @@
 <h1>{{ g.title }}</h1><p class="muted small">{{ g.created_at[:10] }}{% if g.model %} &middot; {{ g.model }}{% endif %}</p></div>
 {% if g.question and g.kind in ('answer', 'twin') %}<p><strong>Question:</strong> {{ g.question }}</p>
 {% elif g.question and g.kind in ('missed', 'primer') %}<p><strong>Lecture:</strong> {{ g.question }}</p>{% endif %}
+{% if g.kind == 'primer' and g.data is mapping and g.data.used_materials is defined %}<p class="muted small"><strong>Used materials:</strong> {% if g.data.used_materials %}{% for u in g.data.used_materials %}{{ u.title }}{% if u.why %} ({{ u.why }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}{% else %}none linked to this lecture, so this primer comes from the syllabus reading and related notes{% endif %}.</p>{% endif %}
 {% if graph %}
 <section aria-labelledby="map-h"><h2 id="map-h">Concept map</h2>
 {% if graph.empty %}<p class="muted">This map has no concepts.</p>{% else %}

@@ -730,10 +730,10 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                              field=("upload", "event_id"))
             lecture_date = lecture_date.strip() or lecture["date"]
 
-        def run() -> tuple[list[str], list[str], list[str]]:
+        def run() -> tuple[list[str], list[str], list[str], list[dict[str, Any]]]:
             importers = _mod("importers")
             bad = getattr(importers, "ImportError_", ())
-            done, errors, already = [], [], []
+            done, errors, already, reports = [], [], [], []
             for up in files:
                 name = Path(up.filename or "file").name or "file"
                 tmpdir = Path(tempfile.mkdtemp(prefix="ca-upload-"))
@@ -747,20 +747,27 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                                 raise ValueError("That file is too large (the limit is 2 GB).")
                             out.write(chunk)
                     known = {m["id"] for m in store.materials(course_id)}
-                    mid = importers.import_file(store, course_id, tmp, kind=kind or None, original_name=name,
-                                                lecture_date=lecture_date)
+                    one = getattr(importers, "import_file_report", None)
+                    if one:
+                        rep = one(store, course_id, tmp, kind=kind or None, original_name=name, lecture_date=lecture_date)
+                    else:  # an importer without reports: the id alone, no line
+                        mid = importers.import_file(store, course_id, tmp, kind=kind or None, original_name=name,
+                                                    lecture_date=lecture_date)
+                        rep = {"material_id": mid, "line": name, "skipped": [], "already_saved": False}
+                    mid = rep["material_id"]
                     if mid not in known and lecture:
                         store.update_material(mid, event_id=lecture["id"])
                     (already if mid in known else done).append(name)
+                    reports.append(rep)
                 except Exception as e:
                     shown = _friendly(e) if (isinstance(e, ValueError) or (bad and isinstance(e, bad))) else f"Could not read it ({_friendly(e)})"
                     errors.append(f"{name}: {shown}")
                 finally:
                     shutil.rmtree(tmpdir, ignore_errors=True)
-            return done, errors, already
+            return done, errors, already, reports
 
         try:
-            done, errors, already = await work(run)
+            done, errors, already, reports = await work(run)
         except _Missing:
             return after(request, course_id, "materials", error="The importer is not available yet.")
         parts = []
@@ -769,7 +776,13 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                          + (f" Linked to {clean_event_title(lecture['title'])}." if lecture else ""))
         if already:
             parts.append(f"Already saved, nothing added: {', '.join(already)}.")
-        return after(request, course_id, "materials", notice=" ".join(parts), error=" ".join(errors))
+        # one line per file: what it was taken for, how many passages it made and anything left out. A page swap shows
+        # them as a list under the notice; a plain post folds the files that had something left out into the notice.
+        if is_htmx(request):
+            return after(request, course_id, "materials", notice=" ".join(parts), error=" ".join(errors),
+                         import_report=[r["line"] for r in reports])
+        left_out = [r["line"] for r in reports if r["skipped"] and not r["already_saved"]]
+        return after(request, course_id, "materials", notice=" ".join([*parts, *left_out]), error=" ".join(errors))
 
     @app.post("/courses/{course_id}/materials/url")
     async def add_url(request: Request, course_id: int, url: str = Form(""), kind: str = Form("website")):

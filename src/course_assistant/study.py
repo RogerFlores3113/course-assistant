@@ -528,6 +528,40 @@ def _name_has_number(m: dict[str, Any], num: str) -> bool:
     return bool(re.search(rf"(?<![a-z0-9])(?:lecture|lec|l|week|wk|class|session)[\s_\-#.]*0*{num}(?!\d)", names))
 
 
+_MONTH_NUM = {n: i for i, names in enumerate(
+    ("jan january", "feb february", "mar march", "apr april", "may", "jun june", "jul july", "aug august",
+     "sep sept september", "oct october", "nov november", "dec december"), 1) for n in names.split()}
+_NAME_MD = re.compile(r"(?<![a-z0-9])([a-z]{3,9})\.?[\s_\-]*(\d{1,2})(?:st|nd|rd|th)?(?![0-9])", re.I)
+_NUM_MD = re.compile(r"(?<![0-9])(?:(20\d{2})[-/.])?(\d{1,2})[-/.](\d{1,2})(?![0-9])")
+
+
+def _name_dates(m: dict[str, Any]) -> set[tuple[int | None, int, int]]:
+    """(year or None, month, day) for every date written in a material's title or file name: 'Oct 6', 'October 6th',
+    '10/6', '2026-10-06'. A bare number after a month word counts only when the word is a month ('Oct 6 lecture')."""
+    names = " ".join(str(m.get(k, "")) for k in ("title", "original_name", "filename"))
+    out: set[tuple[int | None, int, int]] = set()
+    for a in _NAME_MD.finditer(names):
+        mon = _MONTH_NUM.get(a.group(1).lower())
+        if mon and 1 <= int(a.group(2)) <= 31:
+            out.add((None, mon, int(a.group(2))))
+    for a in _NUM_MD.finditer(names):
+        mon, day = int(a.group(2)), int(a.group(3))
+        if a.group(1) and 1 <= mon <= 12 and 1 <= day <= 31:
+            out.add((int(a.group(1)), mon, day))
+        elif not a.group(1) and 1 <= mon <= 12 and 1 <= day <= 31:
+            out.add((None, mon, day))
+    return out
+
+
+def _name_has_date(m: dict[str, Any], ev: dict[str, Any]) -> bool:
+    """The material's name carries the lecture's own month and day (and year, when it writes one)."""
+    d = str(ev.get("date") or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+        return False
+    y, mo, da = int(d[:4]), int(d[5:7]), int(d[8:10])
+    return any(mm == mo and dd == da and yy in (None, y) for yy, mm, dd in _name_dates(m))
+
+
 def _topic_words(ev: dict[str, Any]) -> set[str]:
     text = f"{clean_title(ev)} {ev.get('topics') or ''}".lower()
     return {w for w in re.findall(r"[a-z]{4,}", text) if w not in _GENERIC}
@@ -583,6 +617,8 @@ def link_suggestions(store: Store, course_id: int, events: list[dict[str, Any]] 
             num = _lecture_number(e)
             if num is not None and _name_has_number(m, num):
                 return 100
+            if _name_has_date(m, e):
+                return 90
             sc = _title_score(m, e, common)
             return sc if sc >= 2 else 0
 
@@ -636,6 +672,9 @@ def lecture_materials(store: Store, course_id: int, ev: dict[str, Any]) -> list[
         if num is not None and _name_has_number(m, num):
             add(m, "matched by lecture number in its name")
             continue
+        if _name_has_date(m, ev):
+            add(m, "matched by date in its name")
+            continue
         title_words = {w for w in re.findall(r"[a-z]{4,}", f"{m['title']} {m.get('original_name', '')}".lower())
                        if w not in _GENERIC}
         if num is None or not re.search(r"(?:lecture|lec|week)[\s_\-#.]*\d+", m["title"].lower()):
@@ -676,6 +715,13 @@ def _lecture_sources(store: Store, course_id: int, ev: dict[str, Any], cap: int 
         related = [x for x in _search(store, course_id, topic_q, 14, exclude_graded=True)
                    if x["material_kind"] not in ("past_offering", "assignment", "syllabus")
                    and not _rfn("is_scaffold_chunk", x["text"], x.get("heading", ""))]
+        # padding: a passage that shares only 'matrix' or 'equations' with the topic says nothing about it
+        tell_fn = getattr(_mod("retrieval"), "telling_terms", None)
+        tell = tell_fn(store, course_id, topic_q) if tell_fn else []
+        if tell:
+            related = [x for x in related if _mod("retrieval").mentions_any(x, tell)]
+        if len(own) >= 4:  # the lecture's own notes carry the primer: a few related passages, not a second lecture
+            related = related[:3]
         sources = _merge(own, syl, related, cap=cap)
     else:
         syl = _search(store, course_id, query, 3, kinds=["syllabus"])
@@ -1464,6 +1510,26 @@ def _card_gives_away(store: Store, course_id: int, front: str, back: str, source
     return bool(reply and reply(store, course_id, front, f"{front}\n{back}"))
 
 
+def _card_worthy(sources: list[dict[str, Any]], *, topic_search: bool = False) -> list[dict[str, Any]]:
+    """Flashcards are made from what a book or lecture teaches: not exercise lists, glossaries, chapter summaries,
+    introductions, title blocks, and (for a topic search) not the syllabus or an earlier term's schedule. When nothing
+    else is left the original list stays, so a thin material still makes cards."""
+    r = _mod("retrieval")
+    scaffold, title_only = getattr(r, "is_scaffold_chunk", None), getattr(r, "is_title_only", None)
+    admin = getattr(r, "_is_admin_chunk", None)
+
+    def worthy(x):
+        if scaffold and scaffold(x["text"], x.get("heading", "")):
+            return False
+        if title_only and title_only(x["text"], x.get("heading", "")):
+            return False
+        if topic_search and (x.get("material_kind") in ("syllabus", "past_offering") or (admin and admin(x))):
+            return False
+        return True
+    kept = [x for x in sources if worthy(x)]
+    return kept or sources
+
+
 def make_flashcards(store: Store, course_id: int, provider, *, material_id: int | None = None, topic: str = "",
                     count: int = 12) -> FlashcardResult:
     _need(provider)
@@ -1480,13 +1546,14 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
                 raise ValueError("That material is marked as graded work, so the app will not make flashcards from it. "
                                  "Pick another material or type a topic.")
             concept_only = True  # a graded essay assignment: cards on concepts, requirements and the rubric only
-        mat_sources = _material_sources(store, material_id, 10_000)  # the whole material
+        mat_sources = _card_worthy(_material_sources(store, material_id, 10_000))  # the whole material, minus scaffolding
         if topic.strip():
-            hits = _search(store, course_id, topic, MAX_SOURCES, material_ids=[material_id])
+            hits = _card_worthy(_search(store, course_id, topic, MAX_SOURCES, material_ids=[material_id]))
             hit_ids = {s["chunk_id"] for s in hits}
             rest = [s for s in mat_sources if s["chunk_id"] not in hit_ids]
             sources = _merge(hits, _spread_pick(rest, max(0, MAX_SOURCES - len(hits))), cap=MAX_SOURCES)
-            sources.sort(key=lambda s: [x["chunk_id"] for x in mat_sources].index(s["chunk_id"]))
+            order = {x["chunk_id"]: i for i, x in enumerate(mat_sources)}
+            sources.sort(key=lambda s: order.get(s["chunk_id"], len(order)))
         else:
             sources = _spread_pick(mat_sources, MAX_SOURCES)
         deck = m["title"]
@@ -1499,7 +1566,7 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
             for c in _section_chunks(store, h["chunk_id"])[1:]:
                 mm = store.material(c["material_id"]) or {}
                 extra.append(_source_from_chunk(c, mm.get("title", ""), mm.get("kind", "")))
-        sources = _merge(hits, extra, cap=MAX_SOURCES)
+        sources = _card_worthy(_merge(hits, extra, cap=MAX_SOURCES * 2), topic_search=True)[:MAX_SOURCES]
         deck = topic.strip()
     sources = _prepare(store, course_id, sources, keep_graded=concept_only)
     only = (" These sources are a graded essay assignment: make cards about concepts, key terms, requirements and what the "
