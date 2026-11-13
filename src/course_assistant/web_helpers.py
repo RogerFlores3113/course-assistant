@@ -436,7 +436,6 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
             "sources": _merge_sources([smap[k] for k in sorted(smap) if k in cited]),
             "unused_sources": _merge_sources([smap[k] for k in sorted(smap) if k not in cited]),
             "twin": is_twin, "concepts": is_concepts,
-            "essay_page": routed and data.get("kind") in ("essay", "proof"),  # one banner (the routing sentence) there
             "routing_note": routing_note, "ask_normal": ask_normal,
             "outside": has_outside, "not_covered": not_covered and not routed,
             "partly_covered": bool(partly and not routed), "partly_covered_note": PARTLY_COVERED_NOTE,
