@@ -976,10 +976,13 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
     from . import integrity  # late import: integrity builds on this module
 
     question = (question or "").strip()
-    graded = integrity.match_graded(store, course_id, question) if route else None
+    matched = integrity.match_graded(store, course_id, question)
+    graded = matched if route else None
     why = "match" if graded else ""
-    # a chat that recently touched a graded item has its REPLIES checked against that item (never its questions routed)
-    sticky = None if graded else integrity.sticky_item(store, course_id, question)
+    # a chat that recently touched a graded item has its REPLIES checked against that item (never its questions routed).
+    # "Ask normally" turns routing off only: the item the question or chat is about still has every reply checked.
+    sticky = None if graded else (matched if (matched and matched.get("id")) else None) or \
+        integrity.sticky_item(store, course_id, question)
     sources: list[Source] = []
     if not graded:
         sources = integrity.search_safe(store, course_id, question, limit=limit)
@@ -994,9 +997,10 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
         if marker is not None and route:
             graded, why = integrity.item_for_marker(store, course_id, marker or None, question), "marker"
         else:
-            graded = integrity.check_reply(store, course_id, question, raw, force_item=sticky if route else None,
-                                           sources=sources)
+            graded = integrity.check_reply(store, course_id, question, raw, force_item=sticky, sources=sources)
             why = (graded or {}).get("reason", "reply")
+            if graded and not route:
+                why = "normal_reply"
             if graded and why == "soft_essay":
                 # one regeneration on a soft essay rule; if that still reads as essay prose, concepts mode
                 messages = messages + [{"role": "assistant", "content": raw}, {"role": "user", "content":
@@ -1004,11 +1008,13 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
                                         "without any sentence the student could submit as their own writing."}]
                 raw2 = provider.complete(system, messages, max_tokens=4000)
                 _, raw2 = integrity.read_marker(raw2)
-                again = integrity.check_reply(store, course_id, question, raw2, sources=sources)
+                again = integrity.check_reply(store, course_id, question, raw2, force_item=sticky, sources=sources)
                 if not again:
                     graded, raw = None, raw2
     if graded:
-        answer = integrity.twin(store, course_id, question, provider, graded, why)
+        # a soft essay hit already used its regeneration: the graded page then makes no further model call
+        answer = integrity.twin(store, course_id, question, provider, graded, why,
+                                **({"model_calls": 0} if why == "soft_essay" else {}))
     else:
         answer = parse_answer(raw, sources)
         title = question if len(question) <= 80 else question[:77].rstrip() + "..."

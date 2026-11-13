@@ -1064,6 +1064,8 @@ def explain(store: Store, course_id: int, provider, topic: str, *, depth: str = 
                              "back to how the course uses it. End with a section '## Check your understanding' that "
                              "has 2 questions for the student to try, with no answers."}[depth]
     hit = _mod("integrity").match_graded(store, course_id, topic)
+    if hit and hit.get("id") and hit.get("kind") != "essay" and not getattr(_mod("integrity"), "names_item", lambda t, i: True)(topic, hit):
+        hit = None  # a bare topic never turns into a twin
     if hit:  # a graded problem pasted into Explain: a twin (or coaching), decided before the model sees it
         return _route_graded(store, course_id, provider, topic, hit)
     sources = _search(store, course_id, topic, 10, exclude_graded=True)
@@ -1078,7 +1080,10 @@ _STOP_WORDS = {"the", "and", "with", "from", "that", "this", "problem", "questio
 
 
 def _graded_overlaps(store: Store, course_id: int, topic: str, limit: int = 3) -> list[dict[str, Any]]:
-    """Graded items the topic overlaps: the integrity matcher's pick, then items sharing words with the topic."""
+    """Graded items the request NAMES (their number or label, their distinctive numbers or words): the matcher's pick,
+    then any item the topic names. A bare topic like "LU factorization" names none. See _graded_offers."""
+    integ = _mod("integrity")
+    names_item = getattr(integ, "names_item", lambda text, item: True)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -1090,15 +1095,28 @@ def _graded_overlaps(store: Store, course_id: int, topic: str, limit: int = 3) -
             seen.add(key)
             out.append(g)
 
-    add(_mod("integrity").match_graded(store, course_id, topic))
-    words = {w for w in re.findall(r"[a-z]{5,}", topic.lower()) if w not in _STOP_WORDS and w not in _TOPIC_GENERIC}
+    hit = integ.match_graded(store, course_id, topic)
+    if hit and (not hit.get("id") or names_item(topic, hit) or hit.get("kind") == "essay"):
+        add(hit)
     for it in store.graded_items(course_id):
+        if (it.get("body") or "").strip() and names_item(topic, it):
+            add(dict(it, source="item"))
+    return out[:limit]
+
+
+def _graded_offers(store: Store, course_id: int, topic: str, limit: int = 3) -> list[dict[str, Any]]:
+    """Numeric graded items the topic only overlaps by words: offered as a button, never twinned unasked."""
+    words = {w for w in re.findall(r"[a-z]{5,}", topic.lower()) if w not in _STOP_WORDS and w not in _TOPIC_GENERIC}
+    named = {str(g.get("id")) for g in _graded_overlaps(store, course_id, topic)}
+    out = []
+    for it in store.graded_items(course_id):
+        if str(it["id"]) in named or (it.get("kind") or "problem") != "problem" or not (it.get("body") or "").strip():
+            continue
         text = f"{it.get('title', '')} {it.get('label', '')} {it.get('body', '')}".lower()
         iwords = set(re.findall(r"[a-z]{5,}", text)) - _TOPIC_GENERIC
-        # a key term meets the item when the words match or share a 5-letter stem (molarity ~ molar)
         hit = {w for w in words if w in iwords or any(w[:5] == x[:5] for x in iwords)}
-        if len(hit) >= 2 or (len(hit) == 1 and len(words) <= 2):
-            add(dict(it, source="item"))
+        if hit and it.get("label"):
+            out.append({"id": it["id"], "label": it["label"], "title": it.get("title", "")})
     return out[:limit]
 
 
@@ -1190,7 +1208,8 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     if not twins:
         body = f"{normal['body']}\n\n{disclaimer.FOOTER}"
         data = {"twin": False, "count": count, "mode": "answer", "blocks": normal["blocks"],
-                "outside": normal["outside"], "not_covered": normal["not_covered"], "twins": []}
+                "outside": normal["outside"], "not_covered": normal["not_covered"], "twins": [],
+                "graded_offers": _graded_offers(store, course_id, topic)}
         return store.add_guide(course_id, "practice", f"Practice: {topic}", body,
                                sources=_guide_sources(normal["sources"], normal["used"]), data=data, question=topic,
                                model=getattr(provider, "model", "") or "")
@@ -1235,7 +1254,8 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     mode = twins[0]["mode"] if only_twins and len({t['mode'] for t in twins}) == 1 else "answer"  # twin only if one was made
     data = {"twin": bool(real), "count": count, "mode": mode, "blocks": blocks, "outside": any(b["kind"] == "outside" for b in blocks),
             "not_covered": bool(normal and normal["not_covered"]), "graded": titles,
-            "twins": [{"graded": t["title"], "mode": t["mode"]} for t in twins]}
+            "twins": [{"graded": t["title"], "mode": t["mode"]} for t in twins],
+            "graded_offers": _graded_offers(store, course_id, topic)}
     return store.add_guide(course_id, "practice", f"Practice (twin): {topic}" if only_twins and real else f"Practice: {topic}", body,
                            sources=_guide_sources(all_sources, sorted(set(used))), data=data, question=topic,
                            model=getattr(provider, "model", "") or "")
