@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-theme="{{ theme() }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Course Assistant{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+{% set path = request.url.path %}
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="top">
+    <a class="brand" href="/">Course Assistant</a>
+    <nav aria-label="Main">
+      <a href="/" {% if path == '/' %}aria-current="page"{% endif %}>Courses</a>
+      <a href="/courses/new" {% if path == '/courses/new' %}aria-current="page"{% endif %}>Add a course</a>
+      <a href="/connect" {% if path == '/connect' %}aria-current="page"{% endif %}>Connect an AI</a>
+      <a href="/settings" {% if path == '/settings' %}aria-current="page"{% endif %}>Settings</a>
+    </nav>
+  </header>
+  <main id="main" tabindex="-1">
+    {% block flash %}{% include "_flash.html" %}{% endblock %}
+    {% block body %}{% endblock %}
+  </main>
+  <p id="busy" class="busy" role="status" aria-live="polite" hidden></p>
+  <footer class="foot">
+    Runs on this computer. Your materials stay here. <a href="/privacy">Privacy</a> &middot; v{{ version }}
+  </footer>
+</body>
+</html>

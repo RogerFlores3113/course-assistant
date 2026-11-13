@@ -1,0 +1,34 @@
+{% from "_answer.html" import answer %}
+<h2>Study</h2>
+{% if not ai.connected %}{% include "_connect_panel.html" %}{% endif %}
+{% if not has_materials %}<p class="flash warn">Add some materials first. The study tools only use what you have saved.</p>{% endif %}
+<div id="study-result" aria-live="polite">
+{% if result_view %}<div class="card result"><h3>{{ result_guide.title }}</h3>{{ answer(result_view) }}<p><a href="/guides/{{ result_guide.id }}">Open this guide on its own page</a></p></div>{% endif %}
+{% if cards_made %}<p class="flash ok">Made {{ cards_made }} flashcards. <a href="/flashcards/{{ course.id }}">Start reviewing</a></p>{% endif %}
+</div>
+<div class="tools">
+{% macro tool_form(action, title, blurb, busy) %}
+<form method="post" action="/courses/{{ course.id }}/study/{{ action }}" hx-post="/courses/{{ course.id }}/study/{{ action }}" hx-target="#course-body" hx-swap="outerHTML" data-busy="{{ busy }}" class="card form tool">
+  <h3>{{ title }}</h3><p class="muted">{{ blurb }}</p>{{ caller() }}
+  <button class="btn" type="submit" {% if not ai.connected %}disabled aria-disabled="true"{% endif %}>{{ title }}</button></form>
+{% endmacro %}
+{% call tool_form('primer', 'Pre-lecture primer', 'A short warm-up for an upcoming lecture.', 'Writing your primer. This can take up to a minute.') %}
+<label>Lecture <select name="event_id"><option value="">Next lecture</option>{% for e in events if e.kind == 'lecture' %}<option value="{{ e.id }}">{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>{% endcall %}
+{% call tool_form('exam', 'Exam guide', 'Everything since the last exam, organized.', 'Writing your exam guide. This can take up to a minute.') %}
+<label>Exam <select name="event_id"><option value="">Next exam</option>{% for e in events if e.kind in ('exam', 'quiz') %}<option value="{{ e.id }}">{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>{% endcall %}
+{% call tool_form('map', 'Concept map', 'How the ideas connect.', 'Building your concept map.') %}
+<label>Topic (optional) <input name="topic" placeholder="All of the course"></label>{% endcall %}
+{% call tool_form('explain', 'Explain a topic', 'Re-explained at the depth you pick.', 'Writing the explanation.') %}
+<label>Topic <input name="topic" required></label>
+<label>Depth <select name="depth">{% for v, l in depths %}<option value="{{ v }}" {% if v == 'standard' %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>{% endcall %}
+{% call tool_form('practice', 'Practice questions', 'Questions on a topic with worked answers. Graded topics get a twin problem.', 'Writing practice questions.') %}
+<label>Topic <input name="topic" required></label>
+<label>How many <input type="number" name="count" min="1" max="15" value="5"></label>{% endcall %}
+{% call tool_form('flashcards', 'Flashcards', 'Make cards from your materials. ' ~ due_cards ~ ' due now, ' ~ all_cards ~ ' in total.', 'Making flashcards.') %}
+<label>Topic (optional) <input name="topic"></label>
+<label>How many <input type="number" name="count" min="1" max="40" value="12"></label>{% endcall %}
+{% call tool_form('missed', 'What did I miss?', 'A catch-up on a lecture you skipped.', 'Writing your catch-up.') %}
+<label>Lecture <select name="event_id"><option value="">Choose a lecture</option>{% for e in past_lectures %}<option value="{{ e.id }}">{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>
+<label>Or a date <input type="date" name="day"></label>{% endcall %}
+</div>
+{% if all_cards %}<p><a class="btn ghost" href="/flashcards/{{ course.id }}">Review flashcards ({{ due_cards }} due)</a></p>{% endif %}

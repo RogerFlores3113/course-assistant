@@ -1,0 +1,11 @@
+{% extends "base.html" %}{% block title %}Connect an AI - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>Connect an AI</h1>
+<p>Claude Desktop and Codex can read your course materials through this app, cite the exact page, and save guides here. They can add things but never delete anything.</p>
+{% if results %}<div class="flash {{ 'ok' if results_ok else 'bad' }}" role="status">{% for r in results %}<p>{{ r }}</p>{% endfor %}</div>{% endif %}
+{% if not status.available %}<p class="flash warn">The connection helper is not available in this version.</p>{% endif %}
+<div class="card"><h2>Claude Desktop</h2><p>{{ 'Connected.' if status.claude else 'Not connected yet.' }} Quit Claude Desktop fully and reopen it after connecting.</p>
+<form method="post" action="/connect/claude"><button class="btn" type="submit">Connect Claude Desktop</button></form></div>
+<div class="card"><h2>Codex</h2><p>{{ 'Connected.' if status.codex else 'Not connected yet.' }} Restart Codex afterwards.</p>
+<form method="post" action="/connect/codex"><button class="btn" type="submit">Connect Codex</button></form>
+{% if status.snippet %}<details><summary>Set it up by hand</summary><pre><code>{{ status.snippet }}</code></pre></details>{% endif %}</div>
+<p>No AI app? <a href="/settings">Use an API key or local model in Settings</a>.</p></section>{% endblock %}

@@ -1,0 +1,13 @@
+{% macro answer(view) %}
+<div class="answer">
+  {% if view.twin %}<p class="twin-note"><strong>Worked twin problem.</strong> This is a similar problem with different numbers, solved step by step. Your original graded problem is left for you to solve.</p>{% endif %}
+  {% for b in view.blocks %}
+    {% if b.kind == 'outside' %}<div class="outside" role="group" aria-label="Not from your materials"><p class="outside-label">Not from your materials</p>{{ b.html }}</div>
+    {% else %}<div class="block">{{ b.html }}</div>{% endif %}
+  {% endfor %}
+  {% if view.sources %}<div class="sources"><h3>Sources</h3><ol>
+    {% for s in view.sources %}<li value="{{ s.n }}"><a href="{{ s.href }}">{{ s.title }}{% if s.label %}, {{ s.label }}{% endif %}</a></li>{% endfor %}</ol></div>
+  {% else %}<p class="muted">No passages from your materials were used for this answer.</p>{% endif %}
+  <p class="footer-note">{{ view.footer }}</p>
+</div>
+{% endmacro %}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}{% block title %}Settings - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>Settings</h1>
+<form method="post" action="/settings" class="form card">
+  <fieldset><legend>AI provider</legend>
+  <label class="check"><input type="radio" name="ai_provider" value="none" {% if ai_kind not in ('anthropic','local') %}checked{% endif %}> None (you can still use Claude Desktop or Codex from the <a href="/connect">Connect page</a>)</label>
+  <label class="check"><input type="radio" name="ai_provider" value="anthropic" {% if ai_kind == 'anthropic' %}checked{% endif %}> Anthropic API key</label>
+  <label class="check"><input type="radio" name="ai_provider" value="local" {% if ai_kind == 'local' %}checked{% endif %}> Local model server (such as LM Studio)</label></fieldset>
+  <fieldset><legend>Anthropic</legend>
+  <label>API key <input type="password" name="anthropic_api_key" autocomplete="off" placeholder="{{ 'A key is saved. Type a new one to replace it.' if has_key else 'Paste your key' }}"></label>
+  {% if has_key %}<p class="ok-t">A key is saved on this computer.</p><label class="check"><input type="checkbox" name="clear_key" value="1"> Remove the saved key</label>{% endif %}
+  <label>Model <select name="anthropic_model">{% for v, l in models %}<option value="{{ v }}" {% if model == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label></fieldset>
+  <fieldset><legend>Local server</legend>
+  <label>Server address <input name="local_base_url" value="{{ local_url }}" placeholder="http://127.0.0.1:1234"></label>
+  <label>Model name <input name="local_model" value="{{ local_model }}" placeholder="The model loaded in the server"></label></fieldset>
+  <fieldset><legend>Theme</legend>
+  {% for v in ('system', 'light', 'dark') %}<label class="check"><input type="radio" name="theme" value="{{ v }}" {% if (current_theme or 'system') == v %}checked{% endif %}> {{ v | capitalize }}</label>{% endfor %}</fieldset>
+  <div class="row"><button class="btn" type="submit">Save settings</button>
+  <button class="btn ghost" type="submit" formaction="/settings/test">Test connection</button></div>
+  <p class="muted small">Test connection uses the settings you last saved.</p>
+</form></section>{% endblock %}

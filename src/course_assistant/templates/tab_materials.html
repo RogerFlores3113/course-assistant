@@ -1,0 +1,37 @@
+<h2>Materials</h2>
+{% if not materials %}<div class="card empty"><p><strong>Nothing saved yet.</strong> Start with the syllabus: add it below with the kind set to Syllabus and the app pulls your exam and assignment dates into the Calendar. Then add lecture slides, readings and notes.</p></div>{% endif %}
+<div class="card">
+<h3>Add files</h3>
+<form method="post" action="/courses/{{ course.id }}/materials/upload" enctype="multipart/form-data" hx-post="/courses/{{ course.id }}/materials/upload" hx-encoding="multipart/form-data" hx-target="#course-body" hx-swap="outerHTML" data-busy="Reading your files. Big PDFs can take a moment." class="form">
+  <label>Files <input type="file" name="files" multiple required aria-describedby="fmts"></label>
+  <p id="fmts" class="muted small">Supported: {{ supported }}</p>
+  <div class="two"><label>What are they? <select name="kind"><option value="">Let the app guess</option>{% for k, l in material_kinds.items() %}<option value="{{ k }}">{{ l }}</option>{% endfor %}</select></label>
+  <label>Lecture date (optional) <input type="date" name="lecture_date"></label></div>
+  <button class="btn" type="submit">Add files</button>
+</form></div>
+<div class="two">
+<div class="card"><h3>Save a web page</h3>
+<form method="post" action="/courses/{{ course.id }}/materials/url" hx-post="/courses/{{ course.id }}/materials/url" hx-target="#course-body" hx-swap="outerHTML" data-busy="Saving the page. The app goes slowly on purpose." class="form">
+  <label>Web address <input type="url" name="url" required placeholder="https://..."></label>
+  <label>Kind <select name="kind"><option value="website">Course website</option><option value="handout">Handout</option><option value="textbook">Textbook</option></select></label>
+  <button class="btn" type="submit">Save page</button></form></div>
+<div class="card"><h3>Type a note</h3>
+<form method="post" action="/courses/{{ course.id }}/materials/note" hx-post="/courses/{{ course.id }}/materials/note" hx-target="#course-body" hx-swap="outerHTML" class="form">
+  <label>Title <input name="title" placeholder="Lecture 4 notes"></label>
+  <label>Your notes <textarea name="text" rows="4" required></textarea></label>
+  <button class="btn" type="submit">Save note</button></form></div>
+</div>
+{% if materials %}<h3>Saved materials</h3>
+<ul class="plain list">
+{% for m in materials %}<li class="row-item">
+  <div class="grow"><a href="/read/{{ m.id }}"><strong>{{ m.title }}</strong></a>
+  <span class="badge kind-{{ m.kind }}">{{ m.kind_label }}</span>
+  {% if m.graded %}<span class="badge warn-b">Graded work</span>{% endif %}
+  {% if m.added_by == 'ai_app' %}<span class="badge">Added by your AI app</span>{% endif %}<br>
+  <span class="muted small">{{ m.chunk_count }} passage{{ '' if m.chunk_count == 1 else 's' }}{% if m.lecture_date %} &middot; lecture {{ m.lecture_date | day }}{% endif %}</span>
+  {% if m.status == 'needs_transcription' %}<br><span class="status-note">{{ m.job_text or ('Waiting to be transcribed' if m.is_media else 'Photo of notes: waiting to be read') }}{% if m.status_note %}. {{ m.status_note }}{% endif %}</span>
+  {% elif m.status == 'error' %}<br><span class="status-note bad-t">Problem: {{ m.status_note or 'could not be read' }}</span>
+  {% elif m.job_text %}<br><span class="status-note">{{ m.job_text }}</span>{% endif %}</div>
+  <div class="actions">
+    <form method="post" action="/materials/{{ m.id }}/graded" hx-post="/materials/{{ m.id }}/graded" hx-target="#course-body" hx-swap="outerHTML"><input type="hidden" name="graded" value="{{ 0 if m.graded else 1 }}"><button class="btn small ghost" type="submit">{{ 'Unmark graded' if m.graded else 'Mark as graded' }}</button></form>
+    <a class="btn small ghost" href="/materials/{{ m.id }}/delete" aria-label="Delete {{ m.title }}">Delete</a></div></li>{% endfor %}</ul>{% endif %}
