@@ -2,9 +2,9 @@
 {% block body %}
 <div class="course-head" style="{{ accent_style(accent) }}"><p class="crumbs"><a href="/courses/{{ course.id }}/study">{{ course.name }}</a> &rsaquo; Flashcards</p><h1>Flashcards: {{ course.name }}</h1>
 <p class="muted">{% if cram %}Cram mode: every card, weakest first.{% else %}{{ due }} due now, {{ total }} in total.{% endif %}</p>
-{% if total %}<p class="cram-bar"><a class="btn small ghost" href="{{ toggle_url }}" {% if cram %}aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>{{ 'Cram mode: on (turn off)' if cram else 'Cram mode' }}</a>
-{% if filter_materials %}<form method="get" action="/flashcards/{{ course.id }}" class="inline-filter"><label>Material <select name="material" onchange="this.form.submit()"><option value="">All materials</option>{% for m in filter_materials %}<option value="{{ m.id }}" {% if material_id == m.id %}selected{% endif %}>{{ m.title }}</option>{% endfor %}</select></label>
-{% if cram %}<input type="hidden" name="cram" value="1">{% endif %}<noscript><button class="btn small ghost" type="submit">Filter</button></noscript></form>{% endif %}</p>{% endif %}</div>
+{% if total %}<div class="cram-bar"><a class="btn small ghost" href="{{ toggle_url }}">{{ 'Cram mode: on (turn off)' if cram else 'Cram mode' }}</a>
+{% if filter_materials %}<form method="get" action="/flashcards/{{ course.id }}" class="inline-filter"><label>Material <select name="material"><option value="">All materials</option>{% for m in filter_materials %}<option value="{{ m.id }}" {% if material_id == m.id %}selected{% endif %}>{{ m.title }}</option>{% endfor %}</select></label>
+{% if cram %}<input type="hidden" name="cram" value="1">{% endif %}<button class="btn small" type="submit">Filter</button></form>{% endif %}</div>{% endif %}</div>
 {% if card %}
 <section class="card flashcard" data-flashcards>
   <h2>{% if cram %}Card {{ position }} of {{ count }}{% else %}Card 1 of {{ due }} due{% endif %}</h2>
@@ -26,5 +26,5 @@
   <button class="btn small ghost" type="submit">{{ 'Turn shortcuts off' if shortcuts_enabled() else 'Turn shortcuts on' }}</button></p></form>
 {% else %}<div class="card empty"><h2>{{ ('Cram round finished' if cram else 'All caught up') if total else 'No flashcards yet' }}</h2>
 <p>{% if total and cram %}You went through every card in this round.{% elif total %}Nothing is due right now. Come back later, or make more cards.{% else %}Make cards from your materials on the Study tab.{% endif %}</p>
-<p><a class="btn" href="/courses/{{ course.id }}/study">Go to Study</a></p></div>{% endif %}
+<p><a class="btn" href="/courses/{{ course.id }}/study">Go to Study</a>{% if total and cram %} <a class="btn ghost" href="/flashcards/{{ course.id }}?cram=1{% if material_id %}&amp;material={{ material_id }}{% endif %}">Start another round</a>{% endif %}</p></div>{% endif %}
 {% endblock %}

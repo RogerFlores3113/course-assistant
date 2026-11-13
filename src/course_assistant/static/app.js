@@ -69,22 +69,35 @@
     var p = document.getElementById("player");
     if (!p) { return; }
     p.currentTime = parseFloat(b.getAttribute("data-seek")) || 0;
-    p.play && p.play();
     p.scrollIntoView({ block: "nearest" });
+    // The button keeps focus. Play only if the person was already listening; otherwise say where it is parked.
+    if (!p.paused) { say("Moved the recording to " + (b.textContent || "").replace(/^\s*Play from\s*/, "").trim() + ". Still playing."); }
+    else { say("Recording is at " + (b.textContent || "").replace(/^\s*Play from\s*/, "").trim() + ". Press play on the player to listen."); }
   });
 
   // ---- Long AI calls through htmx -------------------------------------------------------------------------
-  var announced = false, hadBusy = false;
+  // htmx overwrites detail.elt with the swapped-in element before afterSettle, so the element the person
+  // actually used is recorded here, when the request starts.
+  var announced = false, clicked = null, clickedPath = "";
   function busyText(elt) {
     var holder = elt && elt.closest && elt.closest("[data-busy]");
     return holder ? holder.getAttribute("data-busy") : "";
   }
+  function requestElt(e) { return (e.detail.requestConfig && e.detail.requestConfig.elt) || e.detail.elt; }
+  function requestPath(e) {
+    var p = e.detail.pathInfo && e.detail.pathInfo.requestPath;
+    if (p) { return String(p); }
+    var el = requestElt(e);
+    return (el && el.getAttribute && (el.getAttribute("hx-post") || el.getAttribute("hx-get"))) || "";
+  }
   document.body.addEventListener("htmx:beforeRequest", function (e) {
-    var form = formOf(e.detail.elt);
+    var elt = requestElt(e);
+    var form = formOf(elt);
     if (form && form.getAttribute("data-inflight")) { e.preventDefault(); return; } // never send two AI calls
     announced = false;
-    var msg = busyText(e.detail.elt);
-    hadBusy = !!msg;
+    clicked = elt;
+    clickedPath = requestPath(e);
+    var msg = busyText(elt);
     lock(form, true);
     var target = e.detail.target; if (target && target.setAttribute) { target.setAttribute("aria-busy", "true"); }
     if (msg) { showToast(msg); say(msg); }
@@ -109,40 +122,59 @@
   document.body.addEventListener("htmx:timeout", function () {
     failed("This is taking too long and was stopped. Try again.");
   });
+  // Nothing is announced here. The result (or the error) is announced once, from afterSettle or from failed().
   document.body.addEventListener("htmx:afterRequest", function (e) {
-    lock(formOf(e.detail.elt), false);
+    lock(formOf(requestElt(e)), false);
     var b = document.getElementById("course-body"); if (b) { b.removeAttribute("aria-busy"); }
     hideToast();
-    if (hadBusy && !announced) { say("Done."); }
-    hadBusy = false;
   });
 
-  function requestPath(e) {
-    var p = e.detail.pathInfo && e.detail.pathInfo.requestPath;
-    if (p) { return String(p); }
-    var el = e.detail.requestConfig && e.detail.requestConfig.elt || e.detail.elt;
-    return (el && (el.getAttribute("hx-post") || el.getAttribute("hx-get"))) || "";
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function leadingNumber(el) { var m = el && /^\s*(\d+)/.exec(el.textContent); return m ? parseInt(m[1], 10) : 0; }
+  // "Answer ready. 3 sources, 1 citation removed, 1 quote not found."
+  function answerSummary(scope, lead) {
+    var parts = [plural(scope.querySelectorAll(".sources:not(.also) li").length, "source", "sources")];
+    var removed = leadingNumber(scope.querySelector("[data-removed-citations]"));
+    var quotes = leadingNumber(scope.querySelector("[data-unverified-quotes]"));
+    if (removed) { parts.push(plural(removed, "citation", "citations") + " removed"); }
+    if (quotes) { parts.push(plural(quotes, "quote", "quotes") + " not found"); }
+    return lead + " " + parts.join(", ") + ".";
   }
-  // After the course area is replaced: title, announcement, and focus on what is new.
+  // After the course area is replaced: title, one announcement, and focus on what is new.
+  // One rule for GET tab links: announce "<Tab> page" and focus the tab heading. Everything else: focus the result.
   document.body.addEventListener("htmx:afterSettle", function (e) {
     var body = document.getElementById("course-body");
     if (!body || !body.hasAttribute("data-title")) { return; }
-    document.title = body.getAttribute("data-title");
-    var path = requestPath(e);
+    var title = body.getAttribute("data-title");
+    document.title = title;
+    var path = clickedPath || requestPath(e);
+    var tabSwitch = !!(clicked && clicked.hasAttribute && clicked.hasAttribute("data-tab-link"));
     var invalid = body.querySelector("[aria-invalid='true']");
     var bad = body.querySelector(".flash.bad");
     var ok = body.querySelector(".flash.ok");
     var message = (bad || ok) ? (bad || ok).textContent.replace(/\s+/g, " ").trim() : "";
-    var tabSwitch = !!(e.detail.elt && e.detail.elt.hasAttribute && e.detail.elt.hasAttribute("data-tab-link"));
-    var target = null;
-    if (invalid) { target = invalid; }
-    else if (bad) { target = bad; }
-    else if (tabSwitch) { target = body.querySelector("#tab-panel h2"); }
-    else if (/\/ask$/.test(path)) { var hs = body.querySelectorAll("[data-answer-heading]"); target = hs[hs.length - 1] || ok; }
-    else if (/\/study\//.test(path)) { target = body.querySelector("#study-result h3") || body.querySelector("#study-result .flash") || ok; }
-    else { target = ok || body.querySelector("#tab-panel h2"); }
-    if (message) { announced = true; say((bad ? "" : "Done. ") + message, !!bad); }
-    else if (tabSwitch) { announced = true; say(body.getAttribute("data-title").replace(/ - Course Assistant$/, "") + " page"); }
+    var target = null, speech = "", loud = false;
+    if (tabSwitch) {
+      target = body.querySelector("#tab-panel h2");
+      speech = title.split(" - ")[0] + " page";
+    } else if (invalid || bad) {
+      target = invalid || bad; speech = message; loud = true;
+    } else if (/\/ask$/.test(path)) {
+      var hs = body.querySelectorAll("[data-answer-heading]");
+      target = hs[hs.length - 1] || ok;
+      if (hs.length) { speech = answerSummary(hs[hs.length - 1].parentNode, "Answer ready."); }
+      else if (message) { speech = message; }
+    } else if (/\/study\//.test(path)) {
+      var res = body.querySelector("#study-result");
+      target = body.querySelector("#study-result h3") || body.querySelector("#study-result .flash") || ok;
+      if (res && res.querySelector(".answer")) { speech = answerSummary(res, "Your guide is ready."); }
+      else if (message) { speech = message; }
+    } else {
+      target = ok || body.querySelector("#tab-panel h2");
+      speech = message;
+    }
+    if (speech && !announced) { say(speech, loud); }
+    announced = false;
     focusEl(target);
   });
 
@@ -163,6 +195,11 @@
   // never inside a field, never with a modifier key.
   var deck = document.querySelector("[data-flashcards]");
   if (deck) {
+    // After a grade the next card is a new page: put focus on its heading ("Card 2 of 4") unless a hash or flash won.
+    window.addEventListener("load", function () {
+      if (location.hash || document.querySelector(".chunk.hit") || document.querySelector("main [aria-invalid='true'], main .flash")) { return; }
+      var h = deck.querySelector("h2"); if (h) { focusEl(h); }
+    });
     var reveal = document.getElementById("reveal"), ans = document.getElementById("answer");
     var back = document.getElementById("answer-text");
     var show = function () {

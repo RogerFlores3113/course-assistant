@@ -484,7 +484,7 @@ def test_p5_ai_forms_cannot_double_submit_and_have_busy_text(ready):
     assert dash.count("data-busy=") >= 2  # primer and exam guide forms say what is happening
     assert "Make a primer<span class=\"visually-hidden\"> for Lecture 1</span>" in dash
     js = (STATIC / "app.js").read_text()
-    assert 'say("Done.")' in js  # a done announcement when busy ends
+    assert "Answer ready." in js  # a real summary when the result arrives (not a bare "Done.")
 
 
 def test_p5_done_and_focus_logic_present_in_js():
