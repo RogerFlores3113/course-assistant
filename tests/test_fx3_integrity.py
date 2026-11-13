@@ -66,7 +66,7 @@ def model(leaks=None, default="Here is a plain answer."):
     (["x = (1, 1, 2)"], "x = [1 1 2]^T", True), (["x = (1, 1, 2)"], "x is one, one, two", True),
     (["x = (1, 1, 2)"], "$x=\\begin{bmatrix}1\\\\1\\\\2\\end{bmatrix}$", True),
     (["x = (1, 1, 2)"], "x1 = 1, x2 = 1, x3 = 2", True), (["x = (1, 1, 2)"], "eigenvectors (1,1) and (1,-2)", False),
-    (["5.11 g"], "roughly 5.1 g", True), (["5.11 g"], "5.110", True), (["5.11 g"], "5.2 g", False),
+    (["5.11 g"], "roughly 5.1 g", False), (["5.11 g"], "5.110", True), (["5.11 g"], "5.2 g", False),
     (["C3H4O3"], "The empirical formula is C3H4O3", True), (["C3H4O3"], "C_3H_4O_3", True),
     (["x = -3/2"], "x = -1.5", True), (["L = [[1,0,0],[2,1,0]]"], "L = [1 0 0; 2 1 0]", True),
     (["x = (2, 1, -2)"], "x is two, one, minus two", True),

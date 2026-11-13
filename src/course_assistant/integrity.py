@@ -159,9 +159,9 @@ _TENS_UNITS = re.compile(r"\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|nin
 _CARDINAL = re.compile(r"\b(" + "|".join(sorted(_WORDNUM, key=len, reverse=True)) + r")\b", re.I)
 _DOZEN = re.compile(r"\b(?:a\s+)?dozen\b", re.I)
 
-_NUM = re.compile(r"(?<![A-Za-z_\d.])(?:(?<![\w)\]])[-−])?(?:\d{1,3},\d{3}(?![\d,])|\d+\.\d+(?!\d)|\d+(?:/\d+(?![\d.]))?|\.\d+)")
+_NUM = re.compile(r"(?<![A-Za-z_\d.])(?:(?<![\w)\]])[-−])?(?:\d{1,3},\d{3}(?![\d,])|\d+\.\d+(?!\d)|\d+(?:/\d+(?!\d|\.\d))?|\.\d+)")
 _POINTS = re.compile(r"\(\s*\d+\s*(?:points?|pts?|marks?)\s*\)", re.I)
-_UNIT_NUM = re.compile(r"(" + _NUM.pattern + r")\s*(ml|l|liters?|litres?|kg|g|mg|mol|mmol)\b", re.I)
+_UNIT_NUM = re.compile(r"(" + _NUM.pattern + r")\s*(ml|l|liters?|litres?|kg|g|mg|mol|mmol|(?:milli|kilo)?(?:gram|liter|litre|mole)s?|millimol)\b", re.I)
 
 
 _DIGIT_WORDS = "zero|one|two|three|four|five|six|seven|eight|nine"
@@ -174,8 +174,54 @@ def _point_words(m) -> str:
     return f"{_WORDNUM[m.group(1).lower()]}.{digits} "
 
 
+_FRAC_DEN = {"half": 2, "halves": 2, "third": 3, "thirds": 3, "quarter": 4, "quarters": 4, "fourth": 4, "fourths": 4,
+             "fifth": 5, "fifths": 5, "sixth": 6, "sixths": 6, "seventh": 7, "sevenths": 7, "eighth": 8, "eighths": 8,
+             "ninth": 9, "ninths": 9, "tenth": 10, "tenths": 10}
+_FRAC_WORDS = re.compile(r"\b(one|two|three|four|five|six|seven|eight|nine)[\s-]+(" + "|".join(sorted(_FRAC_DEN, key=len, reverse=True))
+                         + r")\b", re.I)
+
+# 100 as a percent or sample size is the definition of the quantity, never a value of a problem
+_PCT100 = re.compile(r"(?:(?<![A-Za-z])[x\u00d7*]|\\times|\btimes|\bmultipl(?:ied|y|ying)\s+by)\s*100(?![\d]|\.\d)(?!\s*(?:ml|l|g|kg|mg|mol)\b)"
+                     r"|\b100\s*(?:%|\\%|percent\b|per\s*cent\b)|\bper\s+100\b|\bout\s+of\s+100\b"
+                     r"|\b100(?:\.0+)?[\s-]*(?:g|grams?)\s+(?:sample|of\s+(?:the\s+|a\s+|this\s+)?(?:sample|compound|substance|material|"
+                     r"solution|mixture|unknown))|\bsample\s+(?:of|is|=)\s*100(?:\.0+)?\s*g\b", re.I)
+
+
+def _strip_pct(text: str) -> str:
+    """Blank the 100 of 'x 100', '100%', 'a 100 g sample' (same length, so positions hold)."""
+    return _PCT100.sub(lambda m: re.sub(r"100", "   ", m.group(0), count=1), text)
+
+
+_MONTH = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+_AMPM = r"(?:a\.?m\.?|p\.?m\.?)(?![A-Za-z])"
+_LOGI_RX = [re.compile(x, re.I) for x in (
+    r"\b\d{1,2}(?::\d{2})?\s*(?:to|until|till|through|and|[-\u2013])\s*\d{1,2}(?::\d{2})?\s*" + _AMPM,   # 10 to 11 am
+    r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*" + _AMPM + r")?",                                                   # 11:59 pm
+    r"\b\d{1,2}\s*" + _AMPM,                                                                                  # 3 pm
+    r"\b" + _MONTH + r"\.?\s+\d{1,2}(?:st|nd|rd|th)?\b(?:\s*[-\u2013]\s*\d{1,2})?(?:,?\s+(?:19|20)\d\d)?",   # Sep 17, 2026
+    r"\b\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTH + r"\b(?:\.|,)?(?:\s+(?:19|20)\d\d)?",                         # 17 Sep
+    r"\b(?:19|20)\d\d-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+    r"\b(?:lectures?|lecs?\.?|chapters?|chs?\.|sections?|secs?\.|pages?|pp?\.|weeks?|wks?\.?|units?|lessons?|slides?|videos?|"
+    r"modules?|sessions?|recitations?|figures?|figs?\.?|tables?|exercises?|problem\s+sets?|psets?|homeworks?|hw|assignments?|"
+    r"exams?|quiz(?:zes)?|midterms?)\s*#?\s*\d{1,3}"
+    r"(?:\s*(?:,|and|or|to|through|thru|&|[-\u2013])\s*\d{1,3})*(?![\d]|\.\d|/\d)",
+    r"\b\d{1,3}(?:st|nd|rd|th)\b",
+    r"\b\d{1,3}(?:\.\d+)?\s*(?:points?|pts?\b|marks?|credits?)\b|\bworth\s+(?:up\s+to\s+)?\d{1,3}\b",
+    r"(?m)^[ \t]*(?:[-*]\s+)?\d{1,2}[.)](?=\s)",                                                              # 1. list markers
+)]
+
+
+def _blank_logistics(text: str) -> str:
+    """Blank clock times, dates, lecture, chapter, page and week numbers, their ranges, point values and list ordinals
+    (same length): small whole numbers like these are never the value of a problem."""
+    for rx in _LOGI_RX:
+        text = rx.sub(lambda m: " " * len(m.group(0)), text)
+    return text
+
+
 def _words_to_digits(text: str) -> str:
-    t = _POINT_WORDS.sub(_point_words, text)
+    t = _FRAC_WORDS.sub(lambda m: f"{_WORDNUM[m.group(1).lower()]}/{_FRAC_DEN[m.group(2).lower()]}", text)
+    t = _POINT_WORDS.sub(_point_words, t)
     t = _FRAC_UNIT.sub(lambda m: f"{_FRAC_VAL[m.group(1).lower()]} {m.group(2)}", t)
     t = _TENS_UNITS.sub(lambda m: str(_WORDNUM[m.group(1).lower()] + _WORDNUM[m.group(2).lower()]), t)
     t = _DOZEN.sub("12", t)
@@ -202,7 +248,7 @@ def _canon(s: str) -> str:
 
 def numbers(text: str) -> list[str]:
     """Canonical numbers in order: 0.350 -> 0.35, .35 -> 0.35, 250.0 -> 250, 1,556 -> 1556, 'twelve' -> 12."""
-    t = _words_to_digits(_POINTS.sub(" ", text or ""))
+    t = _strip_pct(_words_to_digits(_POINTS.sub(" ", text or "")))
     return [_canon(m.group(0)) for m in _NUM.finditer(t)]
 
 
@@ -226,13 +272,16 @@ def _distinctive(n: str) -> bool:
     return "." in digits or "/" in digits or len(digits) >= 3
 
 
+_SPELLED_UNIT = {"gram": "g", "grams": "g", "milligram": "mg", "milligrams": "mg", "kilogram": "kg", "kilograms": "kg",
+                 "mole": "mol", "moles": "mol", "millimole": "mmol", "millimoles": "mmol", "millimol": "mmol",
+                 "milliliter": "ml", "milliliters": "ml", "millilitre": "ml", "millilitres": "ml", "kiloliter": "l"}
 _UNIT_SCALE = {"l": Decimal(1000), "ml": Decimal("0.001"), "kg": Decimal(1000), "g": Decimal("0.001"),
                "mg": Decimal("0.001"), "mol": Decimal(1000), "mmol": Decimal("0.001")}
 
 
 def forms_map(text: str) -> dict[str, set[str]]:
     """canonical number -> the values it can also be written as (250 mL = 0.25 L), plus itself."""
-    t = _words_to_digits(_POINTS.sub(" ", text or ""))
+    t = _strip_pct(_words_to_digits(_POINTS.sub(" ", text or "")))
     out: dict[str, set[str]] = {}
     for m in _NUM.finditer(t):
         c = _canon(m.group(0))
@@ -240,7 +289,7 @@ def forms_map(text: str) -> dict[str, set[str]]:
     for m in _UNIT_NUM.finditer(t):
         base = _canon(m.group(1))
         unit = m.group(2).lower()
-        unit = "l" if unit.startswith(("liter", "litre")) else unit
+        unit = "l" if unit.startswith(("liter", "litre")) else _SPELLED_UNIT.get(unit, unit)
         if unit not in _UNIT_SCALE:
             continue
         try:
@@ -333,8 +382,8 @@ def matrix_rows(text: str) -> list[list[str]]:
     """Rows of any matrix-looking text: [[a,b],[c,d]], [a b; c d], a b / c d lines, \\begin{bmatrix}, 'rows (1,2), (3,4)'."""
     rows: list[list[str]] = []
     t = _words_to_digits(text or "")
-    for m in re.finditer(r"\\begin\{[bpvBV]?matrix\}(.*?)\\end\{[bpvBV]?matrix\}", t, re.S):
-        for r in re.split(r"\\\\", m.group(1)):
+    for m in _ENV.finditer(t):
+        for r in re.split(r"\\\\", re.sub(r"\\hline", " ", m.group(1))):
             rows.append(_row_entries(r))
     for m in re.finditer(r"[\[(]([^\[\]()]*)[\])]", t):
         inner = m.group(1)
@@ -1245,7 +1294,9 @@ from fractions import Fraction
 _SUB_DIGITS = str.maketrans("\u2080\u2081\u2082\u2083\u2084\u2085\u2086\u2087\u2088\u2089", "0123456789")
 _UNIT_ALIASES = {"g": "g", "gram": "g", "grams": "g", "mg": "mg", "kg": "kg", "mol": "mol", "mole": "mol", "moles": "mol",
                  "mmol": "mmol", "l": "l", "liter": "l", "liters": "l", "litre": "l", "litres": "l", "ml": "ml",
-                 "m": "m", "molar": "m"}
+                 "m": "m", "molar": "m", "milligram": "mg", "milligrams": "mg", "kilogram": "kg", "kilograms": "kg",
+                 "millimole": "mmol", "millimoles": "mmol", "millimol": "mmol", "milliliter": "ml", "milliliters": "ml",
+                 "millilitre": "ml", "millilitres": "ml"}
 _CONNECT = (r"(?:=|:|\u2248|\bis\s+equal\s+to\b|\bequal\s+to\b|\bis\b|\bare\b|\bequals?\b|\bgives\b|\bmust\s+be\b|"
             r"\bshould\s+be\b|\bwould\s+be\b|\bcomes\s+to\b|\bcomes\s+out\s+(?:to|as)\b|\bworks\s+out\s+to\b|"
             r"\bturns\s+out\s+to\s+be\b|\bbecomes\b|\bas\b)")
@@ -1271,17 +1322,80 @@ def item_key(item: dict[str, Any] | None) -> list[str]:
     return parse_key((item or {}).get("answer_key"))
 
 
+_ENV = re.compile(r"\\begin\{(?:[bpvBV]?matrix|array|smallmatrix)\}(?:\{[^{}]*\})?(.*?)\\end\{(?:[bpvBV]?matrix|array|smallmatrix)\}", re.S)
+_PIPE_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$")
+_NUMROW = r"-?(?:\d+/\d+|\d*\.?\d+)"
+_SLASH_ROWS = re.compile(r"(?<![\w./])(" + _NUMROW + r"(?:[ \t]+" + _NUMROW + r")+)((?:[ \t]*[/;][ \t]*" + _NUMROW +
+                         r"(?:[ \t]+" + _NUMROW + r")+)+)(?![\w./])")
+_LINE_ROW = re.compile(r"^[ \t>]*(?:[\[(|]\s*)?(" + _NUMROW + r"(?:[ \t,|&]+" + _NUMROW + r")+)\s*[\])|]?[ \t]*,?[ \t]*$")
+
+
+def _bracket_rows(rows: list[list[str]]) -> str:
+    return "[" + ", ".join("[" + ", ".join(r) + "]" for r in rows) + "]"
+
+
+def _tables_to_brackets(t: str) -> str:
+    """Markdown pipe tables, rows of numbers on separate lines and 'a b / c d' rows as [[a, b], [c, d]]."""
+    lines = t.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if _PIPE_ROW.match(lines[i]):
+            j = i
+            while j < len(lines) and _PIPE_ROW.match(lines[j]):
+                j += 1
+            rows: list[list[str]] = []
+            for ln in lines[i:j]:
+                cells = [re.sub(r"[$`*\s]|\\[,;! ]", "", c) for c in ln.strip().strip("|").split("|")]
+                if all(re.fullmatch(r"[:\-]*", c) for c in cells):
+                    continue
+                if cells and not re.fullmatch(_NUMROW, cells[0]) and all(re.fullmatch(_NUMROW, c) for c in cells[1:]) and len(cells) > 2:
+                    cells = cells[1:]
+                if len(cells) >= 1 and all(re.fullmatch(_NUMROW, c) for c in cells):
+                    rows.append(cells)
+            if rows:
+                out.append(_bracket_rows(rows))
+            else:
+                out.extend(lines[i:j])
+            i = j
+            continue
+        m = _LINE_ROW.match(lines[i])
+        if m:
+            j, rows = i, []
+            while j < len(lines):
+                mm = _LINE_ROW.match(lines[j])
+                if not mm:
+                    break
+                rows.append(re.findall(_NUMROW, mm.group(1)))
+                j += 1
+            if len(rows) >= 2 and len({len(r) for r in rows}) == 1:
+                out.append(_bracket_rows(rows))
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    t = "\n".join(out)
+
+    def slash(m):
+        parts = [m.group(1)] + [x for x in re.split(r"[/;]", m.group(2)) if x.strip()]
+        return _bracket_rows([re.findall(_NUMROW, p) for p in parts])
+    return _SLASH_ROWS.sub(slash, t)
+
+
 def _norm_hay(text: str) -> str:
     t = (text or "").replace("\u2212", "-").translate(_SUB_DIGITS)
 
     def mat(m):
-        rows = [r for r in re.split(r"\\\\", m.group(1)) if r.strip()]
+        body = re.sub(r"\\hline|\\\[[^\]]*\]", "", m.group(1))
+        rows = [r for r in re.split(r"\\\\", body) if r.strip()]
         return "[" + ", ".join("[" + ", ".join(c.strip() for c in r.split("&")) + "]" for r in rows) + "]"
 
-    t = re.sub(r"\\begin\{[bpvBV]?matrix\}(.*?)\\end\{[bpvBV]?matrix\}", mat, t, flags=re.S)
+    t = _ENV.sub(mat, t)
+    t = _tables_to_brackets(t)
     t = re.sub(r"<sub>(.*?)</sub>", r"\1", t, flags=re.I)
     t = re.sub(r"_\{?([A-Za-z0-9]+)\}?", r"\1", t)
-    t = re.sub(r"\\(?:left|right|top|quad|qquad|,|;|!)|\^\{?[Tt]\}?|\*\*|[$`]", "", t)
+    t = re.sub(r"\\(?:text|textrm|textit|mathrm|mathit|mbox|rm)\{([^{}]*)\}", r" \1", t)  # unit wrappers: \text{mL}
+    t = re.sub(r"\\(?:left|right|top|quad|qquad|,|;|!|:)|(?<!\\)\\ |~|\^\{?[Tt]\}?|\*\*|[$`]", " ", t)
     t = re.sub(r"\\frac\{(-?\d+)\}\{(\d+)\}", r"\1/\2", t)
     t = _words_to_digits(t)
     return re.sub(r"\b(?:minus|negative)\s+(\d)", r"-\1", t, flags=re.I)
@@ -1314,8 +1428,9 @@ def _round_sig(v: Fraction, n: int) -> Fraction:
 
 
 def num_eq(t: str, k: str) -> bool:
-    """Two canonical numbers match: equal, or equal after rounding the more precise to the less precise's digits
-    (5.11 ~ 5.1 ~ 5.110, -3/2 ~ -1.5)."""
+    """A number a reply states (t) matches a key value (k): equal, or the key rounded to the reply's stated precision
+    equals the reply and the reply has at least 3 significant figures ('250' never matches 249.68, '2.5' never 2.497;
+    '249.7' matches 249.68). A whole number or a fraction matches only exactly (-3/2 = -1.5)."""
     if t == k:
         return True
     tv, kv = _val(t), _val(k)
@@ -1323,13 +1438,17 @@ def num_eq(t: str, k: str) -> bool:
         return False
     if tv == kv:
         return True
+    if "/" in t + k:
+        lo = min(_sig(t), _sig(k))
+        return lo >= 2 and _round_sig(tv, lo) == _round_sig(kv, lo)
+    if "." not in t:
+        return False
     st, sk = _sig(t), _sig(k)
-    if "." not in t + k and "/" not in t + k:
+    if st < 3:
         return False
-    lo = min(st, sk)
-    if lo < 2:
-        return False
-    return _round_sig(tv, lo) == _round_sig(kv, lo) if "/" in t + k or st != sk else False
+    if st <= sk:
+        return _round_sig(kv, st) == tv
+    return sk >= 2 and _round_sig(tv, sk) == kv
 
 
 def _small_int(n: str) -> bool:
@@ -1407,12 +1526,13 @@ class _Hay:
     """Everything key matching needs from one piece of text."""
 
     def __init__(self, text: str):
-        self.t = _norm_hay(text)
+        self.t = _blank_logistics(_strip_pct(_norm_hay(text)))
         self.low = self.t.lower()
         self.nums = [(m.start(), _canon(m.group(0)), m.end()) for m in _NUM.finditer(self.t)]
         for m in _COMMA_DEC.finditer(self.t):  # 5,11 g (a decimal comma): also read it as 5.11
             self.nums.append((m.start(), _canon(f"{m.group(1)}.{m.group(2)}"), m.end()))
         self.seqs: list[tuple[int, list[str]]] = []
+        self.listed: dict[int, str] = {}  # 'x1 = 1, x2 = 1, x3 = 2': a run whose entries carry their own names
         groups = [(m.start(), m.end(), m.group(1)) for m in re.finditer(r"[\[(]([^\[\]()]*)[\])]", self.t)]
         singles: list[tuple[int, int, str]] = []
         for st, en, g in groups:
@@ -1437,6 +1557,7 @@ class _Hay:
         for m in re.finditer(r"([A-Za-z]+\d*\s*=\s*-?[\d./]+(?:\s*(?:,|;|\band\b)\s*[A-Za-z]+\d*\s*=\s*-?[\d./]+)+)", self.t):
             vals = re.findall(r"=\s*(-?[\d./]+)", m.group(1))
             self.seqs.append((m.start(), [_canon(v) for v in vals]))
+            self.listed[m.start()] = re.match(r"[A-Za-z]+", m.group(1)).group(0).lower()
         for m in re.finditer(_CONNECT + r"\s*((?:-?\d[\d./]*)(?:\s*(?:,|;|\band\b|\s)\s*-?\d[\d./]*)+)", self.t):
             self.seqs.append((m.start(1), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(1))]))
         for m in re.finditer(r"\brows?\s*\d+\s*[:=]\s*((?:-?\d[\d./]*[\s,;]*)+)", self.t, re.I):  # "row 1: 1 0 0"
@@ -1460,7 +1581,21 @@ class _Hay:
             if len(cur) >= 2 and len({len(r) for r in cur}) == 1:
                 mats.append((first, cur))
             cur = []
-        for st, en, g in groups:
+        def single_int(g: str) -> bool:
+            return bool(re.fullmatch(r"\s*\d{1,3}\s*", g))
+
+        def adjacent(a_end: int, b_start: int) -> bool:
+            return not re.sub(r"[\s,\\\[\]()]", "", self.t[a_end:b_start])
+        kept: list[tuple[int, int, str]] = []
+        for i, (st, en, g) in enumerate(groups):  # a citation '[1]' beside a matrix is not a one-entry row
+            if single_int(g) and self.t[st:st + 1] == "[":
+                prev = groups[i - 1] if i else None
+                nxt = groups[i + 1] if i + 1 < len(groups) else None
+                if (prev and adjacent(prev[1], st) and len(_toks(prev[2].replace("|", " "))) >= 2) or \
+                        (nxt and adjacent(en, nxt[0]) and len(_toks(nxt[2].replace("|", " "))) >= 2):
+                    continue
+            kept.append((st, en, g))
+        for st, en, g in kept:
             g2 = g.replace("|", " ")
             parts = g2.split(";") if ";" in g2 else [g2]
             rows = [[_canon(x) for x in _toks(p)] for p in parts if _toks(p) and all(_NUM_FULL.match(x) for x in _toks(p))]
@@ -1496,6 +1631,8 @@ class _Hay:
         return any(num_eq(_canon(m.group(1)), k) for m in re.finditer(pat, self.low))
 
     def named_before(self, name: str, pos: int) -> bool:
+        if name and self.listed.get(pos) == re.sub(r"\d+$", "", name):
+            return True
         return bool(name) and bool(re.search(r"(?<![a-z0-9_])" + re.escape(name) + r"\s*" + _CONNECT + r"\s*[\[(]?\s*$",
                                              self.low[max(0, pos - 40):pos]))
 
@@ -1508,13 +1645,18 @@ class _Hay:
         return False
 
 
+def _weak_vec(v: list[str]) -> bool:
+    """A 3-entry vector of only 0, 1 and 2 is not distinctive: it turns up in any small matrix."""
+    return len(v) <= 3 and all(x in ("0", "1", "2") for x in v)
+
+
 def _seq_match(h: _Hay, key: list[str], name: str) -> bool:
     n = len(key)
     allsmall = all(_small_int(x) for x in key)
     for pos, seq in h.seqs:
         for i in range(0, len(seq) - n + 1):
             if all(num_eq(seq[i + j], key[j]) for j in range(n)):
-                if allsmall and n < 3 and not h.named_before(name, pos):
+                if allsmall and (n < 3 or _weak_vec(key)) and not h.named_before(name, pos):
                     continue
                 return True
     return False
@@ -1658,6 +1800,8 @@ def component_leak(item: dict[str, Any] | None, reply: str, question: str = "") 
             vals = _entry_numbers(keyed[nm[0]])
         else:
             vals = set()
+        given = _index(item).given
+        vals = {v for v in vals if _is_small(v) or not (v in given or _is_const(v))}
         if short and vals and any(num_eq(a, b) for a in h for b in vals):
             return nm
         if vals and any(re.search(r"(?<![a-z0-9_])" + re.escape(nm) + r"\s*" + _CONNECT + r"\s*", _norm_hay(plain).lower())
@@ -1800,6 +1944,8 @@ def _build_index(raws: tuple[str, ...], body: str) -> _Index:
             ix.comps.append(_Comp(letter, "mat", rows))
             if letter == "u":
                 ix.comps.append(_Comp("diag", "vec", [[rows[i][i] for i in range(len(rows))]]))
+    if {"x", "y", "z"} <= set(explicit) and "x" not in have and not any(c.kind == "vec" and c.name == "x" for c in ix.comps):
+        ix.comps.append(_Comp("x", "vec", [[explicit["x"], explicit["y"], explicit["z"]]]))  # x, y, z given one by one
     for letter, vs in vec.items():
         n = len(vs)
         if letter not in have and n >= 3 and set(vs) == set(range(1, n + 1)):
@@ -1808,6 +1954,16 @@ def _build_index(raws: tuple[str, ...], body: str) -> _Index:
         ix.given |= fm
     ix.given |= set(numbers(body)) | given_constants(body)
     return ix
+
+
+@lru_cache(maxsize=256)
+def _body_seqs(body: str) -> frozenset:
+    return frozenset([tuple(seq) for _, seq in _Hay(body).seqs] + [tuple(numbers(body))])
+
+
+def _given_seqs(item: dict[str, Any] | None) -> set[tuple[str, ...]]:
+    """The vectors, rows and columns the problem's own statement writes out."""
+    return set(_body_seqs((item or {}).get("body") or ""))
 
 
 def _index(item: dict[str, Any] | None) -> _Index:
@@ -1860,14 +2016,28 @@ def question_refs(item: dict[str, Any] | None, question: str) -> bool:
     return len(q.split()) <= 12 and bool(_PRONOUN_Q.search(q))
 
 
+# physical and mathematical constants: data of the subject, never the value of a problem
+_CONSTANTS = ("3.14", "3.1416", "3.14159", "2.718", "2.71828", "1.414", "1.732", "9.8", "9.81", "9.80665", "8.314", "8.3145",
+              "8.31", "0.0821", "0.08206", "0.08314", "62.36", "6.022", "6.02", "6.626", "1.602", "1.38", "1.381", "273.15",
+              "273", "298.15", "298", "96485", "96500", "299792458", "22.4", "22.414", "1.00794", "101.325", "101325",
+              "3600", "86400", "1000")
+
+
+def _is_const(n: str) -> bool:
+    """A physical or math constant (pi, g, R, N_A, F ...): equal to the constant at the digits the reply gives."""
+    if not re.search(r"\.|\d{3}", n):
+        return n in _CONSTANTS
+    return any(n == c or (_sig(n) >= 3 and num_eq(n, c) and _sig(n) <= _sig(c)) for c in _CONSTANTS)
+
+
 def _reply_numbers(text: str) -> list[str]:
-    t = _LABEL_NUM.sub(" ", _norm_hay(text))
+    t = _LABEL_NUM.sub(" ", _blank_logistics(_strip_pct(_norm_hay(text))))
     return [_canon(m.group(0)) for m in _NUM.finditer(t)]
 
 
-def _vec_hit(seq: list[str], v: list[str], whole: bool) -> bool:
+def _vec_hit(seq: list[str], v: list[str], whole: bool, named: bool = False) -> bool:
     n = len(v)
-    if n < 3:
+    if n < 3 or (_weak_vec(v) and not named):
         return False
     for i in range(0, len(seq) - n + 1):
         w = seq[i:i + n]
@@ -1880,12 +2050,23 @@ def _vec_hit(seq: list[str], v: list[str], whole: bool) -> bool:
     return False
 
 
-def _comp_hit(h: "_Hay", comp: _Comp) -> bool:
-    seqs = [s for _, s in h.seqs]
+def _stated(v: list[str], given: set[tuple[str, ...]]) -> bool:
+    n = len(v)
+    return any(tuple(g[i:i + n]) == tuple(v) for g in given for i in range(len(g) - n + 1))
+
+
+def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None) -> bool:
+    """given: the vectors and rows the problem itself states; a whole value or a piece of one that the problem gives
+    ('A has rows (2,1,3)', which is also row 1 of U) is data, never a leaked value."""
+    given = given or set()
+    live = [(p, s) for p, s in h.seqs if not (given and len(s) >= 2 and _stated(s, given))]  # a restated given is data
+    seqs = [s for _, s in live]
     if comp.kind == "formula":
         return _hit_one(h, _KeyVal(comp.formula)) or any(_vec_hit(s, comp.rows[0], True) for s in seqs)
     if comp.kind == "vec":
-        return any(_vec_hit(s, comp.rows[0], True) for s in seqs)
+        if _stated(comp.rows[0], given):
+            return False
+        return any(_vec_hit(s, comp.rows[0], True, bool(comp.name) and h.named_before(comp.name, p)) for p, s in live)
     rows = comp.rows
     flat = [x for r in rows for x in r]
     cols = [list(c) for c in zip(*rows)] if rows and all(len(r) == len(rows[0]) for r in rows) else []
@@ -1894,7 +2075,7 @@ def _comp_hit(h: "_Hay", comp: _Comp) -> bool:
         return True  # the whole matrix, rows as they stand
     if any(_vec_hit(s, flat, True) for s in seqs):
         return True
-    return any(_vec_hit(s, v, False) for v in [*rows, *cols] for s in seqs)
+    return any(_vec_hit(s, v, False) for v in [*rows, *cols] if not _stated(v, given) for s in seqs)
 
 
 def _ordinal_pairs(text: str) -> list[tuple[int, str, str]]:
@@ -1939,6 +2120,15 @@ def _bound_small(h: "_Hay", ix: _Index, reply: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def _bound_names(h: "_Hay", ix: _Index) -> list[str]:
+    """The names of the key that the reply gives their value ('d = 10, z = -2, y = 1'), whatever the size of the value."""
+    out = []
+    for e in ix.entries:
+        if e.name and e.unit != "atom" and h.named(e.name, e.val) and not _is_const(e.val):
+            out.append(e.name)
+    return list(dict.fromkeys(out))
+
+
 def _entry_in(h: "_Hay", e: _Entry) -> bool:
     """The reply holds the entry's value. An entry with a unit is unit-aware: '100 g' is not 100.0 mL and '0.10 M' is not
     0.1000 L; a bare number matches it only when it is a precise decimal or bound to the entry's own name."""
@@ -1978,14 +2168,14 @@ def key_leak(reply, item=None, ctx=None):
         return []
     h = _Hay(reply)
     for comp in ix.comps:
-        if _comp_hit(h, comp):
+        if _comp_hit(h, comp, _given_seqs(item)):
             return [comp.name or "value"]
     named, sticky = bool(c.get("named")), bool(c.get("sticky"))
     nums = [n for _, n, _ in h.nums]
     asked = c.get("asked") or ()
     seen: list[str] = []
     for e in ix.entries:
-        if e.unit == "atom" or not _distinct_val(e.val) or e.val in ix.given or e.val in seen:
+        if e.unit == "atom" or not _distinct_val(e.val) or e.val in ix.given or e.val in seen or _is_const(e.val):
             continue
         if any(num_eq(a, e.val) for a in asked):
             continue  # the student's own number, echoed back, is not a leaked value
@@ -1995,6 +2185,9 @@ def key_leak(reply, item=None, ctx=None):
             seen.append(e.val)
     if len(seen) >= 2 or (seen and (named or sticky or c.get("lone"))):
         return seen
+    bound = _bound_names(h, ix)
+    if len(bound) >= 3:  # three of the key's own names given their values is the answer, small values included
+        return bound
     gate = bool(c.get("small", named)) or sticky
     if gate or named:
         b = _bound_small(h, ix, reply)
