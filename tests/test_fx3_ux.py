@@ -154,7 +154,7 @@ def test_dashboard_catch_me_up_for_latest_past_lecture(ready):
     s.add_event(cid, "lecture", "Lecture 3: Future", day(7))
     t = c.get("/").text
     assert "Catch me up" in t and f'action="/courses/{cid}/study/missed"' in t
-    assert f'name="event_id" value="{e2}"' in t
+    assert f'<option value="{e2}">' in t
 
 
 def test_catch_up_with_nothing_saved_says_so_before_calling_the_model(ready):

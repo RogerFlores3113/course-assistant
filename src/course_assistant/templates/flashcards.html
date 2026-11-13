@@ -25,12 +25,12 @@
   <input type="hidden" name="on" value="{{ '0' if shortcuts_enabled() else '1' }}">
   <p class="muted small">Keyboard shortcuts are {{ 'on' if shortcuts_enabled() else 'off' }}.{% if shortcuts_enabled() %} Space shows the answer, 1 to 4 grade it.{% endif %}
   <button class="btn small ghost" type="submit">{{ 'Turn shortcuts off' if shortcuts_enabled() else 'Turn shortcuts on' }}</button></p></form>
-{% elif summary %}<section class="card empty round-end" aria-labelledby="round-h"><h2 id="round-h" tabindex="-1">Cram round finished</h2>
+{% elif summary %}<section class="card empty round-end" aria-labelledby="round-h" data-end-state><h2 id="round-h" tabindex="-1">Cram round finished</h2>
 <p class="big">{{ summary.right }} right, {{ summary.wrong }} to review, {{ summary.total }} in total.</p>
 <p class="muted small">Right means you chose Good or Easy. To review means Again or Hard.</p>
 {% if summary.weak %}<h3>Weak topics</h3><ul class="plain">{% for name, n in summary.weak %}<li>{{ name }}: {{ n }} card{{ '' if n == 1 else 's' }} to review</li>{% endfor %}</ul>{% endif %}
 <p>{% if summary.redo_url %}<a class="btn" href="{{ summary.redo_url }}">Redo the ones I missed ({{ summary.wrong }})</a> {% endif %}<a class="btn {{ 'ghost' if summary.redo_url }}" href="{{ summary.again_url }}">Start another round</a> <a class="btn ghost" href="/courses/{{ course.id }}/study">Go to Study</a></p></section>
-{% else %}<div class="card empty"><h2>{{ ('Cram round finished' if cram else 'No cards for this material yet' if (material_id and not material_total) else 'All caught up') if total else 'No flashcards yet' }}</h2>
+{% else %}<div class="card empty" data-end-state><h2 id="end-h" tabindex="-1">{{ ('Cram round finished' if cram else 'No cards for this material yet' if (material_id and not material_total) else 'All caught up') if total else 'No flashcards yet' }}</h2>
 <p>{% if total and cram %}You went through every card in this round.{% elif total and material_id and not material_total %}Pick another material, or make cards from this one on the Study tab.{% elif total %}Nothing is due right now. Come back later, or make more cards.{% else %}Make cards from your materials on the Study tab.{% endif %}</p>
 <p><a class="btn" href="/courses/{{ course.id }}/study">Go to Study</a>{% if total and cram %} <a class="btn ghost" href="/flashcards/{{ course.id }}?cram=1{% if material_id %}&amp;material={{ material_id }}{% endif %}">Start another round</a>{% endif %}</p></div>{% endif %}
 {% endblock %}

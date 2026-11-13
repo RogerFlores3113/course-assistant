@@ -4,7 +4,7 @@
 <form method="post" class="form card">
   <label>Title <input name="title" required value="{{ m.title }}" {{ fa('material', 'title') }}></label>{{ fe('material', 'title') }}
   <label>What is it? <select name="kind" {{ fa('material', 'kind') }}>{% for k, l in material_kinds.items() %}<option value="{{ k }}" {% if m.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>{{ fe('material', 'kind') }}
-  <label>Which lecture is it for? <select name="event_id" aria-describedby="lec-help" {{ fa('material', 'event_id', 'lec-help') }}><option value="">No particular lecture</option>
+  <label>Which lecture is it for? <select name="event_id" {{ fa('material', 'event_id', 'lec-help') }}><option value="">No particular lecture</option>
     {% for e in lectures %}<option value="{{ e.id }}" {% if m.event_id == e.id %}selected{% endif %}>{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>{{ fe('material', 'event_id') }}
   <p id="lec-help" class="muted small">Linking a material to its lecture is what lets "What did I miss" and the primers find it. Picking a lecture also fills in the date below if it is empty.</p>
   <label>Lecture date (optional) <input type="date" name="lecture_date" value="{{ m.lecture_date }}" {{ fa('material', 'lecture_date') }}></label>{{ fe('material', 'lecture_date') }}
