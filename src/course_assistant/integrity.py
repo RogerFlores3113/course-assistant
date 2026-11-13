@@ -2040,7 +2040,7 @@ def twin_fallback(name: str, reason: str, check: bool = False) -> str:
     return f"I can't work {name} out for you because it is marked as graded. {why}\n\n{steps}"
 
 
-def twin(store, course_id: int, question: str, provider, graded: dict, why: str = "") -> Answer:
+def twin(store, course_id: int, question: str, provider, graded: dict, why: str = "", *, model_calls: int = 2) -> Answer:
     """Answer graded work safely and save a guide of kind 'twin' (data["mode"] is 'twin' or 'concepts'). why is how it
     was routed here (match, marker, sticky, key, reply, soft_essay); it only changes the sentence the page shows."""
     title = (graded.get("title") or "this item").strip()
@@ -2094,6 +2094,10 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
             fell_back = True
     if fell_back:  # no more model calls: a fixed, honest page that says why there is no similar problem
         blocks, used = [Block("text", twin_fallback(_item_name(graded), fail_reason, check), [])], []
+    elif mode != "twin" and not feedback and model_calls <= 0:
+        # the caller already spent the request's calls (reply plus one regeneration): fixed text, no more calls
+        blocks, used = [Block("text", SAFE_CHECK if check and kind != "essay" else
+                              SAFE_ESSAY if kind in ("essay", "proof") else SAFE_CONCEPTS, [])], []
     elif mode != "twin" and not feedback:
         blocks, used = _concepts_reply(provider, store, course_id, graded, kind, src_block, problem_text, question,
                                        depth_rule, len(sources), sources)

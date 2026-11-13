@@ -1012,7 +1012,9 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
                 if not again:
                     graded, raw = None, raw2
     if graded:
-        answer = integrity.twin(store, course_id, question, provider, graded, why)
+        # a soft essay hit already used its regeneration: the graded page then makes no further model call
+        answer = integrity.twin(store, course_id, question, provider, graded, why,
+                                **({"model_calls": 0} if why == "soft_essay" else {}))
     else:
         answer = parse_answer(raw, sources)
         title = question if len(question) <= 80 else question[:77].rstrip() + "..."
