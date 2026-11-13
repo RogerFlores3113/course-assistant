@@ -831,7 +831,16 @@ def names_item(text: str, item: dict[str, Any]) -> bool:
         return True
     if _row_hits(q, b) >= 1 and (b.mrows or b.erows):
         return True
-    return len(q.tok & b.tok) >= 3
+    shared = q.tok & b.tok
+    return len(shared) >= 3 and len(shared - METHOD_WORDS) >= 2  # method words alone never name an item
+
+
+# words that name a METHOD or a topic of the course, shared by many problems: a request that only repeats them
+# ('LU factorization with forward and back substitution') is a topic, not this item
+METHOD_WORDS = frozenset(_stem(w) for w in """factor factorization factorisation decomposition forward backward back substitution
+elimination gaussian jordan triangular lower upper matrix matrices system equation row column vector pivot permutation
+inverse determinant eigenvalue eigenvector solution solve molarity molar dilution concentration mass volume mole percent
+composition empirical molecular formula stoichiometry reagent yield limiting acid base""".split())
 
 
 def _own_ref(question: str, item: dict[str, Any]) -> bool:
@@ -2768,7 +2777,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
               "mode": shown_mode, "graded_title": title, "graded_item_id": graded.get("id"), "kind": kind,
               "not_covered": False, "routing_note": note_line, "routed_by": why or graded.get("reason") or "match",
               "ask_normally": why not in ("key", "normal_reply") and not graded.get("by_key"), "question": question,
-              "feedback": feedback, "answer_check": bool(key),
+              "feedback": feedback, "answer_check": bool(key), "left_out": bool(fell_back),
               "graded_offers": offers if (mode != "twin" and not feedback) else []},
         question=question, model=getattr(provider, "model", ""))
     return answer
@@ -2790,7 +2799,7 @@ def caught_fixed(store, course_id: int, question: str, graded: dict, provider=No
         data={"blocks": grounding.block_dicts(blocks), "original_excerpt": "", "twin_problem": "", "mode": "concepts",
               "graded_title": graded.get("title", ""), "graded_item_id": graded.get("id"), "kind": "problem",
               "not_covered": False, "routing_note": sentence, "routed_by": "normal_reply", "ask_normally": False,
-              "question": question, "feedback": False, "answer_check": True,
+              "question": question, "feedback": False, "answer_check": True, "left_out": True,
               "graded_offers": [{"id": graded.get("id"), "label": name, "title": graded.get("title", "")}]},
         question=question, model=getattr(provider, "model", ""))
     return answer
@@ -2990,6 +2999,9 @@ def _scrub_note(names: list[str], n: int) -> str:
     return f"{n} parts of this guide were left out because they matched your graded {who}. Ask for similar problems with different numbers instead."
 
 
+LAST_SCRUB_ITEMS: list[int] = []  # ids of the items the last scrub_parts call matched (for the Practice button)
+
+
 def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[str, int, str]:
     """Drop only the parts (paragraphs, list items, a <details> solution) of a model-written guide that the item's key
     flags, judged with the request's context (the item named by the question), never for the problem's given data.
@@ -3000,6 +3012,8 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
         return text, 0, ""
     parts = _SEG_SPLIT.split(text or "")
     out, n, names, kinds = [], 0, [], []
+    global LAST_SCRUB_ITEMS
+    LAST_SCRUB_ITEMS = []
 
     def hit_of(seg: str) -> dict[str, Any] | None:
         return check_reply(store, course_id, question, seg, given_ok=True)
@@ -3019,6 +3033,8 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
             n += 1
             names.append(_item_name(hit))
             kinds.append(hit.get("kind"))
+            if hit.get("id") and hit["id"] not in LAST_SCRUB_ITEMS:
+                LAST_SCRUB_ITEMS.append(hit["id"])
         else:
             out.append(seg)
     note = ""

@@ -367,9 +367,10 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
     if routed:
         return {"routed": routed}
     integ = _mod("integrity")
-    scrubbed, scrub_note = 0, ""
+    scrubbed, scrub_note, scrub_ids = 0, "", []
     if getattr(integ, "scrub_parts", None):  # drop only the parts the item's key flags, and say which item matched
         raw, scrubbed, scrub_note = integ.scrub_parts(store, course_id, raw, question or task[:300])
+        scrub_ids = list(getattr(integ, "LAST_SCRUB_ITEMS", []) or []) if scrubbed else []
     elif getattr(integ, "scrub_markdown", None):
         raw, scrubbed = integ.scrub_markdown(store, course_id, raw, question or task[:300])
     # the banners (not covered, no passages cited) are worked out from what remains, never from the note
@@ -377,7 +378,7 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
     return {"routed": None, "blocks": _block_dicts(ans.blocks), "body": _clean_body(ans.body_md),
             "used": list(ans.used or []), "outside": bool(getattr(ans, "outside", False)),
             "not_covered": bool(getattr(ans, "not_covered", False)), "sources": sources, "scrubbed": scrubbed,
-            "scrub_note": scrub_note}
+            "scrub_note": scrub_note, "scrub_items": scrub_ids}
 
 
 def _generate(store: Store, course_id: int, provider, kind: str, title: str, task: str, sources: list[dict[str, Any]],
@@ -395,6 +396,8 @@ def _generate(store: Store, course_id: int, provider, kind: str, title: str, tas
     d = dict(data or {})
     d.update({"outside": r["outside"], "not_covered": r["not_covered"], "mode": "answer", "blocks": blocks,
               "scrubbed": r.get("scrubbed", 0)})
+    if r.get("scrub_items") and _scrub_offer(store, r):
+        d["graded_offers"] = _scrub_offer(store, r)  # the button names the item the note names
     return store.add_guide(course_id, kind, title, body, sources=_guide_sources(r["sources"], r["used"]), data=d,
                            question=question, event_id=event_id, model=getattr(provider, "model", "") or "")
 
@@ -1305,6 +1308,15 @@ def _distinct_words(text: str) -> set[str]:
     return words | {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", text or "")}
 
 
+def _scrub_offer(store: Store, normal: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The button for the item the scrub note names (the same item, never another one)."""
+    for iid in (normal or {}).get("scrub_items") or []:
+        it = store.graded_item(iid)
+        if it and (it.get("kind") or "problem") == "problem" and it.get("label"):
+            return [{"id": it["id"], "label": it["label"], "title": it.get("title", "")}]
+    return []
+
+
 def _graded_offers(store: Store, course_id: int, topic: str, limit: int = 1) -> list[dict[str, Any]]:
     """At most one numeric graded item the topic only overlaps by words, offered as a button, never twinned unasked. It
     takes two or more distinctive content words that the request and the item share."""
@@ -1424,7 +1436,7 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
         body = f"{normal['body']}\n\n{disclaimer.FOOTER}"
         data = {"twin": False, "count": count, "mode": "answer", "blocks": normal["blocks"],
                 "outside": normal["outside"], "not_covered": normal["not_covered"], "twins": [],
-                "graded_offers": _graded_offers(store, course_id, topic)}
+                "graded_offers": _scrub_offer(store, normal) or _graded_offers(store, course_id, topic)}
         return store.add_guide(course_id, "practice", f"Practice: {topic}", body,
                                sources=_guide_sources(normal["sources"], normal["used"]), data=data, question=topic,
                                model=getattr(provider, "model", "") or "")
@@ -1464,13 +1476,17 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
         objs = [Block(b["kind"], b["md"], list(b["cites"])) for b in blocks]
         verify(objs, all_sources)
         blocks = _block_dicts(objs)
+    offers = _scrub_offer(store, normal) or _graded_offers(store, course_id, topic)
+    if not offers:  # "Press Practice below" is only true when the page has the button
+        for b in blocks:
+            b["md"] = (b.get("md") or "").replace("Press Practice below or ask again", "Ask again")
     body = f"{_render_blocks(blocks)}\n\n{disclaimer.FOOTER}"
     only_twins = normal is None
     mode = twins[0]["mode"] if only_twins and len({t['mode'] for t in twins}) == 1 else "answer"  # twin only if one was made
     data = {"twin": bool(real), "count": count, "mode": mode, "blocks": blocks, "outside": any(b["kind"] == "outside" for b in blocks),
             "not_covered": bool(normal and normal["not_covered"]), "graded": titles,
             "twins": [{"graded": t["title"], "mode": t["mode"]} for t in twins],
-            "graded_offers": _graded_offers(store, course_id, topic)}
+            "graded_offers": offers}
     return store.add_guide(course_id, "practice", f"Practice (twin): {topic}" if only_twins and real else f"Practice: {topic}", body,
                            sources=_guide_sources(all_sources, sorted(set(used))), data=data, question=topic,
                            model=getattr(provider, "model", "") or "")

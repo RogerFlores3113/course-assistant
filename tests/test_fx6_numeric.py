@@ -334,3 +334,72 @@ def test_flashcards_from_a_graded_numeric_material_are_concept_only():
     fronts = [x["front"] for x in s.flashcards(c)]
     assert "What is a limiting reagent?" in fronts and "Problem 1: grams of NaCl?" not in fronts and res.guarded == 1
     assert "Never" in p.calls[0]["messages"][0]["content"]
+
+
+# ---------------------------------------------------------------- p5: a topic made of method words does not name the item
+def test_p5_method_words_alone_do_not_name_an_item():
+    s, c = make()
+    it = item(s, 1)
+    assert not integrity.names_item("LU factorization with forward and back substitution", it)
+    assert integrity.names_item("Problem 1", it)
+    assert integrity.names_item("factor A = [[2,1,3],[4,5,7],[-2,-4,-3]]", it)
+    p = FakeProvider(lambda sy, me: TWIN_OK if "<twin_problem>" in sy else "1. A question.\n\n2. Another.")
+    g = s.guide(study.practice(s, c, p, "LU factorization with forward and back substitution", count=2))
+    assert not any("<twin_problem>" in call["system"] for call in p.calls)
+
+
+# ---------------------------------------------------------------- p2: the button names the item the scrub note names
+def test_p2_practice_button_matches_the_scrub_note():
+    s, c = make()
+    leak = "1. Worked.\n\n<details>\n<summary>Show solution</summary>\n\nV1 = 100.0 mL and the answer is 9.82 g.\n\n</details>"
+    g = s.guide(study.practice(s, c, FakeProvider(leak), "volume of stock for a dilution of KCl", count=1))
+    note_names_3 = "Problem 3" in g["body_md"] or "Problem 2" in g["body_md"]
+    assert note_names_3 and g["data"]["graded_offers"]
+    offer = g["data"]["graded_offers"][0]
+    assert offer["label"] in g["body_md"]
+
+
+def test_p1_press_practice_never_appears_without_the_button_on_a_practice_guide():
+    s, c = make()
+    bad = "<twin_problem>Factor A = [[2,1,3],[4,5,7],[-2,-4,-3]].</twin_problem><solution>Same again.</solution>"
+    p = FakeProvider(lambda sy, me: bad if "<twin_problem>" in sy else "1. A question.\n\n2. Another.")
+    g = s.guide(study.practice(s, c, p, "Problem 1 LU", count=2))
+    if not g["data"]["graded_offers"]:
+        assert "Press Practice below" not in g["body_md"]
+    html = client_for(s, FakeProvider("x")).get(f"/guides/{g['id']}").text
+    assert ("Press Practice below" not in html) or ("Practice on a problem like" in html)
+
+
+def test_p2_ask_page_counts_final_values_only_as_on():
+    s, c = make(lean=True)
+    for i in (2, 3, 4):
+        s.update_graded_item(i, answer_key=json.dumps(["9.82 g"] if i == 2 else ["V = 100.0 mL"] if i == 3 else ["C3H6O"]))
+    s.update_graded_item(1, answer_key=json.dumps(["5.11 g"]))
+    html = client_for(s, FakeProvider("x")).get(f"/courses/{c}/ask").text
+    assert "Answer check: on for 4 graded items" in html and "couldn't be made" not in html
+
+
+def test_p1_left_out_note_shows_once_and_the_guide_is_not_saved_as_a_guide():
+    s, c = make()
+    p = FakeProvider(lambda sy, me: "The answer is x = (2, 1, -1).")
+    a = grounding.ask(s, c, "what does back substitution give in general?", p)
+    assert a.body_md.count("came too close") == 1
+    html = client_for(s, FakeProvider("x")).get(f"/guides/{a.guide_id}").text if a.guide_id else ""
+    assert html.count("came too close") <= 1
+
+
+def test_p1_left_out_turns_are_not_listed_as_guides():
+    s, c = make()
+    p = FakeProvider(lambda sy, me: "The answer is x = (2, 1, -1).")
+    a = grounding.ask(s, c, "what does back substitution give in general?", p)
+    assert s.guide(a.guide_id)["data"]["left_out"] is True
+    html = client_for(s, FakeProvider("x")).get(f"/courses/{c}/guides").text
+    assert "Left out:" not in html
+    assert client_for(s, FakeProvider("x")).get(f"/guides/{a.guide_id}").status_code == 200
+
+
+def test_p1_proof_edit_page_has_no_couldnt_be_made():
+    s, c = make_proof()
+    html = client_for(s, FakeProvider("x")).get("/graded/6/edit").text
+    assert "couldn't be made" not in html and "not needed for a proof" in html
+    assert "Remove from graded work" in html
