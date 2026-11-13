@@ -255,30 +255,72 @@ def chunks_for(text: str, loc_kind: str, loc_start: Any, *, heading: str = "") -
     return [chunk(p, loc_kind, loc_start, heading=heading) for p in split_text(text)]
 
 
-def section_chunks(sections: Iterable[tuple[str, str, str]]) -> list[dict[str, Any]]:
-    """sections: (anchor, heading, body). Tiny sections are folded into the next one so chunks stay useful."""
+def section_chunks(sections: Iterable[tuple[str, ...]]) -> list[dict[str, Any]]:
+    """sections: (anchor, heading, body[, parent heading]). Tiny sections are folded into the next one so chunks stay
+    useful. Two chunks never end up with the same label: sections that share a heading are told apart by their parent
+    heading, and a long section that was cut in pieces reads 'part 2 of 3'."""
     out: list[dict[str, Any]] = []
-    pending: tuple[str, str, str] | None = None  # anchor, heading, body of a section that is too small alone
-    for anchor, heading, body in sections:
+    parents: dict[str, str] = {}
+    pending: tuple[str, str, str, str] | None = None  # anchor, heading, body, parent of a section too small alone
+    for sec in sections:
+        anchor, heading, body = sec[0], sec[1], sec[2]
+        parent = sec[3] if len(sec) > 3 else ""
         body = body.strip()
         if not body and not heading:
             continue
         if pending:
-            p_anchor, p_heading, p_body = pending
+            p_anchor, p_heading, p_body, p_parent = pending
             if p_heading:
                 joined = f"{heading}\n{body}".strip() if heading else body
                 body = f"{p_body}\n\n{joined}".strip()
-                anchor, heading = p_anchor, p_heading
+                anchor, heading, parent = p_anchor, p_heading, p_parent
             else:  # a headingless preamble joins the next section and takes its name
                 body = f"{p_body}\n\n{body}".strip()
             pending = None
         if words(body) < 25:
-            pending = (anchor, heading, body)
+            pending = (anchor, heading, body, parent)
             continue
+        parents[anchor] = parent
         out.extend(chunks_for(body, "section", anchor, heading=heading))
     if pending and pending[2]:
+        parents[pending[0]] = pending[3]
         out.extend(chunks_for(pending[2], "section", pending[0], heading=pending[1]))
-    return out
+    return unique_labels(out, parents)
+
+
+def unique_labels(chunks: list[dict[str, Any]], parents: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Give every section chunk of a file its own label (see section_chunks). Chunks of other kinds are left alone."""
+    parents = parents or {}
+    sec = [c for c in chunks if c.get("loc_kind") == "section"]
+    by_label: dict[str, list[dict[str, Any]]] = {}
+    for c in sec:
+        by_label.setdefault(c["loc_label"], []).append(c)
+    for lab, cs in by_label.items():
+        if len(cs) < 2:
+            continue
+        anchors = list(dict.fromkeys(str(c["loc_start"]) for c in cs))
+        if len(anchors) > 1:  # different sections with the same heading: name the parent, else number them
+            names: dict[str, str] = {}
+            for i, a in enumerate(anchors, start=1):
+                par = parents.get(a, "")
+                names[a] = f"{par}: {lab}" if par and par != lab else lab
+            if len(set(names.values())) < len(anchors):
+                seen: dict[str, int] = {}
+                for a in anchors:
+                    seen[names[a]] = seen.get(names[a], 0) + 1
+                    if seen[names[a]] > 1:
+                        names[a] = f"{names[a]} (section {seen[names[a]]})"
+            for c in cs:
+                c["loc_label"] = names[str(c["loc_start"])]
+    # one section cut into several chunks: part i of n
+    by_anchor: dict[str, list[dict[str, Any]]] = {}
+    for c in sec:
+        by_anchor.setdefault(str(c["loc_start"]), []).append(c)
+    for cs in by_anchor.values():
+        if len(cs) > 1:
+            for i, c in enumerate(cs, start=1):
+                c["loc_label"] = f"{c['loc_label']} (part {i} of {len(cs)})"
+    return chunks
 
 
 CUE_MIN_SECONDS = 30      # do not cut before this much speech (unless the next cue starts a long pause)

@@ -430,14 +430,19 @@ def chunk_markdown(text: str) -> list[dict[str, Any]]:
     if not heads:
         return chunk_lines(lines)
     seen: set[str] = set()
-    sections: list[tuple[str, str, str]] = []
-    prev_end, anchor, heading = 0, "top", ""
+    sections: list[tuple[str, ...]] = []
+    prev_end, anchor, heading, parent, level_ = 0, "top", "", "", 0
+    trail: list[tuple[int, str]] = []  # the headings above the current one: (level, text)
     for idx, level, htext in heads:
-        sections.append((anchor, heading, "\n".join(lines[prev_end:idx])))
+        sections.append((anchor, heading, "\n".join(lines[prev_end:idx]), parent))
         heading = strip_markdown(htext) or htext
+        while trail and trail[-1][0] >= level:
+            trail.pop()
+        parent = trail[-1][1] if trail else ""
+        trail.append((level, heading))
         anchor = unique_slug(heading, seen)
         prev_end = idx + 1
-    sections.append((anchor, heading, "\n".join(lines[prev_end:])))
+    sections.append((anchor, heading, "\n".join(lines[prev_end:]), parent))
     return section_chunks(sections)
 
 
@@ -596,6 +601,8 @@ def chunk_plain(text: str, title: str = "") -> list[dict[str, Any]]:
         c = chunk(body if body is not None else "\n\n".join(g["text"] for g in group), "line", a_,
                   heading=(f"{title}, {head}" if title else head) if head != "lines" else title, loc_end=b_)
         c["loc_label"] = rng if head == "lines" else f"{head}, {rng}"
+        if head == "lines" and not out:  # said once per file: citing a line range is all the reader can do
+            c["loc_label"] += " (no paragraph numbers in this file)"
         out.append(c)
 
     cur: list[dict[str, Any]] = []
