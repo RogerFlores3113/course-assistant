@@ -522,6 +522,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         today = date.today()
         if tab == "materials":
             ctx["materials"] = material_rows(cid)
+            find = getattr(_safe_mod("retrieval"), "material_matches", None)  # titles, file names and passage text
+            ctx["material_matches"] = (lambda q: find(store, cid, q)) if callable(find) else (lambda q: {})
             ctx["supported"] = _supported_formats()
             ctx["lectures"] = list(reversed(lecture_choices(cid)))
             ctx["graded"] = graded_panel(cid)

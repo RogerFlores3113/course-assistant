@@ -9,7 +9,6 @@ from typing import Any
 from . import locations
 
 Source = dict[str, Any]
-DEBUG: list | None = None
 BASE_W, COV_W, HEAD_W = 2.2, 2.4, 2.0  # weights of: the FTS rank, how many of the question's words are in a passage, in its heading
 
 STOPWORDS = frozenset("""
@@ -456,6 +455,13 @@ def _is_exercise_chunk(r: dict[str, Any]) -> bool:
     return bool(_EXERCISE_HEAD.search(r["heading"] or "") or _EXERCISE_LEAD.match(r["text"] or ""))
 
 
+def is_filler_chunk(text: str, heading: str = "") -> bool:
+    """A chapter introduction or a list of end-of-chapter exercises: passages that a study guide or an exam guide
+    should not be built from, though a question about them (or a Practice request) can still find them."""
+    r = {"text": text or "", "heading": heading or ""}
+    return _is_intro_chunk(r) or _is_exercise_chunk(r)
+
+
 def _definition_score(terms: list[str], r: dict[str, Any]) -> float:
     """How much a chunk reads as the definition of one of the terms (0 to 2). The chunk must also hold at least
     half of the question's terms, so 'a defective matrix is...' does not define 'projection matrix'."""
@@ -898,8 +904,9 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
             continue  # matches only the most common word of a long question ('problem' in 'the TA problem session')
         score = BASE_W * (base.get(cid, 0.0) / top)
         score += (COV_W if present == len(cs) else 0.6 * COV_W * wpresent)
-        score += HEAD_W * whead
-        score += 4.5 * titles.get(r["material_id"], 0.0)
+        filler = (not intent["overview"] and _is_intro_chunk(r)) or (not intent["practice"] and _is_exercise_chunk(r))
+        score += HEAD_W * whead * (0.3 if filler else 1.0)  # 'Chapter ... Exercises' shares words with every chapter title
+        score += (1.0 if filler else 4.5) * titles.get(r["material_id"], 0.0)  # asking for a chapter is not asking for its intro or exercises
         score += _number_score(qnums, r["text"])
         score += boost.get(cid, 0.0)
         if defterms:
@@ -925,8 +932,6 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
             score -= 1.0
         if not intent["wants_header"] and is_header_chunk(r["text"], r["material_title"]):
             score -= 6.0 if (intent["main_arg"] or r["material_id"] in named) else 1.5
-        if DEBUG is not None:
-            DEBUG.append((cid, round(score, 2), round(3.0 * (base.get(cid, 0.0) / top), 2), round(wpresent, 2), round(whead, 2)))
         scored.append((score, r))
     scored.sort(key=lambda x: (-x[0], x[1]["id"]))
     ranked = _dedupe(scored, max(limit, 1) * 3)
@@ -1140,3 +1145,61 @@ def around(store, chunk_id: int, before: int = 1, after: int = 1) -> list[dict]:
     for r in rows:
         r["href"] = locations.href_for(r)
     return rows
+
+
+# ---------------------------------------------------------------- searching the materials list
+def _snippet(text: str, terms: list[str], width: int = 110) -> str:
+    """A short stretch of the passage around the first word of the search that appears in it."""
+    flat = re.sub(r"\s+", " ", re.sub(r"[`*#>$]", "", text or "")).strip()
+    low = flat.lower()
+    at = min((i for i in (low.find(t) for t in terms) if i >= 0), default=0)
+    start = max(0, at - width // 3)
+    out = flat[start:start + width].strip()
+    return ("..." if start > 0 else "") + out + ("..." if start + width < len(flat) else "")
+
+
+def material_matches(store, course_id: int, query: str, *, limit: int = 200) -> dict[int, dict[str, Any]]:
+    """The materials a search box finds, with why: {material id: {'title': bool, 'file': bool, 'kind': bool,
+    'passages': n, 'snippet': text, 'chunk_id': id, 'how': ['title', 'file name', '3 passages']}}.
+    A material matches when its title, file name or kind name has the text in it, or when passages of it hold every
+    word of the search (any word, if no passage holds them all). Copies of another file are included, so the list
+    shows them too."""
+    q = (query or "").strip()
+    if not q:
+        return {}
+    low = q.lower()
+    out: dict[int, dict[str, Any]] = {}
+    from .store import MATERIAL_KINDS
+
+    for m in store._rows("SELECT id, title, original_name, kind FROM materials WHERE course_id = ?", (course_id,)):
+        hit_t = low in (m["title"] or "").lower()
+        hit_f = low in (m.get("original_name") or "").lower()
+        hit_k = low in (MATERIAL_KINDS.get(m["kind"], m["kind"]) or "").lower()
+        if hit_t or hit_f or hit_k:
+            how = [x for x, h in (("title", hit_t), ("file name", hit_f), ("kind", hit_k)) if h]
+            out[m["id"]] = {"title": hit_t, "file": hit_f, "kind": hit_k, "passages": 0, "snippet": "", "chunk_id": 0,
+                            "how": how}
+    terms = query_terms(q, max_terms=8)
+    if terms:
+        rows: list[dict[str, Any]] = []
+        for joiner in (" AND ", " OR "):
+            try:
+                rows = store._rows(
+                    "SELECT c.id, c.material_id, c.text FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid "
+                    "WHERE chunks_fts MATCH ? AND c.course_id = ? ORDER BY c.material_id, c.ord LIMIT 2000",
+                    [joiner.join(_fts_term(t) for t in terms), course_id])
+            except Exception:  # a malformed search must not break the page
+                rows = []
+            if rows:
+                break
+        by_mat: dict[int, list[dict[str, Any]]] = {}
+        for r in rows:
+            by_mat.setdefault(r["material_id"], []).append(r)
+        for mid, rs in list(by_mat.items())[:limit]:
+            hit = out.setdefault(mid, {"title": False, "file": False, "kind": False, "passages": 0, "snippet": "",
+                                       "chunk_id": 0, "how": []})
+            hit["passages"] = len(rs)
+            hit["chunk_id"] = rs[0]["id"]
+            hit["snippet"] = _snippet(rs[0]["text"], terms)
+            hit["how"].append(f"{len(rs)} passage{'' if len(rs) == 1 else 's'}")
+    return out
