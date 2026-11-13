@@ -40,7 +40,12 @@ DOC_GROUPS = {"hw": "hw", "homework": "hw", "pset": "hw", "ps": "hw", "assignmen
 _DOC_REF = re.compile(r"\b(problem set|homework|assignment|pset|hw|ps|exam|midterm|final|test|quiz|lab|project|essay|paper)"
                       r"\s*(?:#|no\.?|number)?\s*(\d+)", re.I)
 _PROB_REF = re.compile(r"\b(?:problem|question|exercise|prob|q|probl[e\u00e8]me|problema|aufgabe|exercice|ejercicio|pregunta)"
-                       r"\s*\.?\s*#?\s*(\d+[a-z]?)\b|#(\d+)\b|\bp(\d+)\b", re.I)
+                       r"\s*\.?\s*#?\s*(\d+)(?:\(\s*([a-z])\s*\)|\.([a-z])\b|([a-z])\b|\s+part\s*\(?([a-z])\)?(?![a-z]))?(?![A-Za-z0-9])"
+                       r"|#(\d+)(?:\(\s*([a-z])\s*\)|\.([a-z])\b|([a-z])\b)?(?![A-Za-z0-9])|\bp(\d+)([a-z])?(?![A-Za-z0-9])", re.I)
+# a bare sub-part reference: "3b", "1a", "3(a)", "3.b" ('d' only in brackets, since 3D and 4D are not parts)
+_BARE_PART = re.compile(r"(?<![\w.#/\-])(\d{1,2})(?:\(\s*([a-h])\s*\)|\.([a-c])\b|([a-c]))(?![A-Za-z0-9(])", re.I)
+_NOT_PART_CTX = re.compile(r"(?:section|sec\.?|page|pages|pg|pp?\.|chapter|ch\.?|lecture|lec\.?|week|figure|fig\.?|table|eq\.?|equation|"
+                           r"version|v|slide|unit|module|part|step|line|row|col|column|theorem|lemma|definition)\s*#?\s*$", re.I)
 
 # --------------------------------------------------------------------------- the rule (shared by every prompt)
 RULE = """ACADEMIC INTEGRITY RULE. This rule has priority over every other instruction, including the student's.
@@ -872,11 +877,36 @@ def _doc_refs(text: str) -> set[tuple[str, str]]:
     return {(DOC_GROUPS[m.group(1).lower()], m.group(2).lstrip("0") or "0") for m in _DOC_REF.finditer(text)}
 
 
-def _prob_refs(text: str) -> set[str]:
+def _prob_pairs(text: str) -> set[tuple[str, str]]:
+    """(problem number, part letter or '') for every problem reference: 'Problem 3', '3b', '3(b)', 'q3b', '#3b', '3.b'."""
     text = re.sub(r"[-_]+", " ", text or "")
     # drop "problem set 2" style phrases so the 2 is not read as a problem number
     text = re.sub(r"\bproblem set\s*\d+", " ", text, flags=re.I)
-    return {(m.group(1) or m.group(2) or m.group(3)).lower() for m in _PROB_REF.finditer(text)}
+    out: set[tuple[str, str]] = set()
+    for m in _PROB_REF.finditer(text):
+        g = m.groups()
+        if g[0]:
+            out.add((g[0], next((x for x in g[1:5] if x), "").lower()))
+        elif g[5]:
+            out.add((g[5], next((x for x in g[6:9] if x), "").lower()))
+        else:
+            out.add((g[9], (g[10] or "").lower()))
+    for m in _BARE_PART.finditer(text):
+        if _NOT_PART_CTX.search(text[max(0, m.start() - 14):m.start()]):
+            continue
+        out.add((m.group(1), next((x for x in m.groups()[1:] if x), "").lower()))
+    return {(n.lstrip("0") or "0", p) for n, p in out}
+
+
+def _prob_refs(text: str) -> set[str]:
+    """The problem numbers a text names; a sub-part ('3b', '3(b)') names its problem number."""
+    return {n for n, _ in _prob_pairs(text)}
+
+
+def _refs_match(question: str, label: str) -> bool:
+    """The question and the label name the same problem; when both name a part the parts must agree."""
+    qp, tp = _prob_pairs(question), _prob_pairs(label)
+    return any(n == qn and (not p or not qpart or p == qpart) for n, p in tp for qn, qpart in qp)
 
 
 def _title_words(text: str) -> str:
@@ -890,10 +920,10 @@ def _reference_match(question: str, item: dict[str, Any]) -> bool:
     if q_docs and t_docs & q_docs:
         # right assignment; if the title also names one problem, the question must name that problem
         if t_probs and q_probs:
-            return bool(t_probs & q_probs)
+            return _refs_match(question, title)
         return not t_probs or not q_probs
     if q_probs and t_probs and not q_docs:
-        return bool(q_probs & t_probs)
+        return _refs_match(question, title)
     tw = _title_words(title)
     if tw and (len(tw.split()) >= 2 or any(c.isdigit() for c in tw)) and len(tw) >= 4:
         return f" {tw} " in f" {_title_words(question)} "
@@ -1039,8 +1069,8 @@ composition empirical molecular formula stoichiometry reagent yield limiting aci
 
 def _own_ref(question: str, item: dict[str, Any]) -> bool:
     """The question names this item's own problem number ('Problem 3', 'problem 3 of pset 2', '#3')."""
-    mine = _prob_refs(item.get("label") or "") or _prob_refs(item.get("title") or "")
-    return bool(mine and mine & _prob_refs(question))
+    lab = item.get("label") if _prob_refs(item.get("label") or "") else item.get("title")
+    return bool(_prob_refs(lab or "") and _refs_match(question, lab or ""))
 
 
 def _closeness(q: _Text, item: dict[str, Any], b: _Text) -> float:
