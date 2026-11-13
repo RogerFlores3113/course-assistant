@@ -18,7 +18,8 @@ from typing import Any
 
 from markupsafe import Markup
 
-from .grounding import OUTSIDE_CLOSE, OUTSIDE_OPEN, QUOTE_CLOSE, QUOTE_FLAG_TEXT, QUOTE_OPEN, REMOVED_MARK
+from .grounding import (OUTSIDE_CLOSE, OUTSIDE_OPEN, QUOTE_CLOSE, QUOTE_FLAG_TEXT, QUOTE_OPEN, REMOVED_MARK,
+                        strip_past_words)
 
 REMOVED_LABEL = "a citation here pointed to a source that doesn't exist and was removed"
 OUTSIDE_RE = re.compile(r"<outside>(.*?)</outside>", re.S | re.I)
@@ -56,6 +57,7 @@ def source_map(sources: list[dict[str, Any]] | None) -> dict[int, dict[str, Any]
         except (TypeError, ValueError):
             n = i
         title = s.get("title") or s.get("material_title") or "Material"
+        title = strip_past_words(title, bool(s.get("past")))
         out[n] = {"n": n, "title": title, "label": clean_label(title, s.get("label") or s.get("loc_label") or ""),
                   "href": s.get("href") or "", "past": s.get("past") or ""}
     return out
@@ -432,7 +434,7 @@ def _tex(expr: str) -> str:
 
 # Raw TeX that reached the text without dollar signs (slide text: \hat{x} = (A^TA)^{-1}A^Tb). A run is a stretch of
 # words that hold a backslash command, a power or a subscript, with the lone letters, digits and signs between them.
-_TEX_STRONG = re.compile(r"\\[A-Za-z]+|[A-Za-z0-9)}]\^|[A-Za-z0-9)}]_[{A-Za-z0-9]|\^\{|\^[-0-9A-Za-z]")
+_TEX_STRONG = re.compile(r"\\[A-Za-z|]+|[A-Za-z0-9)}]\^|[A-Za-z0-9)}]_[{A-Za-z0-9]|\^\{|\^[-0-9A-Za-z]")
 _TEX_WEAK = re.compile(r"^[(\[]?[A-Za-z0-9]?[)\]]?[=+\-*/<>,.;]?$|^[=+\-*/<>]$|^\(?[A-Za-z]\)?[,.;]?$|^[0-9]+(?:\.[0-9]+)?$")
 
 
@@ -459,6 +461,8 @@ def _tex_runs(line: str) -> str:
         core = t.rstrip(".,;:")
         kinds.append("strong" if _TEX_STRONG.search(core) and not re.search(r"[A-Za-z]{4,}(?<!\\)\b(?![{^_])", re.sub(r"\\[A-Za-z]+|\{[^}]*\}", "", core)) else
                      "weak" if _TEX_WEAK.match(core) else "word")
+    if toks and re.fullmatch(r"(?:[A-Za-z]|\d{1,2})[.)]", toks[0][1]) and len(toks) > 1:
+        kinds[0] = "word"  # a list letter ("A. ...") is not part of the formula after it
     out_parts = list(parts)
     i = 0
     while i < len(toks):
@@ -490,6 +494,57 @@ def _tex_runs(line: str) -> str:
     return "".join(out_parts)
 
 
+# Stoichiometry written flat in textbook text: "(2.5 g H)/(10.0 g compound) x 100%=25%", "4.7 g K ((mol K)/(39.10 g K)) = 0.12 mol K".
+_FRAC_Q = re.compile(r"\(\s*(\([^()]+\))\s*/\s*(\([^()]+\))\s*\)|(\([^()]+\))\s*/\s*(\([^()]+\))")
+_NUM_Q = re.compile(r"^(-?\d[\d,]*(?:\.\d+)?)\s*(.*)$")
+
+
+def _q_tex(part: str) -> str:
+    """A quantity such as "2.5 g H" or "mol K" as TeX: the number, a space, the unit as text."""
+    part = part.strip().replace("%", r"\%")
+    m = _NUM_Q.match(part)
+    if m:
+        return f"{m.group(1)}\\ \\text{{{m.group(2)}}}" if m.group(2) else m.group(1)
+    return f"\\text{{{part}}}"
+
+
+def _frac_tex(m: re.Match) -> str:
+    a, b = (m.group(1) or m.group(3)), (m.group(2) or m.group(4))
+    return f"\\frac{{{_q_tex(a[1:-1])}}}{{{_q_tex(b[1:-1])}}}"
+
+
+def _stoich_line(line: str) -> str:
+    """A line with a "(a)/(b)" fraction of quantities. An equation line becomes one math span; prose keeps its words and
+    only the fraction is typeset."""
+    st = line.strip()
+    if "$" in st or "`" in st or not _FRAC_Q.search(st) or st.startswith(("#", "|", ">")):
+        return line
+    if not any(re.search(r"\s", g[1:-1]) for m in _FRAC_Q.finditer(st) for g in m.groups() if g and g.startswith("(")):
+        return line  # (C1V1)/(C2) and (a)/(b) are algebra, handled by the equation rule
+    lead = line[:len(line) - len(line.lstrip())]
+    pieces = re.split(r"(?<=%)\s+(?=%\s*[A-Za-z]+\s*=)", st)
+    if len(pieces) > 1:  # "% C= (7.34 g C)/(12.04 g compound) x 100%=61.0% % H= ..." is several equations on one line
+        return lead + " ".join(_stoich_line(x).strip() for x in pieces)
+    outside = _FRAC_Q.sub(" ", st)
+    words = re.findall(r"\b[a-z]{3,}\b", outside)
+    if "=" not in st or len(words) > 3 or re.search(r"[.!?]\s+[A-Z]", st):
+        return lead + _FRAC_Q.sub(lambda m: f"${_frac_tex(m)}$", st)
+    fracs: list[str] = []
+
+    def hold(m: re.Match) -> str:
+        fracs.append(_frac_tex(m))
+        return f"\x02{len(fracs) - 1}\x02"
+    t = _FRAC_Q.sub(hold, st.replace("\x02", ""))
+    t = re.sub(r"^%\s*([A-Za-z]+)\s*=", r"\\%\\ \\text{\1} =", t)
+    t = re.sub(r"\s*[\u00d7]\s*|(?<=\d)\s+x\s+(?=\d)|(?<=\x02)\s*x\s*(?=\d)", r" \\times ", t)
+    t = re.sub(r"(?<![\\\w{.])(\d[\d,]*(?:\.\d+)?)%", r"\1\\%", t)
+    t = re.sub(r"(?<![\\\w{.])(\d[\d,]*(?:\.\d+)?)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})(?![\w}])",
+               lambda m: f"{m.group(1)}\\ \\text{{{m.group(2)}}}", t)
+    t = re.sub(r"(?<=[A-Za-z}])\s+(?=\x02)", r" \\cdot ", t)
+    t = re.sub(r"\x02(\d+)\x02", lambda m: fracs[int(m.group(1))], t)
+    return f"{lead}${t.strip()}$"
+
+
 def _math_line(line: str) -> str:
     if "$" in line or "`" in line or line.lstrip().startswith(("#", "|", ">")):
         return line
@@ -498,6 +553,14 @@ def _math_line(line: str) -> str:
         line = re.sub(r"\*\*([A-Za-z]{1,2})\*(?=\d)", r"\1", line)  # **n*1: bold marks glued to a variable name
         if line.count("*") == 1:  # one asterisk left with nothing to close it
             line = re.sub(r"\*(?=\w)", "", line)
+
+    if "\\" in line:  # raw TeX with commands: wrap the whole run, so "=\|Ax\|^2" is not cut in two
+        whole = _tex_runs(line)
+        if whole != line:
+            return whole
+    stoich = _stoich_line(line)
+    if stoich != line:
+        return stoich
 
     def sub(m: re.Match) -> str:
         e = m.group(1)

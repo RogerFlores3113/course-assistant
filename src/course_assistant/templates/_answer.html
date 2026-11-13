@@ -16,8 +16,9 @@
   {% if view.sources %}<div class="sources"><h{{ view.base_level }}>Sources</h{{ view.base_level }}>{{ source_list(view.sources) }}</div>
   {% else %}<p class="muted">No passages from your materials were cited in this answer.</p>{% endif %}
   {% if view.unused_sources %}<details class="sources also"><summary>Also searched (not cited)</summary>{{ source_list(view.unused_sources) }}</details>{% endif %}
-  {% if view.removed_citations %}<p class="muted small" data-removed-citations>{{ view.removed_citations }} citation{{ 's' if view.removed_citations != 1 else '' }} in this text pointed to a source that doesn't exist and {{ 'were' if view.removed_citations != 1 else 'was' }} removed. Check the marked spot{{ 's' if view.removed_citations != 1 else '' }}.</p>{% endif %}
-  {% if view.unverified_quotes %}<p class="muted small" data-unverified-quotes>{{ view.unverified_quotes }} quotation{{ 's' if view.unverified_quotes != 1 else '' }} could not be found word for word in the cited source. Check {{ 'them' if view.unverified_quotes != 1 else 'it' }} against the original.</p>{% endif %}
+  {# the "Check:" line at the top says both counts; the numbers stay in the page for app.js, hidden from everyone else #}
+  {% if view.removed_citations %}<span hidden data-removed-citations>{{ view.removed_citations }}</span>{% endif %}
+  {% if view.unverified_quotes %}<span hidden data-unverified-quotes>{{ view.unverified_quotes }}</span>{% endif %}
   <p class="footer-note">{{ view.footer }}</p>
 </div>
 {% endmacro %}

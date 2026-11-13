@@ -114,6 +114,18 @@ def _past_label(source: Source) -> str | None:
         return "Past offering"
 
 
+_PAST_WORDS = re.compile(r"\s*[\(\[]\s*past\s+offerings?\s*[\)\]]|\s*[-:,]\s*past\s+offerings?\s*$", re.I)
+
+
+def strip_past_words(title: str, has_tag: bool) -> str:
+    """A material title without a trailing "(past offering)", when the source row carries the "Past offering: Fall 2025"
+    tag anyway, so the words are not said twice."""
+    t = (title or "").strip()
+    if not has_tag:
+        return t
+    return _PAST_WORDS.sub("", t).strip() or t
+
+
 def format_sources(sources: list[Source]) -> str:
     if not sources:
         return "SOURCES: none. Nothing in the student's materials matched this question."
@@ -122,10 +134,14 @@ def format_sources(sources: list[Source]) -> str:
         text = (s.get("text") or "").strip()
         if len(text) > MAX_SOURCE_CHARS:
             text = text[:MAX_SOURCE_CHARS].rsplit(" ", 1)[0] + " ..."
-        head = f"[{i}] {s.get('material_title', 'Material')}, {s.get('loc_label', '')}"
         past = _past_label(s)
+        title = strip_past_words(s.get("material_title", "Material"), bool(past))
+        loc = (s.get("loc_label") or "").strip()
+        if loc and (loc == title or title.endswith(", " + loc) or title.endswith(": " + loc)):
+            loc = ""  # the title already says where in the material this is
+        head = f"[{i}] {title}" + (f", {loc}" if loc else "")
         if past:
-            head += f" [{past}]".replace("[", "(").replace("]", ")")
+            head += f" ({past})"
         if s.get("heading"):
             head += f" (section: {s['heading']})"
         parts.append(f"{head}\n{text}")
@@ -459,7 +475,9 @@ _META_ADVICE = re.compile(
     r"^\s*(?:(?:try|ask|check|think\s+of|keep\s+in\s+mind|remember\s+to|consider|look\s+at|review|talk\s+to|"
     r"bring|make\s+sure|start\s+with|begin\s+with|next,?\s+try|you\s+could\s+(?:ask|try)|you\s+might\s+(?:ask|try))\b)"
     r"|\b(?:to\s+keep\s+in\s+mind|questions\s+to\s+(?:ask|think\s+about|consider))\b", re.I)
-_ABBREV = {"e.g", "i.e", "vs", "dr", "fig", "eq", "eqs", "etc", "cf", "no", "approx", "mr", "ms", "mrs", "prof", "sec", "ch", "al"}
+_ABBREV = {"e.g", "i.e", "vs", "dr", "fig", "eq", "eqs", "etc", "cf", "no", "nos", "approx", "mr", "ms", "mrs", "prof",
+           "sec", "ch", "al", "gov", "gen", "sen", "rep", "st", "pp", "vol", "vols", "col", "jr", "sr", "u.s", "capt",
+           "lt", "rev"}
 _SENT_SPLIT = re.compile(r"(?<=[.!?])((?:\s*\[\d+(?:\s*[,;–-]\s*\d+)*\])*)\s+(?=[A-Z0-9\"“*_])")
 
 
@@ -484,7 +502,12 @@ def _sentences(p: str) -> list[str]:
 _IMPERATIVE = re.compile(
     r"^\W*(?:calculate|compute|find|determine|solve|explain|describe|write|show|prove|convert|predict|identify|list|"
     r"state|give|derive|evaluate|simplify|sketch|draw|compare|name|define|balance|estimate|verify|justify|discuss|"
-    r"outline|summari[sz]e|analy[sz]e|interpret|apply|use|decide|classify|rank|choose|suppose|given|let)\b", re.I)
+    r"outline|summari[sz]e|analy[sz]e|interpret|apply|use|decide|classify|rank|choose|suppose|given|let|factor|"
+    r"factori[sz]e|decompose|reduce|row-reduce|multiply|add|subtract|divide|plot|graph|test|check|tell|substitute|"
+    r"expand|differentiate|integrate|set\s+up|perform|carry|work|rewrite|express|construct|build|design|"
+    r"implement|complete|fill|arrange|insert|delete|how|what|why|does|do|can|should|would|continue|repeat)\b", re.I)
+_STEM_OPENER = re.compile(r"^\W*(?:using|given|starting|after|by|assuming|based\s+on|consider|"
+                          r"with\s+(?:the|your)\s+(?:result|answer|values?|matrix|factori))\b", re.I)
 _STEM_LABEL = re.compile(r"^\W*(?:question|problem|exercise|practice|q)\s*\d*\s*[:.)\-–]?\s*|^\(?[a-z0-9]{1,2}[.)]\s+", re.I)
 
 
@@ -497,7 +520,7 @@ def _stem_unit(unit: str, lenient: bool) -> bool:
     ends_q = [x.rstrip().endswith("?") for x in sents]
     imp = [bool(_IMPERATIVE.match(x)) for x in sents]
     if lenient:  # a list item or a labelled question: its setup sentences belong to the question
-        return any(ends_q) or any(imp)
+        return any(ends_q) or any(imp) or bool(_STEM_OPENER.match(sents[0]))
     return all(q or i or _is_meta(x)[0] for x, q, i in zip(sents, ends_q, imp))
 
 
@@ -549,6 +572,13 @@ def _details_segments(text: str) -> list[tuple[str, str]]:
     return [(k, t) for k, t in out if t.strip()]
 
 
+def _says_gap_phrase(phrase: str) -> bool:
+    """An inline <outside> phrase whose only content is that the materials do not cover something."""
+    plain = _PLAIN.sub("", phrase or "").strip()
+    return bool(plain) and "$" not in plain and len(plain.split()) <= 45 and all(
+        _gap_sentence(x) or _META_REFUSAL.search(x) for x in _sentences(plain))
+
+
 def _inline_outside(raw: str) -> str:
     """An <outside>phrase</outside> in the middle of a line stays in its sentence as an inline marker; one that
     stands on lines of its own (or runs long) stays a block."""
@@ -563,7 +593,10 @@ def _inline_outside(raw: str) -> str:
         after = raw[m.end():le]
         if not before.strip() and not after.strip():
             return whole
-        return f"{OUTSIDE_OPEN}{_strip_cites(inner).strip()}{OUTSIDE_CLOSE}"
+        phrase = _strip_cites(inner).strip()
+        if _says_gap_phrase(phrase):
+            return phrase  # "the sources do not say X" is not outside knowledge: plain words, no tag
+        return f"{OUTSIDE_OPEN}{phrase}{OUTSIDE_CLOSE}"
     return _OUTSIDE.sub(repl, raw)
 
 
@@ -586,9 +619,13 @@ def _is_meta(text: str) -> tuple[bool, bool]:
     return ok, ok and any(cov)
 
 
-def _split_sentences(cleaned: str, found: list[int]) -> list[Block]:
-    """A cited prose paragraph. A sentence that makes a claim, has no citation of its own, follows a cited sentence
-    and has no cited sentence after it is cut out and labelled; a lead-in before a cited sentence stays with it."""
+_ASSERTS = re.compile(r"\b(?:is|are|was|were|has|had|have|means|became|called|known|did|made|born|died|wrote|lived)\b|\d",
+                      re.I)
+
+
+def _split_sentences(cleaned: str, found: list[int], calc: bool = False) -> list[Block]:
+    """A cited prose paragraph. A sentence that makes a claim and has no citation of its own is cut out and labelled,
+    whether it comes after a cited sentence or before one; a lead-in that states no fact stays with its cited sentence."""
     if "\n" in cleaned or cleaned.lstrip().startswith(("#", ">", "|", "<", "-", "*", "+")) or "|" in cleaned \
             or re.match(r"^\s*\d+[.)]\s", cleaned) or QUOTE_OPEN in cleaned:
         return [Block("text", cleaned, sorted(set(found)))]
@@ -599,8 +636,11 @@ def _split_sentences(cleaned: str, found: list[int]) -> list[Block]:
     flags = []  # True = label this sentence
     for i, x in enumerate(sents):
         plain = re.sub(r"[*_`>#]", "", _strip_cites(x)).strip()
-        flag = (not cites[i] and any(cites[:i]) and REMOVED_MARK not in x
-                and len(plain.split()) >= 5 and not _is_meta(plain)[0] and not _makes_no_claim(plain))
+        later = any(cites[i + 1:])
+        flag = (not cites[i] and (any(cites[:i]) or later) and REMOVED_MARK not in x
+                and len(plain.split()) >= 5 and not _is_meta(plain)[0] and not _makes_no_claim(plain)
+                and not is_non_claim(plain, calc=calc)
+                and (any(cites[:i]) or bool(_ASSERTS.search(plain))))  # a lead-in before a cite needs a stated fact
         flags.append(flag)
     if not any(flags):
         return [Block("text", cleaned, sorted(set(found)))]
@@ -630,7 +670,7 @@ def _details_inner(p: str) -> str:
 _LIST_ITEM = re.compile(r"^\s{0,3}(?:[-*+]|\d+[.)])\s+")
 
 
-def _split_mixed_list(cleaned: str, found: list[int]) -> list[Block]:
+def _split_mixed_list(cleaned: str, found: list[int], calc: bool = False) -> list[Block]:
     """A cited paragraph. If it is a list where only some items cite a source, cut it into one block per item so the
     uncited items are labelled on their own."""
     lines = cleaned.splitlines()
@@ -649,7 +689,8 @@ def _split_mixed_list(cleaned: str, found: list[int]) -> list[Block]:
     out: list[Block] = []
     for item, c in zip(items, cites):
         text = "\n".join(item)
-        if c or _is_stems(text) or _is_meta(_LIST_ITEM.sub("", text, count=1).strip())[0]:
+        if c or _is_stems(text) or _is_meta(_LIST_ITEM.sub("", text, count=1).strip())[0] \
+                or is_non_claim(text, calc=calc):
             out.append(Block("text", text, c))
         else:
             out.append(Block("outside", _unmark(_LIST_ITEM.sub("", text, count=1).strip()), []))
@@ -669,7 +710,7 @@ def _parse(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool]:
         _N_SOURCES.reset(token)
 
 
-def _uncited_blocks(cleaned: str, n_sources: int) -> tuple[list[Block], bool]:
+def _uncited_blocks(cleaned: str, n_sources: int, calc: bool = False) -> tuple[list[Block], bool]:
     """Blocks for one paragraph with no valid citation, and whether it only said the materials do not cover it."""
     if _says_not_covered(cleaned):
         return [Block("text", cleaned, [])], True  # kept as plain text; _parse_inner drops it when nothing is cited
@@ -678,9 +719,10 @@ def _uncited_blocks(cleaned: str, n_sources: int) -> tuple[list[Block], bool]:
         for kind, seg in _details_segments(cleaned):
             if kind == "details":
                 inner = _details_inner(seg)
-                out.append(Block("text" if not inner or _makes_no_claim(inner) else "outside",
-                                 seg if not inner or _makes_no_claim(inner) else _unmark(seg), []))
-            elif _is_stems(seg) or _is_meta(seg)[0] or (_makes_no_claim(seg) and (n_sources > 0 or _is_structural(seg))):
+                plain_ok = not inner or _makes_no_claim(inner) or (n_sources > 0 and calc and is_non_claim(inner, calc=True))
+                out.append(Block("text" if plain_ok else "outside", seg if plain_ok else _unmark(seg), []))
+            elif _is_stems(seg) or _is_meta(seg)[0] or (_makes_no_claim(seg) and (n_sources > 0 or _is_structural(seg))) \
+                    or (n_sources > 0 and is_non_claim(seg, calc=calc)):
                 out.append(Block("text", seg, []))
             else:
                 out.append(Block("outside", _unmark(seg), []))
@@ -690,6 +732,8 @@ def _uncited_blocks(cleaned: str, n_sources: int) -> tuple[list[Block], bool]:
     if _is_stems(cleaned):
         return [Block("text", cleaned, [])], False
     if _makes_no_claim(cleaned) and (n_sources > 0 or _is_structural(cleaned)):
+        return [Block("text", cleaned, [])], False
+    if n_sources > 0 and is_non_claim(cleaned, calc=calc):
         return [Block("text", cleaned, [])], False
     return [Block("outside", _unmark(cleaned), [])], False
 
@@ -707,9 +751,14 @@ def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool
     blocks: list[Block] = []
     said_not_covered = False
     gap_notes: list[Block] = []  # "the sources do not cover X" lines, kept only next to cited text
+    worked = False  # inside a worked example: its uncited arithmetic is the working, not a claim
     for kind, seg in segments:
         seg = _STRAY_TAG.sub("", seg)
         for para in _paragraphs(seg):
+            if _WORKED_START.search(para):
+                worked = True
+            elif para.lstrip().startswith("#"):
+                worked = False
             cleaned, found = clean_citations(para, n_sources)
             if kind == "outside":
                 stripped = _strip_cites(cleaned)
@@ -724,7 +773,7 @@ def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool
                     said_not_covered = said_not_covered or meta[1]
                     blocks.append(Block("text", stripped, []))
                     continue
-                if _is_stems(stripped):
+                if _is_stems(stripped) or (n_sources > 0 and is_non_claim(stripped, calc=worked)):
                     blocks.append(Block("text", stripped, []))
                     continue
                 blocks.append(Block("outside", stripped, []))
@@ -734,13 +783,13 @@ def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool
                 if _DETAILS_OPEN.search(cleaned):
                     blocks.append(Block("text", cleaned, sorted(set(found))))  # a hidden solution stays one block
                 else:
-                    blocks.extend(_split_mixed_list(cleaned, found) if "\n" in cleaned
-                                  else _split_sentences(cleaned, found))
+                    blocks.extend(_split_mixed_list(cleaned, found, worked) if "\n" in cleaned
+                                  else _split_sentences(cleaned, found, worked))
             elif REMOVED_MARK in cleaned and not cleaned.lstrip().startswith("#"):
                 # A line that tried to cite a source that doesn't exist is a claim, so it is never exempt.
                 blocks.append(Block("outside", _unmark(cleaned), []))
             else:
-                more, said = _uncited_blocks(cleaned, n_sources)
+                more, said = _uncited_blocks(cleaned, n_sources, worked)
                 said_not_covered = said_not_covered or said
                 if said and len(more) == 1 and _says_not_covered(cleaned):
                     gap_notes.append(more[0])
@@ -780,7 +829,53 @@ def is_not_covered(blocks: list[Block], n_sources: int, said: bool = False) -> b
 _COACH_START = re.compile(
     r"^\W*(?:read|reread|re-read|work\s+through|practi[cs]e|redo|review|focus\s+on|spend|rest|take\s+a\s+break|go\s+back|"
     r"write\s+down|say|notice|pay\s+attention|compare|look\s+back|come\s+back|sleep|stop|pause|breathe|"
-    r"don't\s+forget|do\s+not\s+forget|be\s+sure|try\s+to)\b", re.I)
+    r"don't\s+forget|do\s+not\s+forget|be\s+sure|try\s+to|plan|start|begin|open|outline|draft|make|aim|keep|build|"
+    r"decide|choose|avoid|include|cite|quote|connect|tie|link|ask|check|think|consider|limit|get|upload|"
+    r"save|import|bring|pick|revise|rewrite|re-?check|test)\b", re.I)
+# the app talking about its own page or guide, not about the subject
+_META_SELF = re.compile(
+    r"\b(?:this|the)\s+(?:guide|primer|answer|summary|plan|page|set|outline)\s+(?:cannot|can't|can\s+not|does\s*n[o']t|"
+    r"only|is\s+built|was\s+built|is\s+made|was\s+made|covers?|leaves?|skips?)\b|"
+    r"\b(?:have|has|there\s+(?:is|are))\s+no\s+(?:saved\s+)?(?:materials?|notes|files)\b|"
+    r"\bno\s+saved\s+(?:materials?|notes)\b|\bcannot\s+cover\b|\bcan't\s+cover\b|"
+    r"\b(?:upload|add|save|import)\b[^.!?]*\b(?:materials?|notes|lectures?|files?|slides|readings?)\b|"
+    r"\b(?:uploaded|added|saved|imported)\b\s*[.!]?\s*$|"
+    r"\bcheck\s+(?:that|this|it|them|with|the\s+(?:syllabus|schedule|date|calendar))\b", re.I)
+_CAUTION = re.compile(
+    r"^\W*(?:this|that|these|it)\s+(?:is|are|was|were|comes?\s+from)\s+(?:last\s+(?:year|term|semester)'s|"
+    r"an?\s+(?:earlier|past|previous|old)|from\s+(?:an?\s+)?(?:earlier|past|previous|old)|not\s+this\s+term)\b|"
+    r"\bnot\s+this\s+term's\b|^\W*(?:your|the)\s+(?:current|this\s+term's|fall|spring|winter|summer)\b[^.!?]*"
+    r"\b(?:check|confirm|verify|look)\b", re.I)
+# two facts already cited, set side by side ("That is one fewer exam than Fall 2018")
+_COMPARISON = re.compile(
+    r"^\W*(?:that|this|it|so|which|these|those|both|the\s+two)\b[^.!?]*\b(?:fewer|more|less|earlier|later|longer|"
+    r"shorter|higher|lower|bigger|smaller|larger|than|same\s+as|different\s+from|differs?|compared|unlike|similar)\b", re.I)
+# feedback on the student's own draft or proof, and what the assignment asks of it
+_ABOUT_DRAFT = re.compile(
+    r"^\W*(?:you|your|you're|you've)\b|^\W*(?:the|this)\s+draft\b|"
+    r"^\W*(?:the|this)\s+(?:assignment|rubric|prompt|task)\s+(?:asks|requires|wants|needs|expects|says|lists|grades|"
+    r"scores)\b|^\W*(?:honest\s+answer|verdict|feedback|overall|strength|weakness|gap|missing)\b", re.I)
+# when the page is feedback on the student's own draft or proof, these third-person lines are about the draft too
+_ABOUT_DRAFT_LOOSE = re.compile(
+    r"^\W*(?:the|this|that|each|every|one\s+of\s+the)\s+(?:\w+\s+){0,2}?(?:essay|thesis|paragraph|introduction|intro|"
+    r"conclusion|proof|argument|claim|evidence|step|sentence|lemma|case|base\s+case|induction|draft|reasoning|"
+    r"structure|rubric|point)s?\b", re.I)
+_PLAN_LINE = re.compile(
+    r"^\W*(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}(?:/\d{2,4})?|(?:mon|tues?|wednes|thurs?|fri|satur|sun)(?:day)?|"
+    r"day\s*\d+|week\s*\d+)\b\W*[:\-\u2013]\s*(?:(?:light|short|quick|final|full|first|second|one)\s+)?"
+    r"(?:practi[cs]e|review|study|read|rest|redo|work|quiz|flash\s*cards?|cram|recap|catch|lecture|chapter|session|"
+    r"set|problems?|go\s+over|finish|do|take|mock|revise|break|free|off)\b[^.!?]{0,60}[.!]?\s*$", re.I)
+_HERE_FRAME = re.compile(
+    r"^\W*(?:here\s+(?:is|are)|here's|below\s+(?:is|are)|this\s+is|these\s+are)\s+(?:the|a|an|your|some|my)?\s*"
+    r"(?:steps?|plan|outline|summary|problem|questions?|walk-?through|worked|solution|example|practice|set|"
+    r"guide|overview|approach|method|working|calculation)\b[^.!?]{0,90}[.:]?\s*$", re.I)
+_TITLE_LINE = re.compile(
+    r"^\W*(?:worked\s+)?(?:example|solution|problem|exercise|question|practice|answer|step|twin|walk-?through)\b"
+    r"[^.!?]{0,90}$", re.I)
+_RUBRIC_LABEL = re.compile(r"^\W*[A-Z][\w\s/&',-]{2,45}\(\d+(?:\s*(?:points?|pts?|%))?\)\s*:", re.I)
+_WORKED_START = re.compile(
+    r"(?im)^\W*(?:#+\s*)?\W*(?:worked\s+(?:example|solution)|example\s*\d*\b|solution\b|walk-?through|step[-\s]by[-\s]step|"
+    r"step\s*\d+\b|here\s+(?:is|are)\s+the\s+steps)", re.I)
 _PRONOUN_GAP = re.compile(
     r"\b(?:they|these|those|it)\s+(?:do(?:es)?\s*n[o']t|don't|doesn't|never)\s+"
     r"(?:include|contain|cover|say|mention|list|have|give|show|provide|explain)\b", re.I)
@@ -807,32 +902,87 @@ def says_gap(md: str) -> bool:
     return any(_gap_sentence(x) for x in _sentences(plain))
 
 
-def _claimless_sentence(x: str, calc: bool) -> bool:
+def has_uncited_gap(md: str) -> bool:
+    """True when some sentence of md, with no citation of its own, says that the materials do not cover something.
+    A cited paragraph that ends with such a sentence still has a part of the question the materials do not cover."""
+    for line in (md or "").splitlines():
+        line = _PLAIN.sub("", _LIST_ITEM.sub("", line, count=1)).strip()
+        if not line:
+            continue
+        for x in _sentences(line):
+            if not _cites_in(x) and _gap_sentence(_strip_cites(x)):
+                return True
+    return False
+
+
+_INLINE_OUTSIDE = re.compile(re.escape(OUTSIDE_OPEN) + r"(.*?)" + re.escape(OUTSIDE_CLOSE), re.S)
+
+
+def unmark_gaps(md: str) -> str:
+    """Saved text from before: an inline outside mark around a "the sources do not say X" phrase is dropped."""
+    return _INLINE_OUTSIDE.sub(lambda m: m.group(1) if _says_gap_phrase(m.group(1)) else m.group(0), md or "")
+
+
+def _claimless_sentence(x: str, calc: bool, coach: bool = False, feedback: bool = False) -> bool:
     plain = x.strip()
     words = len(plain.split())
     if not plain:
         return True
     if plain.endswith("?"):
         return True  # a question to the student, with or without an equation in it
-    if _gap_sentence(plain) or _META_REFUSAL.search(plain) or _META_ADVICE.search(plain) or _COACH_START.match(plain):
+    if (_gap_sentence(plain) or _META_REFUSAL.search(plain) or _META_ADVICE.search(plain) or _COACH_START.match(plain)
+            or _META_SELF.search(plain) or _CAUTION.search(plain) or _ABOUT_DRAFT.match(plain)):
         return True
     if plain.endswith(":") and words <= 25:
         return True
     no_fact = not re.search(r"[0-9=$]", plain)
     if words <= 4 and no_fact and _PLAN_WORD.match(plain):
         return True  # "Rest." "Review day."
+    if _PLAN_LINE.match(plain) or _HERE_FRAME.match(plain):
+        return True  # "2026-11-17: practice set." "Here are the steps for A = ..."
     if _TRANSITION.match(plain) and words <= 14 and no_fact and plain.rstrip().endswith((".", ":")):
         return True
+    if words <= 24 and _COMPARISON.match(plain):
+        return True
+    if feedback and _ABOUT_DRAFT_LOOSE.match(plain):
+        return True
+    if coach and _RUBRIC_LABEL.match(plain):
+        return True  # a rubric line inside a block of coaching questions
+    if calc and words <= 8 and no_fact:
+        return True  # "Step 1: moles of NaCl."
     if calc and (re.search(r"[=$0-9]", plain)):
-        return True  # a step of arithmetic in a worked twin is the app's own working, not a claim about the course
+        return True  # a step of arithmetic in a worked example is the app's own working, not a claim about the course
     return False
 
 
-def is_non_claim(md: str, *, calc: bool = False) -> bool:
+def worked_flags(mds: list[str]) -> list[bool]:
+    """For each block of text, True when it sits inside a worked example: the block, or a block just before it
+    (up to the next heading that is not a worked-example title), opens with an example, solution or step title."""
+    out: list[bool] = []
+    active = False
+    for md in mds:
+        first = next((ln for ln in (md or "").splitlines() if ln.strip()), "")
+        if _WORKED_START.search(md or ""):
+            active = True
+        elif first.lstrip().startswith("#"):
+            active = False
+        out.append(active)
+    return out
+
+
+def _bold_title(line: str) -> bool:
+    st = line.strip()
+    m = re.fullmatch(r"(?:[-*+]\s+|\d+[.)]\s+)?(\*\*|__)(.{2,120}?)\1\s*:?", st)
+    return bool(m) and len(m.group(2).split()) <= 14 and not m.group(2).rstrip().endswith((".", "!"))
+
+
+def is_non_claim(md: str, *, calc: bool = False, feedback: bool = False) -> bool:
     """True when nothing in md claims a fact about the subject: questions to the student (an equation inside is
-    fine), study advice, plan lines like "Rest.", lead-ins, honest lines that the materials do not cover something,
-    the empty-reply notice and, with calc=True (a worked twin), steps of arithmetic. Such text is never labelled
-    "Not from your materials"."""
+    fine), exercise stems, study advice and plan lines, lead-ins, titles of worked examples, feedback on the student's
+    own draft, honest lines that the materials do not cover something or that the guide cannot cover it, upload
+    advice, a comparison of two cited facts, the empty-reply notice and, with calc=True (inside a worked example),
+    steps of arithmetic. feedback=True (the page is feedback on the student's own draft) also counts third-person lines
+    about the draft. Such text is never labelled "Not from your materials"."""
     text = (md or "").strip()
     if not text:
         return False
@@ -840,10 +990,18 @@ def is_non_claim(md: str, *, calc: bool = False) -> bool:
         return True
     if "$$" not in text and _is_stems(text):
         return True
+    lines = []
+    for raw in text.splitlines():
+        title = _bold_title(raw) or bool(_TITLE_LINE.match(_PLAIN.sub("", raw).strip())
+                                         and not _PLAIN.sub("", raw).strip().endswith("."))
+        line = _LIST_ITEM.sub("", _PLAIN.sub("", raw), count=1).strip()
+        if line:
+            lines.append((line, title))
+    coach = any(ln.endswith("?") or _COACH_START.match(ln) for ln, _ in lines)
     seen = False
-    for line in text.splitlines():
-        line = _LIST_ITEM.sub("", _PLAIN.sub("", line), count=1).strip()
-        if not line:
+    for line, title in lines:
+        if title:
+            seen = True
             continue
         line = _LABEL_ONLY.sub("", line, count=1).strip() if _LABEL_ONLY.match(line) else line
         if not line:
@@ -851,7 +1009,7 @@ def is_non_claim(md: str, *, calc: bool = False) -> bool:
             continue
         for x in _sentences(line):
             seen = True
-            if not _claimless_sentence(x, calc):
+            if not _claimless_sentence(x, calc, coach, feedback):
                 return False
     return seen
 

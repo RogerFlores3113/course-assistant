@@ -195,7 +195,7 @@ def test_outside_labelling_skips_structural_lines_p1_p3():
            "```python\nprint(1)\n```\n\nSolve it carefully with the rule from lecture [1].")
     a = grounding.parse_answer(raw, srcs(1))
     assert [b.kind for b in a.blocks] == ["text"] * 8 and a.used == [1]
-    b = grounding.parse_answer("Step 4: Subtract row 1 from row 2.", srcs(1)).blocks
+    b = grounding.parse_answer("Step 4: The determinant of any triangular matrix equals the product of its diagonal entries.", srcs(1)).blocks
     assert b[0].kind == "outside"  # a sentence with a claim in it is still labelled
     assert grounding.parse_answer("The eigenvalue is 3 and the vector is 7x.", srcs(1)).blocks[0].kind == "outside"
 

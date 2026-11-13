@@ -60,14 +60,17 @@ def test_not_covered_note_p4(ready):
 
 def test_removed_citation_footnote_p3(ready):
     r = page(ready, [{"kind": "outside", "md": f"Exam favourite {grounding.REMOVED_MARK}.", "cites": []}])
-    assert 'class="cite-removed"' in r.text and "1 citation in this text pointed to a source that doesn't exist" in r.text
+    assert 'class="cite-removed"' in r.text and "Check: 1 citation removed" in r.text
+    assert "pointed to a source that doesn't exist" not in r.text.replace("a citation here pointed", "")  # said once, at the top
+    assert "<span hidden data-removed-citations>1</span>" in r.text
     assert "{{" not in r.text
 
 
 def test_quote_flag_and_footnote_p4(ready):
     md = f'He says {grounding.QUOTE_OPEN}"a b c d e f g h"{grounding.QUOTE_CLOSE} [1].'
     r = page(ready, [{"kind": "text", "md": md, "cites": [1]}])
-    assert "quote not found in the cited source" in r.text and "could not be found word for word" in r.text
+    assert "quote not found in the cited source" in r.text and "Check: 1 quote not found" in r.text
+    assert "could not be found word for word" not in r.text and "<span hidden data-unverified-quotes>1</span>" in r.text
 
 
 def test_outside_label_read_once_and_no_group_label_p5(ready):
