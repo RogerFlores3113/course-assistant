@@ -225,10 +225,11 @@ def test_d5_graded_handout_equipment_and_safety_are_found_but_its_questions_are_
 
 
 def test_d5_a_hit_inside_a_graded_question_is_left_out_and_said(tmp_path):
-    from fx9_world import handout_world
-    s, c, ids, mid = handout_world(tmp_path)
-    a = grounding.ask(s, c, "What is the endpoint of a titration of acetic acid in vinegar?", FakeProvider(model(default="The sources do not cover it.")))
-    assert all("Answer in two sentences" not in (x.get("text") or "") for x in a.sources)
+    import fx11_world  # cycle 11: the note never sits beside an "Also searched" row of the same handout, so the questions are alone here
+    s, c, mid = fx11_world.handout_only_questions(tmp_path)
+    a = grounding.ask(s, c, "How do I compute the molarity of a brine sample and what happens to conductivity when it is diluted?",
+                      FakeProvider(model(default="The sources do not cover it.")))
+    assert all("Compute its molarity" not in (x.get("text") or "") for x in a.sources)
     assert "Part of your graded handout was not searched" in a.body_md
 
 
