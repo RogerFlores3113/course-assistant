@@ -222,7 +222,7 @@ _WRAP = re.compile(
     r"(?:around|on)\s+(?:this|that|the\s+following)\s+(?:idea|claim|point|argument)))?\s*[:,]\s+|"
     r"\bsomething\s+like\s*[:,]?\s+|\bfor\s+(?:example|instance)\s*[:,]\s+|\byou\s+(?:could|might|can)\s+say\s*[:,]?\s+|"
     r"\b(?:one|a|an|your|the)\s+(?:\w+\s+){0,2}(?:position|claim|argument|take|stance|angle)\s+"
-    r"(?:is|would\s+be|could\s+be|might\s+be)\s*[:,]?\s*(?:that\s+)?)",
+    r"(?:is|would\s+be|could\s+be|might\s+be)\s*(?:[:,]\s*(?:that\s+)?|that\s+))",
     re.I)
 _META = re.compile(r"\b(?:thesis|paragraphs?|evidence|essay|claims?|arguments?|reader|rubric|sentences?|position|conclusion|"
                    r"introduction|counter-?arguments?|citations?|sources?|draft|writing|writer|question|prompt|assignment|"
