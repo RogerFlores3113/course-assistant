@@ -971,8 +971,8 @@ def source_rows(sources: list[Source], used: list[int] | None = None) -> list[di
 def ask(store, course_id: int, question: str, provider, *, depth: str = "standard",
         history: list[dict] | None = None, limit: int = 8, record_chat: bool = True, route: bool = True) -> Answer:
     """Search the course, route graded work to a twin, otherwise answer from the sources. Saves a guide.
-    route=False (the student pressed "Ask normally") turns the matcher and the model's marker off; the answer-key
-    check of the reply stays on."""
+    route=False (the student pressed "Ask normally") turns the matcher and the model's marker off; every check of the
+    reply (answer key, essay prose, proofs) stays on."""
     from . import integrity  # late import: integrity builds on this module
 
     question = (question or "").strip()
@@ -995,7 +995,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
             graded, why = integrity.item_for_marker(store, course_id, marker or None, question), "marker"
         else:
             graded = integrity.check_reply(store, course_id, question, raw, force_item=sticky if route else None,
-                                           sources=sources, keys_only=not route)
+                                           sources=sources)
             why = (graded or {}).get("reason", "reply")
             if graded and why == "soft_essay":
                 # one regeneration on a soft essay rule; if that still reads as essay prose, concepts mode

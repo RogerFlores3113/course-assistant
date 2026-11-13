@@ -1149,6 +1149,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         rm = getattr(_mod("study"), "ready_message", None)
         kind = (guide or {}).get("kind") or action
         ready = rm(kind) if callable(rm) else f"{STUDY_LABELS.get(action, 'Your guide')} is ready."
+        ready = _mod("essay").ready_message(guide, ready)  # essay and proof pages never say "twin problem"
         if not is_htmx(request):
             return redirect(f"/guides/{int(result)}", notice=ready)
         return after(request, course_id, "study", notice=ready, result_guide=guide,
@@ -1371,7 +1372,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         tree = bool(graph and not graph.get("empty"))
         return page(request, "guide.html", g=g, course=course, accent=course_color(course),
                     view=guide_view(g, store=store, tree_shown=tree),
-                    graph=graph, smap=smap, kind_label=GUIDE_KINDS.get(g["kind"], g["kind"]))
+                    graph=graph, smap=smap, kind_label=_mod("essay").guide_kind_label(g, GUIDE_KINDS.get(g["kind"], g["kind"])))
 
     @app.get("/guides/{guide_id}/delete", response_class=HTMLResponse)
     def guide_delete_confirm(request: Request, guide_id: int):

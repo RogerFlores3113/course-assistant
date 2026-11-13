@@ -160,7 +160,7 @@ def test_essay_and_proof_get_concepts_only():
     guide = s.guide(a.guide_id)
     assert guide["data"]["mode"] == "concepts" and guide["data"]["twin_problem"] == ""
     assert guide["kind"] == "twin" and "did not" not in a.blocks[0].md.split("(")[0]
-    assert "marked graded" in a.blocks[0].md
+    assert "marked graded" not in a.blocks[0].md and a.routing_note.startswith("This looks like your graded")
 
 
 def test_proof_material_match_and_twin():

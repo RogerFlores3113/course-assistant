@@ -24,7 +24,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from . import grounding, retrieval
+from . import essay, grounding, retrieval
 from .grounding import Answer, Block
 
 _WORD = re.compile(r"[a-z]+|\d+(?:\.\d+)?")
@@ -662,36 +662,14 @@ def _reference_match(question: str, item: dict[str, Any]) -> bool:
 
 
 # --- writing requests for a graded essay
-_WRITE_VERB = re.compile(r"\b(write|writing|draft|rewrite|compose|generate|produce|create|give\s+(?:me|us)|come up with|"
-                         r"make\s+(?:me|us)|word|phrase|put together|finish|complete|polish|flesh out|expand|"
-                         r"show me|start)\b", re.I)
-_PROSE_NOUN = re.compile(r"\b(thesis|intro|introduction|opening|conclusion|concluding|body paragraph|paragraph|outline|"
-                         r"topic sentences?|essay|paper|first sentence|hook|counter-?argument|rebuttal)\b", re.I)
-_WRITE_PHRASE = re.compile(r"(\ban?\s+essay\s+(?:on|about)\b|\bparagraph\s+(?:arguing|that argues|about|on)\b|\boutline\s+with\b|"
-                           r"\btopic\s+sentences?\b.*\b(?:written|out|for me)\b|\bessay\s+for\s+me\b)", re.I)
-_MODEL_PHRASE = re.compile(
-    r"(\b(?:model|sample|example|exemplar|a[- ]?grade|a\+?[- ]?grade|perfect|ideal|full[- ]marks?|top[- ]scoring)\s+"
-    r"(?:[\w-]+\s+){0,2}(?:answers?|essays?|responses?|theses|thesis|paragraphs?|introductions?|intro|conclusions?|papers?)\b|"
-    r"\bwhat\s+would\s+(?:a|an|the)\s+(?:[\w-]+\s+){0,3}(?:thesis|intro|introduction|essay|paragraph|conclusion)\b[^?]{0,30}\blook\s+like|"
-    r"\b(?:good|strong|great|sample|winning)\s+thesis\b|"
-    r"\bpretend\s+(?:you(?:'re| are)|to be)\s+(?:a\s+|my\s+)?(?:professor|student|me)\b|"
-    r"\bdo\s+(?:my|the|this|our)\s+(?:[\w']+\s+){0,2}(?:essay|paper)\b)", re.I)
+from .essay import _MODEL_PHRASE, writing_request  # noqa: E402  (essay logic lives in essay.py)
+
 _ESSAY_POSS = re.compile(r"\b(?:my|the|this|our|that)\s+(?:[\w']+\s+){0,2}(?:essay|paper)\b|\bessay\s*#?\s*\d+\b", re.I)
 _ESSAY_PART = re.compile(r"\b(thesis|intro(?:duction)?(?:\s+paragraph)?|opening(?:\s+(?:paragraph|sentence))?|"
                          r"concluding(?:\s+paragraph)?|conclusion(?:\s+paragraph)?|topic\s+sentences?|body\s+paragraph|"
                          r"outline)\b", re.I)
-_ESSAY_GENERIC = frozenset("""essay thesis write driven answer answers question extent argue argument reflect real page
-pages due word words footnote footnotes chicago prompt rubric students student paper text show describe""".split())
-
-
-def writing_request(text: str) -> bool:
-    """A request to write, draft or word prose (thesis, intro, outline with topic sentences, an essay on ...)."""
-    t = text or ""
-    return bool((_WRITE_VERB.search(t) and _PROSE_NOUN.search(t)) or _WRITE_PHRASE.search(t) or _MODEL_PHRASE.search(t))
-
-
 def _essay_topic_tokens(it: dict[str, Any]) -> set[str]:
-    return content_tokens(f"{it.get('title', '')} {it.get('body', '')}") - _ESSAY_GENERIC
+    return essay.topic_tokens(it)
 
 
 def _essay_match(question: str, essays: list[dict[str, Any]]) -> tuple[float, dict[str, Any]] | None:
@@ -778,30 +756,13 @@ def is_logistics(text: str) -> bool:
     return bool(_LOGISTICS.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t)
 
 
-_FEEDBACK = re.compile(
-    r"\b(feedback|critique|review|proofread|grade|rate|assess|evaluate|improve|strengthen|weak(?:ness|er)?|"
-    r"(?:is|does)\s+(?:this|that|it)\b[^.?!]{0,30}\b(?:good|ok|okay|strong|clear|solid|work)|good\s+(?:thesis|enough|start)|"
-    r"thoughts|what\s+do\s+you\s+think|check\s+(?:my|this)|fix\s+(?:it|this|my)|polish|tighten|revise|better)\b", re.I)
-_DRAFT_REF = re.compile(r"\b(?:my|this|here(?:'s|\s+is)|below|following)\s+(?:\w+\s+){0,2}(?:thesis|draft|paragraph|intro(?:duction)?|essay|"
-                        r"argument|conclusion|opening|outline|claim)\b", re.I)
-
-
 def draft_text(question: str) -> str:
-    """The pasted draft inside a feedback request: the longest quoted span, or the text after the first colon or
-    line break, when it is long enough to be someone's own writing."""
-    q = question or ""
-    cands = [m.group(1) for m in re.finditer(r"[\"\u201c]([^\"\u201d]{30,})[\"\u201d]", q)]
-    for sep in (":", "\n"):
-        if sep in q:
-            cands.append(q.split(sep, 1)[1])
-    cands = [c.strip() for c in cands if len(c.split()) >= 8]
-    return max(cands, key=len) if cands else ""
+    return essay.draft_request(question) or ""
 
 
 def is_draft_feedback(question: str) -> bool:
     """A student pastes their own thesis or paragraph and asks for feedback on it."""
-    q = question or ""
-    return bool(_FEEDBACK.search(q)) and bool(draft_text(q)) and bool(_DRAFT_REF.search(q))
+    return bool(essay.draft_request(question))
 
 
 def match_graded(store, course_id: int, question: str) -> dict | None:
@@ -844,12 +805,10 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
         if sc > 0:
             scored.append((sc, it))
     essays = [i for i in items if i["kind"] == "essay" and (i.get("body") or "").strip()]
-    if essays and is_draft_feedback(question):
-        topic = content_tokens(question)
-        fb = max(essays, key=lambda i: len(topic & _essay_topic_tokens(i)))
-        if len(essays) == 1 or topic & _essay_topic_tokens(fb):
-            out = dict(fb, source="material" if fb.get("material_id") else "item", score=0.95, intent="feedback")
-            return out
+    written = [i for i in items if i["kind"] in ("essay", "proof") and (i.get("body") or "").strip()]
+    fb = essay.draft_item(question, written, items)  # a pasted draft of an essay, short answer or proof
+    if fb:
+        return dict(fb, source="material" if fb.get("material_id") else "item", score=0.95, intent="feedback")
     em = _essay_match(question, essays)
     if em:
         scored.append(em)
@@ -938,95 +897,28 @@ def _quote_ratio(p: str, source: str) -> float:
     return sum(1 for g in grams if g in sw) / len(grams) if grams else 0.0
 
 
-_ARGUE = re.compile(r"\b(shows?|proves?|argues?|argued|demonstrates?|vindicat\w*|although|whereas|despite|because|"
-                    r"therefore|thus|undermin\w*|refutes?|contends?|reveals?|illustrates?|fails?|succeeds?)\b", re.I)
-_SENT_COACH = re.compile(r"\b(you|your|yours|you're|should|could|consider|try to|ask yourself|rubric|assignment|must|needs? to|"
-                         r"aim to|make sure|remember|a strong|a good|a clear|students?|requires?)\b", re.I)
-
-
-_CITE_SPLIT = re.compile(r"([.!?])\s*(\[\d+(?:\s*[,;]\s*\d+)*\])")
-_CITE_NUMS = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
-
-
-def _cited_restatement(sent: str, sources: list[Any] | None) -> bool:
-    """A sentence carrying a [n] citation that restates what the cited source says. Without the sources, any cited
-    sentence counts (the model cited a retrieved, ungraded source)."""
-    nums = [int(x) for m in _CITE_NUMS.finditer(sent) for x in re.split(r"[,;]\s*", m.group(1))]
-    if not nums:
-        return False
-    if not sources:
-        return True
-    texts = [(sources[n - 1].get("text") or "") for n in nums if 1 <= n <= len(sources)]
-    if not texts:
-        return False
-    body = _CITE_STRIP.sub("", sent)
-    ct = content_tokens(body)
-    st = content_tokens(" ".join(texts))
-    return bool(ct) and len(ct & st) / len(ct) >= 0.5
+_ARGUE, _SENT_COACH, _THESIS_CUE = essay.ARGUE, essay.STRICT_COACH, essay.THESIS_CUE
+_cited_restatement = essay.cited_restatement
 
 
 def _finished_sentences_x(reply: str, topic: set[str], asked: bool, source: str = "",
                           sources: list[Any] | None = None) -> list[tuple[str, bool]]:
-    """(sentence, marked) pairs that read like the essay's own claims: quoted or colon-introduced ('For example:
-    "Although ..."'), marked; or, when the student asked for writing, any argumentative sentence about the essay's
-    topic with no coaching words in it. Cited restatements of a source are skipped."""
-    out = []
-    reply = _CITE_SPLIT.sub(r" \2\1", reply or "")
-    for line in re.split(r"\n+", reply):
-        line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip()
-        if not line:
-            continue
-        cands: list[tuple[str, bool]] = []
-        for m in re.finditer(r"[\"“]([^\"”]{25,})[\"”]", line):
-            cands.append((m.group(1), True))
-        if ":" in line:
-            cands.append((line.rsplit(":", 1)[1], True))
-        for sent in re.split(r"(?<=[.!?])\s+", line):
-            cands.append((sent, False))
-        for sent, marked in cands:
-            if _cited_restatement(sent, sources):
-                continue
-            sent = _CITE_STRIP.sub("", sent).strip().strip("\"“”*_ ")
-            if len(sent.split()) < 8 or "?" in sent or _SENT_COACH.search(sent):
-                continue
-            if source and _quote_ratio(sent, source) >= 0.5:  # quoting the assignment's own requirement
-                continue
-            marked = marked or bool(_THESIS_CUE.search(sent))
-            if len(content_tokens(sent) & topic) >= 2 and _ARGUE.search(sent) and (marked or asked):
-                out.append((sent, marked))
-    return out
+    return essay.finished_sentences_x(reply, topic, asked, source, sources)
 
 
 def _finished_sentences(reply: str, topic: set[str], asked: bool, source: str = "", sources: list[Any] | None = None) -> list[str]:
-    return [s for s, _ in _finished_sentences_x(reply, topic, asked, source, sources)]
+    return [s for s, _ in essay.finished_sentences_x(reply, topic, asked, source, sources)]
 
 
 def essay_leak_level(it: dict[str, Any], reply: str, question: str, force_asked: bool = False,
                      sources: list[Any] | None = None) -> int:
-    """0 = fine, 1 = a soft hit (an argumentative on-topic sentence, judged only because the student asked for
-    writing), 2 = a hard hit (a thesis cue, or a quoted or colon-introduced finished sentence)."""
-    asked = force_asked or writing_request(question)
-    topic = _essay_topic_tokens(it)
-    source = f"{it.get('body', '')} {it.get('title', '')}"
-    hits = _finished_sentences_x(reply, topic, asked, source, sources)
-    level = 0
-    if hits:
-        level = 2 if any(m for _, m in hits) else 1
-    plain = _CITE_STRIP.sub("", reply or "")
-    for p in prose_paragraphs(plain):
-        if _COACHING.search(p) or _quote_ratio(p, source) >= 0.5:
-            continue
-        shared = len(content_tokens(p) & topic)
-        if _THESIS_CUE.search(p) and shared >= 1:
-            level = 2
-        elif asked and shared >= 2 and not (sources is not None and _cited_restatement(p, sources)):
-            level = max(level, 1)
-    return level
+    """0 = fine, 1 = soft, 2 = hard (see essay.find)."""
+    return essay.level(it, reply, question, force_asked, sources)
 
 
 def _leaks_essay(it: dict[str, Any], reply: str, question: str, force_asked: bool = False,
                  sources: list[Any] | None = None) -> bool:
-    return essay_leak_level(it, reply, question, force_asked, sources) > 0
+    return essay.level(it, reply, question, force_asked, sources) > 0
 
 
 def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
@@ -1039,6 +931,7 @@ def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
 
 def _hit(it: dict[str, Any], reason: str = "reply") -> dict[str, Any]:
     out = dict(it)
+    out.pop("intent", None)  # a draft-feedback turn must not make the next ordinary question a draft
     out["source"] = "material" if it.get("material_id") else "item"
     out["score"] = 1.0
     out["reason"] = reason
@@ -1062,7 +955,8 @@ def _leaks_forced(it: dict[str, Any], reply: str, question: str, sources: list[A
     if kind == "proof" and body:
         return _leaks_proof(it, reply, question)
     if kind == "essay" and body:
-        return _leaks_essay(it, reply, question, True, sources)
+        lvl = essay.level(it, reply, question, True, sources)
+        return lvl >= 2 or (lvl == 1 and not essay.is_short_answer(it))
     return False
 
 
@@ -1747,8 +1641,7 @@ def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, sr
         raw = provider.complete(system, [{"role": "user", "content": user}], max_tokens=4000)
         _, raw = read_marker(raw)
         level = _reply_leak_level(graded, kind, raw, question, problem_text, sources)
-        if (level == 0 or (level == 1 and kind == "essay" and not writing_request(question))) \
-                and not (is_check_ask(question) and _CONFIRMS.search(raw or "")):
+        if level == 0 and not (is_check_ask(question) and _CONFIRMS.search(raw or "")):
             blocks, used = grounding.parse_blocks(raw, n_sources)
             if blocks:
                 return blocks, used
@@ -1812,26 +1705,8 @@ def _flat(*parts: str) -> str:
 
 
 def _feedback_reply(provider, store, course_id: int, graded: dict, src_block: str, question: str, depth_rule: str,
-                    n_sources: int, sources: list[Any]) -> tuple[list[Block], list[int]]:
-    """Rubric-based feedback on the student's own draft. The reply is checked for new finished sentences (anything
-    argumentative that is not the student's own words or a cited requirement); one regeneration, then a fixed note."""
-    draft = draft_text(question) or question
-    system = FEEDBACK_SYSTEM.format(depth_rule=depth_rule)
-    user = f"{src_block}\n\nTHE STUDENT'S OWN DRAFT:\n{draft}\n\nTHE STUDENT'S REQUEST:\n{question}"
-    topic = _essay_topic_tokens(graded)
-    src = f"{draft} {graded.get('body', '')} {graded.get('title', '')}"
-    for attempt in range(2):
-        raw = provider.complete(system, [{"role": "user", "content": user}], max_tokens=4000)
-        _, raw = read_marker(raw)
-        if not (raw or "").strip():
-            return [Block("outside", grounding.EMPTY_REPLY, [])], []
-        if not _finished_sentences(raw, topic, True, src, sources) and not _THESIS_CUE.search(_CITE_STRIP.sub("", raw)):
-            blocks, used = grounding.parse_blocks(raw, n_sources)
-            if blocks:
-                return blocks, used
-        user += ("\n\nYour last reply wrote sentences the student could paste in. Give only feedback: quote their words, "
-                 "name what the rubric rewards and what is missing, and ask questions. No rewritten or new sentences.")
-    return [Block("text", SAFE_ESSAY, [])], []
+                    n_sources: int, sources: list[Any], kind: str = "essay") -> tuple[list[Block], list[int]]:
+    return essay.feedback_reply(provider, graded, kind, src_block, question, depth_rule, n_sources, sources)
 
 
 def twin(store, course_id: int, question: str, provider, graded: dict, why: str = "") -> Answer:
@@ -1845,7 +1720,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     key = item_key(graded)
     if not key and graded.get("id"):
         key = item_key(store.graded_item(graded["id"]))
-    feedback = graded.get("intent") == "feedback" and kind == "essay"
+    feedback = graded.get("intent") == "feedback" and kind in ("essay", "proof")
     sources = _sources_for(store, course_id, question, problem_text, graded,
                            assignment=(kind == "essay" and bool(ESSAY_CUES.search(problem_text))) or feedback)
     src_block = grounding.format_sources(sources)
@@ -1855,7 +1730,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
 
     if feedback:
         blocks, used = _feedback_reply(provider, store, course_id, graded, src_block, question, depth_rule,
-                                       len(sources), sources)
+                                       len(sources), sources, kind)
     elif kind == "problem" and numbers(problem_text):
         system = TWIN_SYSTEM.format(depth_rule=depth_rule)
         user = f"{src_block}\n\nTHE STUDENT'S GRADED PROBLEM (do not solve it):\n{problem_text}"
@@ -1888,7 +1763,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
         blocks = lead + blocks
         guide_title = f"Similar problem to {_item_name(graded)}"
     elif feedback:
-        note = NOTE_FEEDBACK.format(title=_item_name(graded))
+        note = essay.NOTE_FEEDBACK_PROOF if kind == "proof" else essay.NOTE_FEEDBACK
         guide_title = f"Feedback on your draft: {_item_name(graded)}"
     else:
         note = (NOTE_CHECK_CONCEPTS if check else NOTE_CONCEPTS).format(title=title)
@@ -1899,7 +1774,9 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     if topic and not feedback:
         guide_title = f"{guide_title}: {topic}"
     shown_mode = "twin" if mode == "twin" else "concepts"
-    blocks = [Block("text", note, []), *blocks]
+    if kind in ("essay", "proof") and not feedback and mode != "twin":
+        note = ""  # the routing sentence on the page already says why; one banner, not three
+    blocks = ([Block("text", note, [])] if note else []) + list(blocks)
     answer = grounding.make_answer(blocks, used, sources, twin=(mode == "twin"), not_covered=False)
     answer.mode = shown_mode
     note_line = route_note(graded, "feedback" if feedback else shown_mode, why, check)
@@ -1952,21 +1829,7 @@ def _looks_english(text: str) -> bool:
 
 
 def _outline_sentences(it: dict[str, Any], body: str) -> list[str]:
-    """List or labelled lines of the guide that are written sentences about the essay's topic (a thesis, topic
-    sentences) rather than coaching."""
-    topic = _essay_topic_tokens(it)
-    out = []
-    for line in (body or "").splitlines():
-        m = _WRITTEN_LINE.match(line)
-        if not m:
-            continue
-        label, text = m.group(1), (m.group(2) or "").strip().strip("\"\u201c\u201d*_ ")
-        listy = bool(re.match(r"^\s*(?:[-*+>]|\d+[.)])", line))
-        if not (label or listy) or len(text.split()) < 8 or "?" in text or _SENT_COACH.search(text):
-            continue
-        if len(content_tokens(text) & topic) >= (1 if label else 2) and (label or _ARGUE.search(text) or text.endswith(".")):
-            out.append(text)
-    return out
+    return essay.outline_sentences(it, body)
 
 
 def _sentences_of(text: str) -> list[str]:
@@ -2061,12 +1924,7 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
             if (it["kind"] != "essay" and len(matched) >= 1) or \
                     (it["kind"] == "essay" and len(content_tokens(clean) & _essay_topic_tokens(it)) >= 2 and prose_paragraphs(clean)):
                 return out(it, "translated")
-    for it in essays:
-        topic = _essay_topic_tokens(it)
-        if _outline_sentences(it, clean) and (len(content_tokens(f"{title} {clean}") & topic) >= 2):
-            return out(it, "outline")
-        if len(clean.split()) <= 70 and _finished_sentences(clean, topic, True, f"{it.get('body', '')} {it.get('title', '')}"):
-            return out(it, "essay_text")  # a one-sentence thesis saved as an 'answer'
+    # essay outlines, theses and written answers are judged by essay.guide_hit (it knows the cited chunks)
     return None
 
 
@@ -2114,7 +1972,8 @@ def scrub_markdown(store, course_id: int, text: str, question: str = "") -> tupl
                     break
         if leaky:
             n += 1
-            out.append(SCRUBBED)
+            hit = check_reply(store, course_id, question, seg)
+            out.append(essay.SCRUBBED if hit and hit.get("kind") == "essay" else SCRUBBED)
         else:
             out.append(seg)
     return "".join(out), n
