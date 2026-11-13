@@ -1540,12 +1540,10 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
         if not m or m["course_id"] != course_id:
             raise ValueError("That material is not in this course.")
         if m.get("graded"):
-            numeric = [g for g in _gview(store, course_id)
-                       if g.get("material_id") == m["id"] and g.get("kind") in ("problem", "proof")]
-            if numeric or not any(g.get("material_id") == m["id"] for g in _gview(store, course_id)):
+            if not any(g.get("material_id") == m["id"] for g in _gview(store, course_id)):
                 raise ValueError("That material is marked as graded work, so the app will not make flashcards from it. "
                                  "Pick another material or type a topic.")
-            concept_only = True  # a graded essay assignment: cards on concepts, requirements and the rubric only
+            concept_only = True  # graded work: cards on concepts, requirements and the rubric only, no key values
         mat_sources = _card_worthy(_material_sources(store, material_id, 10_000))  # the whole material, minus scaffolding
         if topic.strip():
             hits = _card_worthy(_search(store, course_id, topic, MAX_SOURCES, material_ids=[material_id]))
@@ -1569,9 +1567,9 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
         sources = _card_worthy(_merge(hits, extra, cap=MAX_SOURCES * 2), topic_search=True)[:MAX_SOURCES]
         deck = topic.strip()
     sources = _prepare(store, course_id, sources, keep_graded=concept_only)
-    only = (" These sources are a graded essay assignment: make cards about concepts, key terms, requirements and what the "
-            "rubric rewards only. Never write a thesis, a position on the essay question, an argument or a conclusion for "
-            "the essay." if concept_only else "")
+    only = (" These sources are graded work: make cards about concepts, key terms, methods, requirements and what the "
+            "rubric rewards only. Never write a thesis, a position, an argument or a conclusion for an essay, and never "
+            "give a number, matrix, vector, formula or other result that answers one of its problems." if concept_only else "")
     math = has_math(store, course_id)
     cover = ("the main concepts, definitions, formulas and procedures" if math else
              "the key terms, people, events, ideas and arguments in the readings")

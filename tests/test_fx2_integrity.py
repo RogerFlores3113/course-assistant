@@ -238,8 +238,9 @@ def test_flashcard_picker_and_make_exclude_graded_material():
     s, c, m = course()
     opts = study.study_form_options(s, c)
     assert not any(x["id"] == m["problem-set-3"] for x in opts["materials"])
-    with pytest.raises(ValueError):
-        study.make_flashcards(s, c, FakeProvider(["[]"]), material_id=m["problem-set-3"])
+    # cycle 6: a graded numeric material may still give a concepts-only deck (every card is checked against its key)
+    res = study.make_flashcards(s, c, FakeProvider(["[]"]), material_id=m["problem-set-3"])
+    assert len(res) == 0
 
 
 def test_flashcard_back_with_graded_answer_is_dropped():

@@ -259,3 +259,78 @@ def test_p1_the_same_matrix_in_plain_words_still_routes():
     s, c = make_proof()
     m = integrity.match_graded(s, c, "Explain how to do elimination on the 3 by 3 matrix with rows 2 1 1, 4 -6 0 and -2 7 2")
     assert m and m["id"] == 5
+
+
+# ---------------------------------------------------------------- MCP: definitions, small integers, arrow cards
+SA9 = ("Problem 9 (5 points)\n\nIn two or three sentences, explain why molarity is defined with the volume of the final "
+       "solution rather than the volume of solvent added.")
+
+
+def make_mcp():
+    s, c = make_lab()
+    s.add_graded_item(c, "Problem 9 (Set)", SA9, None, kind="essay", label="Problem 9")
+    s.add_graded_item(c, "Problem 10 (Set)", "Problem 10\n\nFind the value of d that forces a row exchange in the matrix with "
+                      "rows 1 2 3, 2 4 d and 1 0 1, then solve.", None, kind="problem", label="Problem 10",
+                      answer_key=json.dumps(["d = 11", "x = (11, 4, 2)"]))
+    mcp_server.set_store(s)
+    return s, c
+
+
+@pytest.mark.parametrize("body", [
+    "Molarity is moles of solute per liter of solution. A mole is 6.022e23 particles.",
+    "Assume a 100 g sample so percentages become grams, then convert each mass to moles.",
+    "Percent composition is the mass of each element divided by the total mass, times 100.",
+    "Lectures 10 and 11 cover the four fundamental subspaces and orthogonality.",
+    "The exam is worth 11 points and the quiz 10 points.",
+])
+def test_mcp_plain_definitions_and_small_integers_save(body):
+    s, c = make_mcp()
+    try:
+        assert mcp_server.save_guide(c, "answer", "Notes", body, []).startswith("Saved"), body
+    finally:
+        mcp_server.set_store(None)
+
+
+def test_mcp_refusals_still_name_the_right_item():
+    s, c = make_mcp()
+    try:
+        r = mcp_server.save_guide(c, "answer", "Notes", "Then d is eleven, so x = (11, 4, 2).", [])
+        assert r.startswith("NOT SAVED") and "Problem 10" in r
+        r = mcp_server.save_guide(c, "answer", "Notes", "The mass needed is 0.584 g of NaCl.", [])
+        assert r.startswith("NOT SAVED") and "Pre-lab" in r
+    finally:
+        mcp_server.set_store(None)
+
+
+@pytest.mark.parametrize("front,back", [("Problem 10: x3?", "x3 -> 2"), ("LU problem x3", "2"), ("x3 -> 2", "2"),
+                                        ("l21 -> 2", "2"), ("first multiplier l21", "2"), ("d for problem 10 that forces a swap", "eleven")])
+def test_mcp_arrow_and_component_cards_are_refused(front, back):
+    s, c = make_mcp()
+    try:
+        assert mcp_server.add_flashcards(c, [{"front": front, "back": back}]).startswith("NOT ADDED"), (front, back)
+    finally:
+        mcp_server.set_store(None)
+
+
+def test_mcp_plain_cards_are_added():
+    s, c = make_mcp()
+    try:
+        assert mcp_server.add_flashcards(c, [{"front": "What is molarity?", "back": "Moles of solute per liter of solution"},
+                                             {"front": "Define percent yield", "back": "actual / theoretical x 100"}]).startswith("Added")
+    finally:
+        mcp_server.set_store(None)
+
+
+def test_flashcards_from_a_graded_numeric_material_are_concept_only():
+    from test_fx2_integrity import course
+    s, c, m = course()
+    mid = m["problem-set-3"]
+    cards = [{"front": "What is a limiting reagent?", "back": "The reactant that runs out first.", "cite": 1},
+             {"front": "Problem 1: grams of NaCl?", "back": "5.11 g", "cite": 1}]
+    p = FakeProvider(json.dumps(cards))
+    s.update_graded_item(next(i["id"] for i in s.graded_items(c) if i["material_id"] == mid and i["label"] == "Problem 1"),
+                         answer_key=json.dumps(["5.11 g"]))
+    res = study.make_flashcards(s, c, p, material_id=mid)
+    fronts = [x["front"] for x in s.flashcards(c)]
+    assert "What is a limiting reagent?" in fronts and "Problem 1: grams of NaCl?" not in fronts and res.guarded == 1
+    assert "Never" in p.calls[0]["messages"][0]["content"]
