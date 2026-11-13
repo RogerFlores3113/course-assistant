@@ -51,3 +51,54 @@ def test_d4_leak_is_caught_for_a_part_named_question():
     assert m and m["id"] == ids["Problem 1"]
     hit = integrity.check_reply(s, c, q, "The solution is (1, 1, 2).", force_item=m)
     assert hit and hit["id"] == ids["Problem 1"]
+
+
+# ------------------------------------------------------------------ decision 5: proofs
+PROOFS = [
+    "Suppose Ax = b has two different solutions x and y. Take z = x + t(y - x). Then Az = b for every t. Since y differs from x, there "
+    "are infinitely many solutions. Hence the number of solutions is never exactly two. QED [1]",
+    "Suppose Ax = b has two solutions x and y. Then Ax = b and Ay = b. So A(x+y)/2 = b, hence (x+y)/2 is a third solution.",
+    "Let x and y be distinct solutions. The midpoint (x + y)/2 also solves it, so exactly two is impossible.",
+    "If x and y both solve Ax = b, then so does (x+y)/2. Hence there are infinitely many solutions.",
+    "Suppose Ax = b has two solutions x and y. Then A(x + y)/2 = b. The midpoint is a third solution, so exactly two is impossible. ∎",
+    "Suppose Ax = b has two solutions x and y. Then A(x + y)/2 = b. The midpoint is a third solution. This completes the proof.",
+]
+PROOF_OK = [
+    "To prove a statement like this, start by assuming the hypothesis and look for a construction that gives a third solution.",
+    "You could suppose the system has two solutions and try to build another one from them. Ask yourself what combination of two "
+    "solutions still solves Ax = b.",
+    "Suppose a system has one solution. Then the matrix is invertible, so the solution is unique.",
+    "If a system Ax = b has a unique solution, then A is invertible; otherwise there are infinitely many solutions or none [1].",
+    "Linear systems have either no solution, one solution, or infinitely many solutions [1].",
+]
+
+
+def _p4(s, ids):
+    return dict(s.graded_item(ids["Problem 4"]), kind="proof", source="item", score=1.0, reason="sticky")
+
+
+@pytest.mark.parametrize("reply", PROOFS)
+def test_d5_finished_short_proof_is_a_hit_with_or_without_an_end_marker(reply):
+    s, c, ids = world()
+    hit = integrity.check_reply(s, c, "Prove that a linear system never has exactly two solutions", reply, force_item=_p4(s, ids))
+    assert hit and hit["id"] == ids["Problem 4"]
+    cold = integrity.check_reply(s, c, "why not exactly two solutions?", reply)
+    assert cold and cold["id"] == ids["Problem 4"]
+
+
+@pytest.mark.parametrize("reply", PROOF_OK)
+def test_d5_method_sentences_and_other_facts_pass(reply):
+    s, c, ids = world()
+    assert integrity.check_reply(s, c, "How do I start problem 4?", reply, force_item=_p4(s, ids)) is None
+
+
+def test_d5_mcp_tools_refuse_the_two_sentence_midpoint_proof_and_save_the_method():
+    s, c, ids = world()
+    mcp_server.set_store(s)
+    try:
+        assert mcp_server.save_guide(c, "explain", "Notes", PROOFS[3], []).startswith("NOT SAVED")
+        assert mcp_server.save_guide(c, "explain", "Notes", PROOFS[1], []).startswith("NOT SAVED")
+        assert mcp_server.save_guide(c, "explain", "Notes", PROOF_OK[0], []).startswith("Saved")
+        assert mcp_server.save_guide(c, "explain", "Notes", PROOF_OK[4], []).startswith("Saved")
+    finally:
+        mcp_server.set_store(None)

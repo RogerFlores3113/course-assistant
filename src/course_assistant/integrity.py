@@ -1385,14 +1385,52 @@ def proof_shaped(reply: str, short: bool = False) -> bool:
     return any("=" in x for x in steps) or len(steps) >= 5
 
 
+_P_ADVICE = re.compile(r"\b(?:you(?:\s+(?:could|can|should|might|may|would|will|want|need|have|'ll|'d))?|your|try|start|begin|aim|goal|plan|idea|"
+                       r"strategy|hint|approach|tip|think|look\s+for|consider|remember|ask\s+yourself|one\s+way|a\s+common)\b", re.I)
+_P_CONSTRUCT = re.compile(r"\([^()]*\w[^()]*[+\-][^()]*\)\s*/\s*\d|\b[a-z]\s*\([^()]*[+\-][^()]*\)|\b\w+\s*[+\-]\s*t\s*\(|\bmidpoint\b|"
+                          r"\bconvex\s+combination\b|\baverage\s+of\b|\bt\s*\(\s*\w\s*-\s*\w\s*\)", re.I)
+_P_CLAIM = re.compile(r"\b(?:is\s+(?:also\s+)?(?:a|an|another|the)\s+(?:third|new|different|other|further|second|distinct)|"
+                      r"(?:third|another|new|further)\s+(?:solution|root|one)|infinitely\s+many|impossible|contradiction|"
+                      r"cannot\s+be\s+exactly|never\s+exactly|so\s+does|also\s+solves?|also\s+a\s+solution)\b", re.I)
+_P_OPEN_LEAD = re.compile(r"^\W*(?:suppose|assume|let|if|given|take|consider|pick|choose)\b", re.I)
+
+
+def _proof_sentences(reply: str) -> list[str]:
+    return [x for x in re.split(r"(?<=[.!?])\s+|\n+", _CITE_STRIP.sub("", reply or "")) if x.strip() and "?" not in x]
+
+
+def proof_steps(it: dict[str, Any], reply: str) -> bool:
+    """Two or three sentences that CARRY the argument of a graded proof item, whatever their connectives: one opens it
+    (Suppose / Let / If ...), one holds a step of the construction or an equation about the item's objects, one states
+    the item's own conclusion. Advice about how to go about a proof (you could try ..., the goal is ...) carries no step."""
+    b = _Text(it.get("body") or "")
+    if not b.tok:
+        return False
+    sents = [x for x in _proof_sentences(reply) if not _P_ADVICE.search(x)]
+    shared = [len(content_tokens(x) & b.tok) for x in sents]
+    opens = [i for i, x in enumerate(sents) if _P_OPEN_LEAD.search(x) or _P_OPEN.search(x)]
+    steps = [i for i, x in enumerate(sents) if (_P_CONSTRUCT.search(x) or ("=" in x and re.search(r"[A-Za-z]", x)))
+             and (shared[i] >= 1 or _P_CONSTRUCT.search(x))]
+    claims = [i for i, x in enumerate(sents) if _P_CLAIM.search(x) and (shared[i] >= 1 or _P_CONSTRUCT.search(x))]
+    if not opens or not claims:
+        return False
+    # one sentence can open and build ('If x and y both solve Ax = b, then so does (x + y)/2'); a distinct claim closes it
+    if steps and (len(steps) >= 2 or any(i not in claims for i in steps) or any(i not in opens for i in steps)):
+        return any(i != j for i in steps for j in claims) or any(i != j for i in opens for j in claims)
+    return bool(steps) and any(i != j for i in opens for j in claims)
+
+
 def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
     b = _Text(it.get("body") or "")
     if not b.tok:
         return False
     share = len(b.tok & content_tokens(reply)) / len(b.tok)
-    if not _PROOF_END.search(reply):
-        return proof_shaped(reply, short=True) and share >= 0.3
-    return share >= 0.5 or score_text(_Text(question), b) >= 0.5
+    # an end marker (QED, the tombstone) is evidence of a finished proof, never an exemption
+    if proof_shaped(reply, short=True) and share >= 0.3:
+        return True
+    if proof_steps(it, reply):
+        return True
+    return bool(_PROOF_END.search(reply)) and (share >= 0.5 or score_text(_Text(question), b) >= 0.5)
 
 
 def _tool_howto(question: str) -> bool:
