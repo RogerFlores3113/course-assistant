@@ -553,6 +553,15 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
     ig = _integrity()
     gate = getattr(ig, "check_guide", None) or getattr(ig, "check_reply", None)
     hit = gate(st, c["id"], t, b) if gate else None
+    if not hit:  # a finished thesis, outline or written answer for a graded essay or short-answer item
+        from . import essay
+        hit = essay.guide_hit(st, c["id"], t, b, quote_sources)
+        if hit:
+            return (f"NOT SAVED: this guide writes part of graded item '{hit.get('label') or hit.get('title')}' "
+                    f"(a thesis, outline, paragraph or finished answer). This is the problem: "
+                    f"\"{(hit.get('sentence') or '')[:200]}\". Write concepts, what the assignment and rubric ask for, "
+                    "and questions the student can ask themselves, citing the materials; no sentence the student could "
+                    "submit. Then call save_guide again.")
     if hit:
         _log("save_guide_refused", {"course_id": c["id"], "kind": kind, "title": t}, f"graded: {hit.get('title')}")
         sent = (hit.get("sentence") or "").strip()
@@ -613,8 +622,12 @@ def add_flashcards(course_id: int, cards: list[dict[str, Any]], deck: str = "") 
             label = _cite_label(ch, st.material(ch["material_id"]))
         clean.append((front, back, chunk_id, label))
     gate = getattr(_integrity(), "check_card", None)
-    for i, (front, back, _, _) in enumerate(clean, 1):
+    from . import essay
+    for i, (front, back, cid, _) in enumerate(clean, 1):
         hit = gate(st, c["id"], front, back) if gate else None
+        if not hit:  # an essay thesis or conclusion, or a finished answer to a short-answer item
+            src = ((st.chunk(cid) or {}).get("text") or "") if cid else ""
+            hit = essay.card_hit(st, c["id"], front, back, src)
         if hit:
             _log("add_flashcards_refused", {"course_id": c["id"], "card": i}, f"graded: {hit.get('title')}")
             return (f"NOT ADDED: card {i} gives away graded item '{hit.get('label') or hit.get('title')}' (its final "
@@ -636,12 +649,19 @@ def set_answer_key(item_id: int, values: list[str]) -> str:
     it = st.graded_item(int(item_id))
     if it is None:
         raise _fail(f"There is no graded item {item_id}. Call list_graded.")
-    if not isinstance(values, list) or not values:
-        raise _fail("values must be a non-empty list of strings such as [\"d = 4\", \"x = (1, 1, 2)\"].")
+    import json
+    if isinstance(values, list) and not values:  # an empty list clears the key
+        st.update_graded_item(it["id"], answer_key=json.dumps([]))
+        _log("set_answer_key", {"item_id": it["id"], "count": 0}, "cleared")
+        return f"Cleared the answer key of '{it['title']}'."
+    if _integrity()._item_kind(it) in ("essay", "proof"):
+        raise _fail("Essays, short answers and proofs have no answer key (the app checks written work another way). "
+                    "Pass an empty list to clear a key saved by mistake.")
+    if not isinstance(values, list):
+        raise _fail("values must be a list of strings such as [\"d = 4\", \"x = (1, 1, 2)\"].")
     vals = [str(v).strip()[:200] for v in values if str(v).strip()][:30]
     if not vals:
         raise _fail("values must hold at least one non-empty string.")
-    import json
     st.update_graded_item(it["id"], answer_key=json.dumps(vals))
     result = (f"Stored an answer key of {len(vals)} value(s) for '{it['title']}'. It is hidden from the student and "
               "checks future guides, flashcards and replies. Do not show it to the student.")
