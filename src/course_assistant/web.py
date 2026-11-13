@@ -34,7 +34,7 @@ from . import __version__, disclaimer, locations, paths
 from .store import EVENT_KINDS, GUIDE_KINDS, MATERIAL_KINDS, Store, now_iso
 from .web_md import render as render_md
 from .web_md import render_reader, source_map as _source_map
-from .web_helpers import (DEPTHS, MODELS, PALETTE, TABS, THEMES, accent_style, answer_view, chunk_range_label, clean_color,
+from .web_helpers import (plain_math, DEPTHS, MODELS, PALETTE, TABS, THEMES, accent_style, answer_view, chunk_range_label, clean_color,
                           clean_event_title, concept_graph, course_color, day_label, enrich_sources, group_guides, guide_view,
                           merge_events, parse_day, snippet_text, time_label, week_label, week_start)
 
@@ -556,6 +556,45 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                                         "and use Add graded item for anything missing, so the app protects all of it.")
         return {"items": rows, "count": len(rows), "warnings": warnings}
 
+    def answer_check_note(cid: int) -> dict[str, str] | None:
+        """One line for the Ask page: is the graded-answer check on? Read from integrity.key_state per graded problem."""
+        items = [i for i in store.graded_items(cid) if (i.get("kind") or "problem") == "problem"]
+        if not items:
+            return None
+        integ = _safe_mod("integrity")
+        has_key = getattr(integ, "item_key", lambda i: [])
+        key_state = getattr(integ, "key_state", lambda i, connected: "on" if has_key(i) else ("failed" if connected else "off"))
+        connected = provider() is not None
+        states = [key_state(i, connected) for i in items]
+        on, failed = states.count("on"), states.count("failed")
+        n = lambda k: f"{k} graded item{'' if k == 1 else 's'}"
+        if on == len(items):
+            return {"text": f"Answer check: on for {n(on)}", "tone": "ok-c"}
+        if on:
+            return {"text": f"Answer check: on for {n(on)}, couldn't be made for {n(len(items) - on)} (Try again on the Materials tab)",
+                    "tone": "warn-c"}
+        if failed:
+            return {"text": f"Answer check: couldn't be made for {n(failed)} (Try again on the Materials tab)", "tone": "warn-c"}
+        return {"text": f"Answer check: off for {n(len(items))} (connect an AI to turn it on)", "tone": "warn-c"}
+
+    def link_suggestion_rows(cid: int) -> list[dict[str, Any]]:
+        """Notes whose title looks like a lecture but are not linked: one-tap "Link to Lecture N" buttons."""
+        fn = getattr(_safe_mod("study"), "link_suggestions", None)
+        if not callable(fn):
+            return []
+        try:
+            found = fn(store, cid)
+        except Exception:
+            return []
+        label = getattr(_safe_mod("study"), "event_label", None)
+        rows = []
+        for x in found:
+            e = x["event"]
+            rows.append({"material_id": x["material"]["id"], "title": x["material"]["title"], "event_id": e["id"],
+                         "lecture": clean_event_title(e["title"]), "why": x.get("why", ""),
+                         "label": (label(e) if callable(label) else clean_event_title(e["title"]))})
+        return rows
+
     def tab_context(cid: int, tab: str, extra: dict[str, Any]) -> dict[str, Any]:
         ctx: dict[str, Any] = {}
         today = date.today()
@@ -566,6 +605,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             ctx["supported"] = _supported_formats()
             ctx["lectures"] = list(reversed(lecture_choices(cid)))
             ctx["graded"] = graded_panel(cid)
+            ctx["link_suggestions"] = link_suggestion_rows(cid)
         elif tab == "calendar":
             events = merge_events(store.events(cid))
             earlier = [e for e in events if e["date"] < today.isoformat()]
@@ -611,6 +651,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                     item["question"] = last_q
                 history.append(item)
             ctx["history"] = history
+            ctx["answer_check"] = answer_check_note(cid)
             ctx["graded_count"] = len(store.graded_items(cid)) + len([m for m in store.materials(cid) if m.get("graded")])
         elif tab == "offerings":
             cands = store.offering_candidates(cid)
@@ -662,7 +703,12 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
     def course_tab(request: Request, course_id: int, tab: str):
         if tab not in {t for t, _ in TABS}:
             raise _NotFound("That page was not found.")
-        return course_page(request, course_id, tab)
+        extra: dict[str, Any] = {}
+        about = " ".join((request.query_params.get("about") or "").split())[:120]
+        if tab == "ask" and about:  # the dashboard's "Ask a question about X": start the question for them
+            extra["draft"] = f"About {about}: "
+            extra["autofocus_question"] = True
+        return course_page(request, course_id, tab, **extra)
 
     # ------------------------------------------------------------------ materials
     @app.post("/courses/{course_id}/materials/upload")
@@ -946,6 +992,19 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                               event_id=ev["id"] if ev else None)
         extra = f" It now belongs to {clean_event_title(ev['title'])}." if ev else ""
         return redirect(course_url(m["course_id"]), notice=f"Saved {title.strip()}.{extra}")
+
+    @app.post("/materials/{material_id}/link")
+    def material_link(request: Request, material_id: int, event_id: str = Form("")):
+        """The one-tap "Link to Lecture N" button: set the material's lecture link (and its date, like the edit form)."""
+        m = store.material(material_id)
+        if not m:
+            raise _NotFound("That material was not found.")
+        ev = store.event(int(event_id)) if event_id.strip().isdigit() else None
+        if not ev or ev["course_id"] != m["course_id"] or ev["kind"] != "lecture":
+            return after(request, m["course_id"], "materials", error="That lecture is not in this course. Pick one from the list.")
+        store.update_material(material_id, event_id=ev["id"], lecture_date=m.get("lecture_date") or ev["date"])
+        return after(request, m["course_id"], "materials",
+                     notice=f"Linked {m['title']} to {clean_event_title(ev['title'])}.")
 
     @app.post("/materials/{material_id}/not-copy")
     def material_not_copy(request: Request, material_id: int):
@@ -1586,7 +1645,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         front = c["front"][:120]
         if front.count("$") % 2:  # never cut a formula in half: drop the unfinished one
             front = front[:front.rfind("$")].rstrip()
-        return page(request, "confirm.html", title="Delete this flashcard?", math=True,
+        front = plain_math(front)  # served as plain text: no raw TeX, nothing left for a script to typeset
+        return page(request, "confirm.html", title="Delete this flashcard?",
                     message=f"The card \"{front}\" will be deleted for good. Your materials are not touched.",
                     action=f"/flashcards/card/{card_id}/delete", button="Delete card",
                     back=f"/flashcards/{c['course_id']}", page_title="Delete flashcard")

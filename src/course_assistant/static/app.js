@@ -44,8 +44,23 @@
     if (el) {
       el.scrollIntoView({ block: "center", behavior: reduced ? "auto" : "smooth" });
       el.focus({ preventScroll: true });
+      // A question box started for the student ("About X: "): the cursor goes after the text.
+      if (el.hasAttribute && el.hasAttribute("data-caret-end") && el.setSelectionRange) {
+        var n = el.value.length; el.setSelectionRange(n, n);
+      }
     }
   }
+  // "Jump to latest answer": move focus to the newest answer, not only the scroll position.
+  document.addEventListener("click", function (e) {
+    var a = e.target && e.target.closest && e.target.closest("[data-jump-latest]");
+    if (!a) { return; }
+    var t = document.getElementById("latest-answer");
+    if (!t) { return; }
+    e.preventDefault();
+    var h = t.querySelector("[data-answer-heading]") || t;
+    h.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" });
+    focusEl(h);
+  });
 
   // A full page that follows a form post: say what happened and put focus on it.
   function announceFlash() {
