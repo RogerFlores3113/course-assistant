@@ -19,6 +19,7 @@ MATERIAL_KINDS = {
     "handout": "Handout",
     "recording": "Lecture recording",
     "textbook": "Textbook",
+    "reading": "Reading",
     "notes": "My notes",
     "website": "Course website",
     "syllabus": "Syllabus",
