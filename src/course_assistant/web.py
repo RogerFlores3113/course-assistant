@@ -32,9 +32,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__, disclaimer, paths
 from .store import EVENT_KINDS, GUIDE_KINDS, MATERIAL_KINDS, Store, now_iso
-from .web_helpers import (DEPTHS, MODELS, PALETTE, TABS, THEMES, accent_style, answer_view, clean_color, clean_event_title,
-                          concept_graph, course_color, day_label, group_guides, guide_view, merge_events, parse_day,
-                          time_label, week_label, week_start)
+from .web_md import render as render_md
+from .web_helpers import (DEPTHS, MODELS, PALETTE, TABS, THEMES, accent_style, answer_view, chunk_range_label, clean_color,
+                          clean_event_title, concept_graph, course_color, day_label, group_guides, guide_view,
+                          merge_events, parse_day, time_label, week_label, week_start)
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -494,7 +495,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                     saved = ((g or {}).get("data") or {}).get("blocks")
                     item["view"] = answer_view(m["content"], m.get("sources"),
                                                blocks=saved if isinstance(saved, list) else None,
-                                               twin=bool(g and g["kind"] == "twin"))
+                                               twin=bool(g and g["kind"] == "twin"),
+                                               mode=((g or {}).get("data") or {}).get("mode"),
+                                               data=(g or {}).get("data"))
                     item["question"] = last_q
                 history.append(item)
             ctx["history"] = history
@@ -1032,22 +1035,35 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
 
     # ------------------------------------------------------------------ reader and files
     @app.get("/read/{material_id}", response_class=HTMLResponse)
-    def reader(request: Request, material_id: int, at: str = ""):
+    def reader(request: Request, material_id: int, at: str | None = None):
         m = store.material(material_id)
         if not m:
             return friendly_page(request, 410, "Source deleted",
                                  "This passage came from a material that has been deleted, so it can no longer be "
                                  "opened. Answers and guides that cited it are still saved, but their link to it is "
                                  "gone. Add the material again if you still need it.")
-        at_id = int(at) if at.strip().isdigit() else None
         course = store.course(m["course_id"])
         chunks = store.chunks_of(material_id)
         media = MEDIA_EXT.get(Path(m.get("filename") or "").suffix.lower(), "") if file_of(m) else ""
+        at_id: int | None = None
+        at_note = ""
+        if at not in (None, ""):
+            if re.fullmatch(r"\d{1,12}", str(at).strip()):
+                at_id = int(str(at).strip())
+                if at_id not in {c["id"] for c in chunks}:
+                    at_id = None
+                    at_note = ("The passage this link points to is no longer in this material. It may have been "
+                               "re-imported or replaced. The whole material is shown below.")
+            else:
+                at_note = "This link's passage reference is not valid, so no passage is highlighted."
         for c in chunks:
             c["seek"] = int(float(c["loc_start"])) if c["loc_kind"] == "time" and re.match(r"^\d+(\.\d+)?$", str(c["loc_start"])) else None
+            c["range_label"] = chunk_range_label(c)
+            c["html"] = render_md(c["text"], heading_offset=2)
         source = m["source_url"] if re.match(r"^https?://\S+$", m.get("source_url") or "") else ""
         return page(request, "read.html", m=m, course=course, accent=course_color(course), chunks=chunks, at=at_id,
-                    media=media, has_file=bool(file_of(m)), source_url=source, kind_label=MATERIAL_KINDS.get(m["kind"], m["kind"]))
+                    at_note=at_note, media=media, has_file=bool(file_of(m)), source_url=source,
+                    kind_label=MATERIAL_KINDS.get(m["kind"], m["kind"]))
 
     @app.get("/files/{material_id}")
     def original_file(material_id: int):

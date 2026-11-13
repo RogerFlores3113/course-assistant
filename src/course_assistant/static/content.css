@@ -1,0 +1,30 @@
+/* Styles for rendered answers, guides and the reader: math, code, tables, flags, concept map. */
+pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+pre { white-space: pre; tab-size: 4; overflow-x: auto; }
+pre code { font-size: .92em; white-space: pre; }
+pre:focus-visible, .table-wrap:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.math { font-style: normal; font-family: inherit; }
+.math-block { overflow-x: auto; margin: 8px 0; text-align: center; white-space: pre-wrap; }
+.katex { font-size: 1.05em; }
+.katex-display { margin: .6em 0; overflow-x: auto; overflow-y: hidden; }
+.table-wrap { overflow-x: auto; margin: 8px 0; }
+.table-wrap table { border-collapse: collapse; }
+.table-wrap th, .table-wrap td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
+.table-wrap th { background: var(--surface-2); }
+details > summary { cursor: pointer; font-weight: 600; }
+details[open] > summary { margin-bottom: 6px; }
+.cite-removed { font-size: 12px; color: var(--muted); border: 1px dashed var(--warn); border-radius: 6px; padding: 0 5px; margin: 0 2px; white-space: nowrap; }
+.quote-unverified { background: var(--warn-bg); border-bottom: 2px dashed var(--warn); color: inherit; }
+.quote-flag { font-size: 12px; font-weight: 700; color: var(--text); background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 6px; padding: 0 5px; }
+.notice { background: var(--surface-2); border-left: 4px solid var(--warn); padding: 8px 12px; border-radius: 6px; margin: 0 0 12px; }
+.sources .also { margin-top: 6px; }
+.sources .also summary { font-weight: 400; color: var(--muted); }
+.edge-note { font-size: 12px; font-weight: 700; color: var(--text); background: var(--warn-bg); border: 1px dashed var(--warn); border-radius: 6px; padding: 0 5px; }
+.map text { font-size: 12px; }
+.map .edge-label { font-size: 11px; fill: var(--muted); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+.map path.edge { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.map marker path { fill: var(--muted); }
+.chunk-text { white-space: normal; }
+.chunk-text pre { white-space: pre; }
+.chunk header h2 { font-size: 1rem; margin: 0; display: inline; }
+.reader-note { background: var(--surface-2); border-left: 4px solid var(--warn); padding: 8px 12px; border-radius: 6px; }

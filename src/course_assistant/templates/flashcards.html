@@ -5,10 +5,10 @@
 {% if card %}
 <section class="card flashcard" data-flashcards>
   <h2>Card 1 of {{ due }} due</h2>
-  <p class="label">Front</p><p class="big">{{ card.front }}</p>
+  <p class="label">Front</p><p class="big" data-math>{{ card.front }}</p>
   <button type="button" class="btn" id="reveal" hidden>Show answer</button>
   <div id="answer" class="answerbox">
-    <div id="answer-text" tabindex="-1"><p class="label">Back</p><p class="big">{{ card.back }}</p>
+    <div id="answer-text" tabindex="-1"><p class="label">Back</p><p class="big" data-math>{{ card.back }}</p>
     {% if card.source_label %}<p class="muted small">From: {{ card.source_label }}</p>{% endif %}</div>
     <form method="post" action="/flashcards/{{ course.id }}/review" class="grades"><input type="hidden" name="card_id" value="{{ card.id }}">
       <button class="btn ghost" name="grade" value="again" data-key="1">Again<span class="key-hint"> (1)</span></button>
