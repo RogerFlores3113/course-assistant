@@ -29,7 +29,7 @@ from .grounding import Answer, Block
 
 _WORD = re.compile(r"[a-z]+|\d+(?:\.\d+)?")
 
-PROOF_CUES = re.compile(r"\b(prove|proof|show that|demonstrate that|verify that|derive)\b", re.I)
+PROOF_CUES = re.compile(r"\b(prove|proof|show that|shows that|demonstrate that|verify that|derive|justify why)\b", re.I)
 ESSAY_CUES = re.compile(r"\b(explain in words|explain why|explain how|describe|essay|discuss|argue|argument|reflect|reflection|thesis|critique|compare and contrast|"
                         r"write (?:a|an|about)|paragraph|opinion|in your own words|short answer)\b", re.I)
 
@@ -67,6 +67,17 @@ NO_ITEMS = ("ACADEMIC INTEGRITY RULE. Nothing is marked as graded in this course
             "toward a grade, treat it as graded: never solve their actual problem (write a twin with different "
             "numbers instead) and never write an essay, proof or any part of one (explain the concepts and the "
             "approach). Tell them they can mark it as graded in the app.")
+
+
+def kind_label(item: dict[str, Any]) -> str:
+    """The student-facing name of an item's kind: Problem, Proof, Short answer or Essay or paper."""
+    kind = _item_kind(item)
+    if kind == "essay":
+        body = (item.get("body") or "").strip()
+        if body and len(body.split()) <= 120 and not re.search(r"\b(essay|paper|thesis|paragraph)\b", body, re.I):
+            return "Short answer"
+        return "Essay or paper"
+    return {"problem": "Problem", "proof": "Proof"}.get(kind, "Problem")
 
 
 def graded_view(store, course_id: int) -> list[dict[str, Any]]:
@@ -409,6 +420,9 @@ def split_problems(text: str) -> list[dict[str, str]]:
         if len(nums) >= 2 and nums[0][1] == 1 and all(b[1] > a[1] for a, b in zip(nums, nums[1:])):
             heads = [(pos, f"Problem {n}") for pos, n in nums]
     if not heads:
+        secs = _question_sections(text)
+        if len(secs) >= 2:
+            return secs
         return [{"label": "", "text": text}]
     out, seen = [], {}
     for i, (pos, label) in enumerate(heads):
@@ -416,6 +430,27 @@ def split_problems(text: str) -> list[dict[str, str]]:
         seg = text[pos:end].strip()
         seen[label] = seen.get(label, 0) + 1
         out.append({"label": label if seen[label] == 1 else f"{label} ({seen[label]})", "text": seg})
+    return out
+
+
+_Q_SECTION = re.compile(r"^[ \t]*(?:#{1,6}[ \t]*)?([A-Za-z][\w \-]{0,40}?\b(?:questions?|problems?|exercises?))[ \t:]*$", re.I | re.M)
+_ANY_HEAD = re.compile(r"^[ \t]*#{1,6}[ \t]+\S", re.M)
+
+
+def _question_sections(text: str) -> list[dict[str, str]]:
+    """Items for a handout with no 'Problem N' headings: each paragraph under a 'Pre-lab questions', 'Report questions' or
+    'Exercises' heading is one question (a Word list loses its numbers on import)."""
+    out: list[dict[str, str]] = []
+    heads = list(_Q_SECTION.finditer(text))
+    for m in heads:
+        end = len(text)
+        for nxt in (_ANY_HEAD.search(text, m.end()), next((h for h in heads if h.start() > m.start()), None)):
+            if nxt and nxt.start() < end:
+                end = nxt.start()
+        name = " ".join(m.group(1).split())
+        paras = [p.strip() for p in re.split(r"\n\s*\n", text[m.end():end]) if len(p.split()) >= 5]
+        for i, p in enumerate(paras, 1):
+            out.append({"label": f"{name} {i}", "text": p})
     return out
 
 
@@ -445,7 +480,13 @@ def expected_items(text: str) -> int:
     pts = len(_ITEM_POINTS.findall(text or ""))
     if nums:
         return max(max(nums), len(nums), pts)
-    return pts if pts >= 2 else 1
+    if pts >= 2:
+        return pts
+    secs = _question_sections(text or "")
+    if len(secs) >= 2:
+        return len(secs)
+    asks = [p for p in re.split(r"\n\s*\n", text or "") if p.strip().endswith("?") and len(p.split()) >= 5]
+    return len(asks) if len(asks) >= 3 else 1
 
 
 def split_report(store, material_id: int) -> dict[str, Any]:
@@ -454,8 +495,19 @@ def split_report(store, material_id: int) -> dict[str, Any]:
     m = store.material(material_id)
     if not m:
         return {"found": 0, "expected": 0, "short": False}
-    found = len(_items_of_material(store, m["course_id"], material_id))
-    expected = expected_items(_material_text(store, material_id))
+    text = _material_text(store, material_id)
+    linked = _items_of_material(store, m["course_id"], material_id)
+    found = len(linked)
+    expected = expected_items(text)
+    if found < expected:
+        # items added by hand (Add graded item) that fill a gap: same label as a heading the split did not find
+        have = {(i.get("label") or "").lower() for i in linked}
+        want = {f"{_HEAD_WORD[mm.group(1).lower()]} {mm.group(2)}".lower() for mm in _WORD_HEAD.finditer(text)}
+        for i in store.graded_items(m["course_id"]):
+            lab = (i.get("label") or "").strip().lower()
+            if i.get("material_id") in (None, 0) and lab and lab in want and lab not in have:
+                have.add(lab)
+                found += 1
     return {"found": found, "expected": expected, "short": found < expected}
 
 
@@ -1028,7 +1080,7 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
     items = graded_view(store, course_id)
     if not items:
         return None
-    k = key_leak(store, course_id, reply, items)
+    k = key_leak(store, course_id, reply, items) or key_leak(store, course_id, with_cites, items)
     if k:
         return _hit(k, "key")
     if keys_only:
@@ -1141,7 +1193,8 @@ def _norm_hay(text: str) -> str:
     t = re.sub(r"_\{?([A-Za-z0-9]+)\}?", r"\1", t)
     t = re.sub(r"\\(?:left|right|top|quad|qquad|,|;|!)|\^\{?[Tt]\}?|\*\*|[$`]", "", t)
     t = re.sub(r"\\frac\{(-?\d+)\}\{(\d+)\}", r"\1/\2", t)
-    return _words_to_digits(t)
+    t = _words_to_digits(t)
+    return re.sub(r"\b(?:minus|negative)\s+(\d)", r"-\1", t, flags=re.I)
 
 
 def _val(c: str) -> Fraction | None:
@@ -1738,8 +1791,7 @@ def _topic_of(graded: dict[str, Any], twin_problem: str, problem_text: str) -> s
     m = re.search(r"\([^()]*?:\s*([^():]{4,60})\)\s*$", graded.get("title") or "")
     if m:
         return m.group(1).strip()
-    words = re.sub(r"\s+", " ", plain_text(twin_problem or problem_text)).split()
-    return " ".join(words[:7]).rstrip(".,;:") if words else ""
+    return ""
 
 
 def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = False) -> str:
@@ -1917,32 +1969,90 @@ def _outline_sentences(it: dict[str, Any], body: str) -> list[str]:
     return out
 
 
+def _sentences_of(text: str) -> list[str]:
+    out = []
+    for line in re.split(r"\n+", text or ""):
+        out += [x.strip() for x in re.split(r"(?<=[.!?])\s+", line) if x.strip()]
+    return out
+
+
+def colliding_sentence(it: dict[str, Any], text: str) -> str:
+    """The sentence (or line) of text that gives the item away: the first one carrying one of its key values, else
+    one with the most of its distinctive numbers or matrix rows. Used in refusal messages; never prints the key."""
+    sents = _sentences_of(_CITE_STRIP.sub("", text or ""))
+    key = item_key(it)
+    for sn in sents:
+        if key and key_hits(sn, key):
+            return sn
+    b = _Text(it.get("body") or "")
+    best, top = "", 0
+    for sn in sents:
+        t = _Text(sn)
+        n = sum(1 for x in b.sig if b.fm.get(x, {x}) & t.forms) + 2 * _row_hits(t, b)
+        if n > top:
+            best, top = sn, n
+    return best or (sents[0] if sents else "")
+
+
+_TWINISH = re.compile(r"\b(twin|similar|different numbers|another example|practice problem|example)\b", re.I)
+_ANS_LABEL = re.compile(r"\b(answer|result|solution|solved|final|x\s*=|=)\b", re.I)
+
+
+def _labelled_answer(it: dict[str, Any], text: str) -> bool:
+    """With no answer key: a sentence that names this item's own number ('Answer for Problem 3: x = (1, 1, 2)') and
+    states a result with digits, without calling itself a twin or an example."""
+    if not _prob_refs(it.get("label") or "") and not _prob_refs(it.get("title") or ""):
+        return False
+    for sn in _sentences_of(text):
+        if _own_ref(sn, it) and _ANS_LABEL.search(sn) and re.search(r"\d", re.sub(r"\bproblems?\s*\d+[a-z]?", "", sn, flags=re.I)) \
+                and not _TWINISH.search(sn):
+            return True
+    return False
+
+
 def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
-    """The graded item a guide saved by the AI app works or gives away, or None. Stricter than check_reply and
-    language and format agnostic: a bare final answer, a fragment of the solution (one matrix, one vector), a worked
-    answer in another language, an essay outline with written topic sentences, or essay prose. Applies to every kind."""
+    """The graded item a guide saved by the AI app works or gives away, or None. Every item's answer key is checked
+    against the whole body however long it is, then the stricter no-key rules (a labelled answer, a bare final answer,
+    a fragment, a translation, an essay outline or prose). The hit carries `sentence`, the sentence that collided."""
     items = graded_view(store, course_id)
     if not items:
         return None
+    clean = _CITE_STRIP.sub("", body or "")
+
+    def out(it, reason):
+        h = _hit(it, reason)
+        h["sentence"] = colliding_sentence(it, body or "")
+        return h
+
+    k = key_leak(store, course_id, clean, items) or key_leak(store, course_id, body or "", items)
+    if k:
+        return out(k, "key")
     hit = check_reply(store, course_id, title, body)
     if hit:
-        return hit
-    clean = _CITE_STRIP.sub("", body or "")
+        return out(hit, hit.get("reason", "reply"))
     r = _Text(clean)
     problems = [i for i in items if i["kind"] in ("problem", "proof") and (i.get("body") or "").strip()]
     essays = [i for i in items if i["kind"] == "essay" and (i.get("body") or "").strip()]
     english = _looks_english(clean)
+    scored = []
     for it in problems:
         b = _Text(it["body"])
         if it["kind"] == "problem" and _leaks_problem(r, b, clean, True, worked_required=False):
-            return _hit(it, "guide")
-    # a short body that is only results: final answers, one matrix, one vector, a number with a unit
-    has_math = bool(re.search(r"\d", clean)) and bool(re.search(r"[=\u2248]|\d\s*(?:ml|l|g|kg|mg|mol|mmol)\b", clean, re.I)
+            scored.append((_closeness(r, it, b), it))
+    if scored:
+        return out(max(scored, key=lambda x: x[0])[1], "guide")
+    for it in problems:
+        if not item_key(it) and _labelled_answer(it, clean):
+            return out(it, "labelled")
+    # a short body that is only results: final answers, one matrix, one vector, a number with a unit (items with no key)
+    nokey = [i for i in problems if not item_key(i) and i["kind"] == "problem"]
+    has_math = bool(re.search(r"\d", clean)) and bool(re.search(r"[=≈]|\d\s*(?:ml|l|g|kg|mg|mol|mmol)\b", clean, re.I)
                                                      or r.mrows or matrix_rows(clean)) \
         or bool(matrix_rows(body or ""))  # cite stripping eats small-number rows like [3,1,0]; read the raw body too
-    topical = [it for it in problems if len(content_tokens(clean) & _Text(it["body"]).tok) >= 1]
-    if problems and _prose_word_count(clean) <= 14 and (has_math or (topical and bool(numbers(clean)))):
-        return _hit((topical or problems)[0], "answer_only")
+    topical = [it for it in nokey if len(content_tokens(clean) & _Text(it["body"]).tok) >= 1]
+    wc = _prose_word_count(clean)
+    if nokey and wc <= 14 and ((has_math and (wc <= 4 or topical or not english)) or (topical and bool(numbers(clean)))):
+        return out((topical or nokey)[0], "answer_only")
     # an answer given in another language: numbers or topic words of a graded item inside a non-English body
     if not english:
         for it in problems + essays:
@@ -1950,17 +2060,23 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
             matched = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
             if (it["kind"] != "essay" and len(matched) >= 1) or \
                     (it["kind"] == "essay" and len(content_tokens(clean) & _essay_topic_tokens(it)) >= 2 and prose_paragraphs(clean)):
-                return _hit(it, "translated")
+                return out(it, "translated")
     for it in essays:
-        if _outline_sentences(it, clean) and (len(content_tokens(f"{title} {clean}") & _essay_topic_tokens(it)) >= 2):
-            return _hit(it, "outline")
+        topic = _essay_topic_tokens(it)
+        if _outline_sentences(it, clean) and (len(content_tokens(f"{title} {clean}") & topic) >= 2):
+            return out(it, "outline")
+        if len(clean.split()) <= 70 and _finished_sentences(clean, topic, True, f"{it.get('body', '')} {it.get('title', '')}"):
+            return out(it, "essay_text")  # a one-sentence thesis saved as an 'answer'
     return None
 
 
 def check_card(store, course_id: int, front: str, back: str) -> dict | None:
-    """The graded item a flashcard gives away (its own numbers in the card, worked or not), or None. Cards are short,
-    so unlike check_guide this does not treat a brief back as an answer fragment."""
+    """The graded item a flashcard gives away: one of its answer-key values, or its own numbers in the card (worked or
+    not). Cards are short, so unlike check_guide this does not treat a brief back as an answer fragment."""
     text = f"{front}\n{back}"
+    k = key_leak(store, course_id, text)
+    if k:
+        return _hit(k, "key")
     hit = check_reply(store, course_id, front, text)
     if hit:
         return hit
@@ -1970,3 +2086,35 @@ def check_card(store, course_id: int, front: str, back: str) -> dict | None:
                 _leaks_problem(r, _Text(it["body"]), text, True, worked_required=False):
             return _hit(it, "card")
     return None
+
+
+# --------------------------------------------------------------------------- scrubbing a study guide
+_SEG_SPLIT = re.compile(r"(<details>.*?</details>|\n\s*\n)", re.S | re.I)
+SCRUBBED = ("_A part of this guide was left out because it repeated an answer to your graded work. Ask for a similar "
+            "problem with different numbers instead._")
+
+
+def scrub_markdown(store, course_id: int, text: str, question: str = "") -> tuple[str, int]:
+    """Drop and replace only the parts (paragraphs, list items, a <details> solution) of a model-written guide that
+    state a graded item's answer: an answer-key value, or its own numbers worked. Returns (text, parts replaced)."""
+    items = graded_view(store, course_id)
+    if not items:
+        return text, 0
+    parts = _SEG_SPLIT.split(text or "")
+    out, n = [], 0
+    for seg in parts:
+        if not seg.strip() or _SEG_SPLIT.fullmatch(seg) and not seg.lower().startswith("<details>"):
+            out.append(seg)
+            continue
+        leaky = bool(check_reply(store, course_id, question, seg))
+        if not leaky:
+            for line in seg.splitlines():
+                if re.match(r"^\s*(?:[-*+]|\d+[.)])\s", line) and check_reply(store, course_id, question, line):
+                    leaky = True
+                    break
+        if leaky:
+            n += 1
+            out.append(SCRUBBED)
+        else:
+            out.append(seg)
+    return "".join(out), n

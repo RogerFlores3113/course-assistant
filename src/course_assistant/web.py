@@ -503,9 +503,16 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         titles = {m["id"]: m["title"] for m in store.materials(cid)}
         integ = _safe_mod("integrity")
         plain = getattr(integ, "plain_text", None) or (lambda t: " ".join((t or "").split()))
-        rows = [{**i, "kind_label": GRADED_KINDS.get(i.get("kind") or "problem", "Problem"),
-                 "material_title": titles.get(i.get("material_id") or 0, ""),
-                 "excerpt": plain(i.get("body") or "")[:160]} for i in items]
+        klabel = getattr(integ, "kind_label", None)
+        has_key = getattr(integ, "item_key", lambda i: [])
+        rows = []
+        for i in sorted(items, key=lambda r: r["id"]):
+            row = {k: v for k, v in i.items() if k != "answer_key"}  # the key is never sent to a page
+            row.update({"kind_label": klabel(i) if callable(klabel) else GRADED_KINDS.get(i.get("kind") or "problem", "Problem"),
+                        "material_title": titles.get(i.get("material_id") or 0, ""),
+                        "excerpt": plain(i.get("body") or "")[:160],
+                        "answer_check": bool(has_key(i)) if (i.get("kind") or "problem") == "problem" else None})
+            rows.append(row)
         warnings = []
         report = getattr(integ, "split_report", None)
         if callable(report):
@@ -710,6 +717,18 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             return after(request, course_id, "materials", error=f"Could not save the note: {_friendly(e)}")
         return after(request, course_id, "materials", notice="Note saved.")
 
+    def build_keys(item_ids: list[int]) -> None:
+        """One model call per numeric item (when an AI is connected) to make its answer key. Failures leave it empty."""
+        p = provider()
+        build = getattr(_safe_mod("integrity"), "build_answer_key", None)
+        if p is None or not callable(build):
+            return
+        for iid in item_ids:
+            try:
+                build(store, iid, p)
+            except Exception:
+                pass
+
     def mark_graded(m: dict[str, Any]) -> list[dict[str, Any]]:
         """Mark a material as graded work. The integrity module finds the individual problems or essay prompts;
         without it, only the whole-material flag is set. Returns the graded items found for this material."""
@@ -732,6 +751,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             raise _NotFound("That material was not found.")
         if graded == "1":
             items = mark_graded(m)
+            build_keys([i["id"] for i in items if not (i.get("answer_key") or "").strip()])
             if items:
                 labels = ", ".join(i.get("label") or i.get("title") or "item" for i in items[:8])
                 more = f" and {len(items) - 8} more" if len(items) > 8 else ""
@@ -759,25 +779,33 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
     @app.get("/courses/{course_id}/graded/new", response_class=HTMLResponse)
     def graded_new(request: Request, course_id: int):
         return page(request, "graded_form.html", is_new=True, item={"title": "", "label": "", "kind": "problem", "body": ""},
-                    course=require_course(course_id), page_title="Add graded item")
+                    course=require_course(course_id), page_title="Add graded item",
+                    graded_materials=[m for m in store.materials(course_id) if m.get("graded")])
 
     @app.post("/courses/{course_id}/graded/new")
     def graded_create(request: Request, course_id: int, kind: str = Form("problem"), label: str = Form(""),
-                      title: str = Form(""), body: str = Form("")):
+                      title: str = Form(""), body: str = Form(""), material_id: str = Form("")):
         course = require_course(course_id)
+        gm = [m for m in store.materials(course_id) if m.get("graded")]
+        mid = int(material_id) if material_id.strip().isdigit() and int(material_id) in {m["id"] for m in gm} else None
         vals = {"kind": kind if kind in GRADED_KINDS else "problem", "label": label.strip(), "title": title.strip(),
                 "body": body.strip()}
         if not vals["title"]:
             msg = "Give the item a title, like Problem Set 2."
             return page(request, "graded_form.html", status_code=400, is_new=True, item=vals, course=course, error=msg,
-                        field_error={"form": "graded", "field": "title", "message": msg}, page_title="Add graded item")
-        store.add_graded_item(course_id, vals["title"], vals["body"], kind=vals["kind"], label=vals["label"])
+                        field_error={"form": "graded", "field": "title", "message": msg}, page_title="Add graded item",
+                        graded_materials=gm)
+        iid = store.add_graded_item(course_id, vals["title"], vals["body"], mid, kind=vals["kind"], label=vals["label"])
+        build_keys([iid])
         return redirect(course_url(course_id), notice=f"Added {vals['label'] or vals['title']} to the graded list.")
 
     @app.get("/graded/{item_id}/edit", response_class=HTMLResponse)
     def graded_edit(request: Request, item_id: int):
         it = graded_or_404(item_id)
-        return page(request, "graded_form.html", item=it, course=require_course(it["course_id"]), page_title="Edit graded item")
+        integ = _safe_mod("integrity")
+        on = bool(getattr(integ, "item_key", lambda i: [])(it))
+        return page(request, "graded_form.html", item={k: v for k, v in it.items() if k != "answer_key"},
+                    course=require_course(it["course_id"]), page_title="Edit graded item", answer_check=on)
 
     @app.post("/graded/{item_id}/edit")
     def graded_update(request: Request, item_id: int, kind: str = Form("problem"), label: str = Form(""),
@@ -789,7 +817,10 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             msg = "Give the item a title, like Problem Set 2."
             return page(request, "graded_form.html", status_code=400, item={**it, **vals}, course=require_course(it["course_id"]),
                         error=msg, field_error={"form": "graded", "field": "title", "message": msg}, page_title="Edit graded item")
-        store.update_graded_item(item_id, **vals)
+        changed = vals["body"] != (it.get("body") or "") or vals["kind"] != (it.get("kind") or "problem")
+        store.update_graded_item(item_id, **vals, **({"answer_key": ""} if changed else {}))
+        if changed:
+            build_keys([item_id])
         return redirect(course_url(it["course_id"]), notice=f"Saved {vals['label'] or vals['title']}.")
 
     @app.get("/graded/{item_id}/delete", response_class=HTMLResponse)
@@ -1055,6 +1086,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
 
         def run():
             study = _mod("study")
+            _safe_fill_keys(course_id, p)
             if action == "primer":
                 return study.primer(store, course_id, p, event_id=ev)
             if action == "exam":

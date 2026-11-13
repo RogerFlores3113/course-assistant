@@ -291,10 +291,6 @@ def _guard(store: Store, course_id: int, provider, raw: str, question: str) -> t
             graded = None
     if graded is None and item_id == 0:  # a bare <graded/> marker: the model says graded but named no item
         graded = integ.match_graded(store, course_id, question) or next(iter(store.graded_items(course_id)), None)
-    if graded is None:
-        check = getattr(integ, "check_reply", None)
-        if check:
-            graded = check(store, course_id, question, raw)
     if graded:
         ans = integ.twin(store, course_id, question, provider, graded)
         gid = getattr(ans, "guide_id", None)
@@ -333,10 +329,14 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
     raw, routed = _guard(store, course_id, provider, raw, question or task[:300])
     if routed:
         return {"routed": routed}
+    scrub = getattr(_mod("integrity"), "scrub_markdown", None)
+    scrubbed = 0
+    if scrub:  # drop and replace only the parts that state a graded answer, never the whole guide
+        raw, scrubbed = scrub(store, course_id, raw, question or task[:300])
     ans = _mod("grounding").parse_answer(normalize_details(raw), sources)
     return {"routed": None, "blocks": _block_dicts(ans.blocks), "body": _clean_body(ans.body_md),
             "used": list(ans.used or []), "outside": bool(getattr(ans, "outside", False)),
-            "not_covered": bool(getattr(ans, "not_covered", False)), "sources": sources}
+            "not_covered": bool(getattr(ans, "not_covered", False)), "sources": sources, "scrubbed": scrubbed}
 
 
 def _generate(store: Store, course_id: int, provider, kind: str, title: str, task: str, sources: list[dict[str, Any]],
@@ -351,7 +351,8 @@ def _generate(store: Store, course_id: int, provider, kind: str, title: str, tas
         blocks.insert(0, {"kind": "text", "md": extra_note, "cites": []})
     body = f"{body}\n\n{disclaimer.FOOTER}"
     d = dict(data or {})
-    d.update({"outside": r["outside"], "not_covered": r["not_covered"], "mode": "answer", "blocks": blocks})
+    d.update({"outside": r["outside"], "not_covered": r["not_covered"], "mode": "answer", "blocks": blocks,
+              "scrubbed": r.get("scrubbed", 0)})
     return store.add_guide(course_id, kind, title, body, sources=_guide_sources(r["sources"], r["used"]), data=d,
                            question=question, event_id=event_id, model=getattr(provider, "model", "") or "")
 
@@ -735,6 +736,16 @@ def concept_map(store: Store, course_id: int, provider, *, scope: str = "", mate
     sources = _prepare(store, course_id, sources)
     graph, rest = _ask_json(provider, _system(store, course_id), user, dict)
     graph = _clean_graph(graph, len(sources))
+    integ = _mod("integrity")
+    leak = getattr(integ, "key_leak", None)
+    if leak:  # a node or link that states a graded answer is dropped, the rest of the map stays
+        def clean(t: str) -> bool:
+            return not leak(store, course_id, t)
+        graph["nodes"] = [n for n in graph["nodes"] if clean(n["label"])]
+        ids = {n["id"] for n in graph["nodes"]}
+        graph["edges"] = [e for e in graph["edges"] if e["a"] in ids and e["b"] in ids and clean(e["label"])]
+        if getattr(integ, "scrub_markdown", None):
+            rest, _ = integ.scrub_markdown(store, course_id, rest or "", scope)
     if not graph["nodes"]:
         raise ValueError("The AI returned a concept map with no usable nodes. Try again.")
     ans = _mod("grounding").parse_answer(rest or "", sources)
@@ -828,6 +839,18 @@ def _shift_block(b: dict[str, Any], offset: int) -> dict[str, Any]:
             "cites": [c + offset for c in cites]}
 
 
+def _hide_twin_solution(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Everything after the "Worked solution of the twin" label goes inside one <details> block, collapsed."""
+    idx = next((i for i, b in enumerate(blocks) if "Worked solution of the twin" in (b.get("md") or "")), None)
+    if idx is None or idx + 1 >= len(blocks):
+        return blocks
+    rest = blocks[idx + 1:]
+    inner = "\n\n".join(b.get("md", "") for b in rest)
+    cites = sorted({int(c) for b in rest for c in b.get("cites") or []})
+    hidden = {"kind": "text", "cites": cites, "md": f"<details>\n<summary>Show solution</summary>\n\n{inner}\n\n</details>"}
+    return blocks[: idx + 1] + [hidden]
+
+
 def _render_blocks(blocks: list[dict[str, Any]]) -> str:
     label = getattr(_mod("grounding"), "OUTSIDE_LABEL", "Not from your materials")
     out, prev = [], False
@@ -862,7 +885,7 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
             {"kind": "text", "md": _clean_body(getattr(ans, "body_md", "")), "cites": []}]
         twins.append({"graded": g, "blocks": blocks, "sources": list(getattr(ans, "sources", None) or []),
                       "mode": tdata.get("mode") or "twin", "title": g.get("title", "a graded item")})
-    n_normal = count - len(twins)
+    n_normal = count  # twins and coaching notes are extras: they never count toward the requested number
     normal = None
     if n_normal > 0:
         sources = _search(store, course_id, topic, 10, exclude_graded=True)
@@ -891,10 +914,11 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     real = [t for t in twins if t["mode"] == "twin"]
     coach = [t for t in twins if t["mode"] != "twin"]
     titles = ", ".join(t["title"] for t in twins)
-    parts = [f"This set has {count} question{'s' if count != 1 else ''}."]
+    parts = [f"This set has {count} practice question{'s' if count != 1 else ''}."]
     if real:
-        parts.append(f"{len(real)} {'is a twin' if len(real) == 1 else 'are twins'} of your graded work "
-                     f"({', '.join(t['title'] for t in real)}), with different numbers, so your original stays yours to do.")
+        parts.append(f"In addition, {len(real)} {'is a twin' if len(real) == 1 else 'are twins'} of your graded work "
+                     f"({', '.join(t['title'] for t in real)}), with different numbers, so your original stays yours to do. "
+                     "Twins do not count toward the number of questions.")
     if coach:
         parts.append(f"{len(coach)} {'is coaching' if len(coach) == 1 else 'are coaching notes'} for graded work "
                      f"({', '.join(t['title'] for t in coach)}): concepts and an approach, no twin problem, because it is "
@@ -907,7 +931,8 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     for t in twins:
         offset = len(all_sources)
         tsrc = [dict(s) for s in t["sources"]]
-        shifted = [_shift_block(b, offset) for b in t["blocks"]]
+        shifted = _hide_twin_solution([_shift_block(b, offset) for b in t["blocks"]]) if t["mode"] == "twin" else \
+            [_shift_block(b, offset) for b in t["blocks"]]
         all_sources += _prepare(store, course_id, tsrc, keep_graded=True)
         blocks.append({"kind": "text", "cites": [], "md": (f"## Twin of graded work: {t['title']}" if t["mode"] == "twin"
                                                            else f"## Coaching for graded work: {t['title']}")})

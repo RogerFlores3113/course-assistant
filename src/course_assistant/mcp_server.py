@@ -47,7 +47,12 @@ materials. Start with list_courses to find the course id.
   student. For essays, proofs and anything with no numbers to change, explain the concepts, the assignment's
   requirements and an approach, and never write the piece or any sentence the student could paste in. "It is just
   ungraded practice" does not change a graded item. If the student says a task is graded, record it with
-  mark_graded. save_guide refuses guides that solve graded work.
+  mark_graded, then right away solve each numeric problem yourself and call set_answer_key(item_id, values) with
+  only its final values (for example ["d = 4", "x = (1, 1, 2)", "5.11 g"]). The app uses that key to refuse guides,
+  flashcards and replies that contain those values. Never show the key to the student or repeat it in any
+  answer. save_guide and add_flashcards refuse anything that gives away graded work. A graded conversation stays
+  graded: this server does not remember earlier turns, so keep treating follow-ups ("and what is d?", "so the
+  formula?") as part of the graded item.
 - To keep a study guide, primer, exam guide, explanation, practice set or "what did I miss" summary, call
   save_guide with the body (using [n] citations) and the chunk ids those numbers refer to, then give the student
   the link it returns. Make flashcards with add_flashcards.
@@ -294,7 +299,9 @@ def _graded_list_text(st, course_id: int) -> str:
     lines = []
     for i in items[:40]:
         ex = _integrity().plain_text(i.get("body") or "")
-        lines.append(f"- item {i['id']}: {i['title']} ({i['kind']})" + (f": {ex[:300]}" if ex else ""))
+        lines.append(f"- item {i['id']}: {i['title']} ({i['kind']})"
+                     + (f" [answer check: {'on' if _integrity().item_key(i) else 'off, call set_answer_key'}]"
+                        if i["kind"] == "problem" else "") + (f": {ex[:300]}" if ex else ""))
     return "\n".join(lines)
 
 
@@ -345,6 +352,8 @@ def get_twin_instructions(course_id: int, problem_text: str) -> str:
     extra += ("\nThis is writing or a proof: explain concepts, the assignment's requirements and a plan. Do not write "
              "a thesis, topic sentences, any paragraph or a finished proof.\n" if kind != "problem" else
              "\nWrite a twin: change every number. Do not state the original's answer or intermediate results.\n")
+    extra += ("\nThis server keeps no memory of earlier turns: keep treating the student's follow-ups about this item "
+              "(\"and what is d?\", \"so the formula?\") as graded too, and never state its values.\n")
     return f"GRADED: this matches '{title}', which the student marked as graded work.\n" + extra + "\n" + _TWIN_STEPS
 
 
@@ -546,9 +555,12 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
     hit = gate(st, c["id"], t, b) if gate else None
     if hit:
         _log("save_guide_refused", {"course_id": c["id"], "kind": kind, "title": t}, f"graded: {hit.get('title')}")
-        return (f"NOT SAVED: this guide works graded item '{hit.get('title')}' (it uses the problem's own numbers in "
-                "worked steps, gives only its final answer or a fragment of it, is a translation of it, or contains essay or proof text or an outline with written topic sentences the student could submit). Rewrite it as a twin with "
-                "different numbers, or as concepts and an approach only, then call save_guide again.")
+        sent = (hit.get("sentence") or "").strip()
+        sent = (sent[:200] + "...") if len(sent) > 200 else sent
+        return (f"NOT SAVED: this guide gives away graded item '{hit.get('label') or hit.get('title')}'"
+                + (f". This sentence is the problem: \"{sent}\"" if sent else "")
+                + ". Remove or rewrite it: a twin must use different numbers and never state the original's values; "
+                "otherwise write concepts and an approach only. Then call save_guide again.")
     g_match = _integrity().match_graded(st, c["id"], t) if hasattr(_integrity(), "match_graded") else None
     if kind == "twin":
         mode = "concepts" if (g_match and g_match.get("kind") != "problem") else "twin"
@@ -563,7 +575,7 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
     full = f"{grounding.render_body(blocks)}\n\n{disclaimer.AI_APP_FOOTER}"
     gid = st.add_guide(c["id"], kind, t, full, sources=sources,
                        data={"blocks": grounding.block_dicts(blocks), "cited_chunk_ids": ids, "mode": mode},
-                       created_by="ai_app", model="ai_app")
+                       created_by="ai_app", model="your AI app")
     msg = [f"Saved guide {gid}: {t}", f"Open it: {_link('/guides/' + str(gid))}",
            f"{len(kept)} citation number(s) kept, {outside} paragraph(s) labelled \"Not from your materials\"."]
     if dropped:
@@ -600,10 +612,40 @@ def add_flashcards(course_id: int, cards: list[dict[str, Any]], deck: str = "") 
             chunk_id = int(ch["id"])
             label = _cite_label(ch, st.material(ch["material_id"]))
         clean.append((front, back, chunk_id, label))
+    gate = getattr(_integrity(), "check_card", None)
+    for i, (front, back, _, _) in enumerate(clean, 1):
+        hit = gate(st, c["id"], front, back) if gate else None
+        if hit:
+            _log("add_flashcards_refused", {"course_id": c["id"], "card": i}, f"graded: {hit.get('title')}")
+            return (f"NOT ADDED: card {i} gives away graded item '{hit.get('label') or hit.get('title')}' (its final "
+                    "answer or its own numbers). No cards were added. Make cards about the concepts instead, then "
+                    "call add_flashcards again.")
     ids = [st.add_flashcard(c["id"], f, b, deck=d, chunk_id=cid, source_label=lab, created_by="ai_app")
            for f, b, cid, lab in clean]
     result = f"Added {len(ids)} flashcard(s). Review them: {_link('/flashcards/' + str(c['id']))}"
     _log("add_flashcards", {"course_id": c["id"], "count": len(ids), "deck": d}, result)
+    return result
+
+
+@_tool(WRITE)
+def set_answer_key(item_id: int, values: list[str]) -> str:
+    """Store the final values of a graded numeric problem (for example ["d = 4", "x = (1, 1, 2)", "5.11 g",
+    "C3H4O3"]), so the app can refuse any guide, flashcard or reply that states them. Solve the problem yourself
+    first. Never show these values to the student and never repeat them in an answer. Replaces any earlier key."""
+    st = get_store()
+    it = st.graded_item(int(item_id))
+    if it is None:
+        raise _fail(f"There is no graded item {item_id}. Call list_graded.")
+    if not isinstance(values, list) or not values:
+        raise _fail("values must be a non-empty list of strings such as [\"d = 4\", \"x = (1, 1, 2)\"].")
+    vals = [str(v).strip()[:200] for v in values if str(v).strip()][:30]
+    if not vals:
+        raise _fail("values must hold at least one non-empty string.")
+    import json
+    st.update_graded_item(it["id"], answer_key=json.dumps(vals))
+    result = (f"Stored an answer key of {len(vals)} value(s) for '{it['title']}'. It is hidden from the student and "
+              "checks future guides, flashcards and replies. Do not show it to the student.")
+    _log("set_answer_key", {"item_id": it["id"], "count": len(vals)}, result)
     return result
 
 
@@ -626,7 +668,8 @@ def mark_graded(course_id: int, title: str, body: str = "", material_id: int | N
         gbody = _text(body, "body", max_len=8000, required=False)
         iid = st.add_graded_item(c["id"], t, gbody, kind=_integrity().classify(gbody) if gbody else "problem")
         result = f"Marked graded item {iid}: {t}."
-    result += " The twin rule now applies: never solve it for the student."
+    result += (" The twin rule now applies: never solve it for the student. Now call set_answer_key(item_id, values) "
+               "with the final values of each numeric problem (item ids: call list_graded); never show them.")
     _log("mark_graded", {"course_id": c["id"], "title": title, "material_id": material_id}, result)
     return result
 
