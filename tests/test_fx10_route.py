@@ -5,6 +5,26 @@ from course_assistant import grounding, integrity, mcp_server
 from course_assistant.providers import FakeProvider
 from fx9_world import world
 
+def model(default="Here is a plain answer.", leaks=None):
+    leaks = leaks or {}
+
+    def f(system, messages):
+        if "<twin_problem>" in system and "Reply in exactly this format" in system:
+            return ("<twin_problem>Solve 3x + y + z = 7, x - y + 2z = 4, 2x + 3y - z = 4 for (x, y, z).</twin_problem>"
+                    "<solution>Eliminate x from rows 2 and 3, then back substitute.</solution>")
+        if "THE STUDENT'S GRADED TASK" in messages[0]["content"]:
+            return "Review how the method works. Ask yourself which step you are unsure about."
+        for k, v in leaks.items():
+            if k in messages[-1]["content"]:
+                return v
+        return default
+    return f
+
+
+def held(a):
+    return a.mode in ("twin", "concepts")
+
+
 PART_FORMS = ["Problem 1b", "Solve problem 1b", "Problem 1a: find x", "Problem 1a please", "help with 1b", "prob 1b", "q1b",
               "number 1b", "1(a)", "1b", "#1b", "Problem 1.b", "problem 1 (b)", "Problem 1(b)", "Problem 1 part b", "P1b"]
 
@@ -231,3 +251,33 @@ def test_cite_comma_marker_is_stripped_and_a_vector_is_not():
     assert "[1]" not in f("", "The syllabus lists Monday 6 to 7 pm [1], but gives no room.")
     assert f("", "so x = [1, 1, 2] here") == "so x = [1, 1, 2] here"
     assert f("", "A = [[1], [1], [2]]") == "A = [[1], [1], [2]]"
+
+
+# ------------------------------------------------------------------ decision 8: the handout note and ranking
+@pytest.mark.parametrize("q", ["Is my answer right?", "When is the lab report due?", "Can you help me with this?", "Is the TA session on Monday right?"])
+def test_d8_no_handout_note_on_content_free_or_logistics_questions(tmp_path, q):
+    from fx9_world import handout_world
+    s, c, ids, mid = handout_world(tmp_path)
+    a = grounding.ask(s, c, q, FakeProvider(model("The sources do not cover it.")))
+    assert "Part of your graded handout was not searched" not in a.body_md
+    assert integrity.handout_sources(s, c, q)[1] == 0
+
+
+def test_d8_the_note_shows_when_a_left_out_paragraph_matches_the_content_words(tmp_path):
+    from fx9_world import handout_world
+    s, c, ids, mid = handout_world(tmp_path)
+    q = "Why does the pink color fade after the endpoint of a titration?"
+    assert integrity.handout_sources(s, c, q)[1] >= 1
+
+
+def test_d8_handout_passages_rank_by_score_with_the_rest(tmp_path):
+    from fx9_world import handout_world
+    s, c, ids, mid = handout_world(tmp_path)
+    book = tmp_path / "book.md"
+    book.write_text("# Chapter 1\n\nEquipment in a general chemistry lab is cleaned after use and stored in a drawer by the door.\n")
+    from course_assistant import importers
+    importers.import_file(s, c, book)
+    a = grounding.ask(s, c, "What equipment do I need: burets, a ring stand and flasks?", FakeProvider(model("See [1].")))
+    scores = [float(x.get("score") or 0) for x in a.sources if "score" in x]
+    assert scores == sorted(scores, reverse=True)
+    assert "burets" in (a.sources[0].get("text") or "")

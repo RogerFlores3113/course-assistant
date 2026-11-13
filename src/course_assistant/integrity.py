@@ -3304,6 +3304,9 @@ def _question_paragraph(para: str, bodies: list[tuple[dict[str, Any], _Text]]) -
     return False
 
 
+_HANDOUT_NOISE = frozenset("right wrong correct check checking mine thing things stuff sure okay due late submit".split())
+
+
 def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tuple[list[dict], int]:
     """Passages of a graded material that are not its graded questions (equipment, procedure, settings, safety), found for
     an ordinary question, and how many paragraphs that matched were left out because they hold a graded question.
@@ -3315,6 +3318,7 @@ def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tup
             by_mid.setdefault(it["material_id"], []).append((it, _Text(it["body"])))
     if not by_mid or not (query or "").strip():
         return [], 0
+    qwords = set() if is_logistics(query) else content_tokens(query) - _HANDOUT_NOISE
     try:
         found = retrieval.search(store, course_id, query, limit=max(limit * 2, 6), material_ids=sorted(by_mid))
     except Exception:
@@ -3327,7 +3331,9 @@ def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tup
             continue
         paras = [x for x in re.split(r"\n\s*\n", src.get("text") or "") if x.strip()]
         keep = [x for x in paras if not _question_paragraph(x, bodies)]
-        left_out += len(paras) - len(keep)
+        # the note is for a left-out paragraph that is about what the student asked: it shares a content word with the
+        # question (never on a content-free or logistics question)
+        left_out += sum(1 for x in paras if x not in keep and qwords & content_tokens(x))
         keep = [x for x in keep if len(x.split()) >= 4]  # a bare heading is no passage
         if keep and len(out) < limit:
             out.append(dict(src, text="\n\n".join(keep)))

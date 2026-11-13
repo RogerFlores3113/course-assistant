@@ -1322,7 +1322,9 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
         # a graded handout's own equipment, procedure and safety text is searchable; its questions never are
         extra, left_out = integrity.handout_sources(store, course_id, question)
         have = {x.get("chunk_id") for x in sources}
-        sources = sources + [x for x in extra if x.get("chunk_id") not in have]
+        # handout passages rank by score with the rest, not after them
+        sources = sorted(sources + [x for x in extra if x.get("chunk_id") not in have],
+                         key=lambda x: -float((x.get("score") if isinstance(x, dict) else getattr(x, "score", 0)) or 0))
         handout_note = integrity.HANDOUT_NOTE if left_out and (not have or extra) else ""
         if integrity.is_logistics(question):
             sources = integrity.logistics_sources(store, course_id, question) + sources
