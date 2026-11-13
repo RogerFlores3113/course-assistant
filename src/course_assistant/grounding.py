@@ -679,9 +679,14 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
 
     question = (question or "").strip()
     graded = integrity.match_graded(store, course_id, question)
+    # sticky graded context: a chat that recently worked on a graded item keeps being about it, so a follow-up with no
+    # problem numbers ("now multiply that by 58.44") or a "check my answer" is routed too
+    sticky = None if graded else integrity.sticky_item(store, course_id)
+    if sticky and sticky.get("kind") in ("problem", "proof") and (integrity.is_continuation(question) or integrity.is_check_ask(question)):
+        graded = sticky
     sources: list[Source] = []
     if not graded:
-        sources = retrieval.search(store, course_id, question, limit=limit, exclude_graded=True)
+        sources = integrity.search_safe(store, course_id, question, limit=limit)
         system, messages = build_messages(question, sources, depth=depth, history=history,
                                           integrity_block=integrity.prompt_block(store, course_id))
         raw = provider.complete(system, messages, max_tokens=4000)
@@ -691,7 +696,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
         if marker is not None:
             graded = integrity.item_for_marker(store, course_id, marker or None, question)
         else:
-            graded = integrity.check_reply(store, course_id, question, raw)
+            graded = integrity.check_reply(store, course_id, question, raw, force_item=sticky)
     if graded:
         answer = integrity.twin(store, course_id, question, provider, graded)
     else:
