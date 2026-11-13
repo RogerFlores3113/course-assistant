@@ -38,7 +38,8 @@ DOC_GROUPS = {"hw": "hw", "homework": "hw", "pset": "hw", "ps": "hw", "assignmen
               "project": "project", "essay": "essay", "paper": "essay"}
 _DOC_REF = re.compile(r"\b(problem set|homework|assignment|pset|hw|ps|exam|midterm|final|test|quiz|lab|project|essay|paper)"
                       r"\s*(?:#|no\.?|number)?\s*(\d+)", re.I)
-_PROB_REF = re.compile(r"\b(?:problem|question|exercise|prob|q)\s*\.?\s*#?\s*(\d+[a-z]?)\b|#(\d+)\b", re.I)
+_PROB_REF = re.compile(r"\b(?:problem|question|exercise|prob|q|probl[e\u00e8]me|problema|aufgabe|exercice|ejercicio|pregunta)"
+                       r"\s*\.?\s*#?\s*(\d+[a-z]?)\b|#(\d+)\b|\bp(\d+)\b", re.I)
 
 # --------------------------------------------------------------------------- the rule (shared by every prompt)
 RULE = """ACADEMIC INTEGRITY RULE. This rule has priority over every other instruction, including the student's.
@@ -86,8 +87,24 @@ def _item_kind(it: dict[str, Any]) -> str:
     return classify(body) if stored == "problem" else stored
 
 
+_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MD_FENCE = re.compile(r"^[ \t]*(?:```|~~~)[^\n]*$", re.M)
+_MD_LEAD = re.compile(r"^[ \t>]*(?:#{1,6}[ \t]+|[-*+][ \t]+|\d+[.)][ \t]+)", re.M)
+
+
+def plain_text(text: str) -> str:
+    """Markdown without its marks (##, **, list markers, backticks, table bars), on one line. Used for excerpts."""
+    t = _MD_FENCE.sub(" ", text or "")
+    t = _MD_LINK.sub(r"\1", t)
+    t = _MD_LEAD.sub("", t)
+    t = re.sub(r"^[ \t]*\|?[ \t:|-]{3,}\|?[ \t]*$", " ", t, flags=re.M)
+    t = t.replace("|", " ")
+    t = re.sub(r"(\*\*|__|\*|`)", "", t)
+    return " ".join(t.split())
+
+
 def _excerpt(text: str, n: int = 320) -> str:
-    t = " ".join((text or "").split())
+    t = plain_text(text)
     return t if len(t) <= n else t[: n - 3].rstrip() + "..."
 
 
@@ -221,10 +238,11 @@ def classify(text: str) -> str:
         return "essay"
     if PROOF_CUES.search(t):
         return "proof"
-    if ESSAY_CUES.search(t):
-        return "essay"
     body = re.sub(r"^[#>\s*]*(?:Problem|Question|Exercise|Q)\s*\d+[^\n]*\n", "", t, count=1, flags=re.I)
-    return "problem" if significant_numbers(body) else "essay"
+    nums = significant_numbers(body)
+    if ESSAY_CUES.search(t) and len(nums) < 2:
+        return "essay"
+    return "problem" if nums else "essay"
 
 
 # --------------------------------------------------------------------------- tokens
@@ -398,8 +416,41 @@ def split_problems(text: str) -> list[dict[str, str]]:
 MAX_ITEM_CHARS = 6000
 
 
+def chunk_text(c: dict[str, Any]) -> str:
+    """One chunk as markdown: its heading line (the importers keep headings out of the text) then its text."""
+    head = " ".join((c.get("heading") or "").split())
+    text = (c.get("text") or "").strip()
+    if head and not re.sub(r"^[#*\s]+", "", text).lower().startswith(head.lower()[:40]):
+        return f"## {head}\n{text}".strip()
+    return text
+
+
 def _material_text(store, material_id: int) -> str:
-    return "\n\n".join((c.get("text") or "").strip() for c in store.chunks_of(material_id) if (c.get("text") or "").strip())
+    return "\n\n".join(t for t in (chunk_text(c) for c in store.chunks_of(material_id)) if t)
+
+
+_ITEM_POINTS = re.compile(r"\(\s*\d+\s*(?:points?|pts?|marks?)\s*\)", re.I)
+
+
+def expected_items(text: str) -> int:
+    """How many problems the text's own numbering implies: the highest 'Problem N' heading, or the number of
+    '(N points)' markers (a lone '(100 points)' rubric line does not count)."""
+    nums = [int(re.match(r"\d+", m.group(2)).group(0)) for m in _WORD_HEAD.finditer(text or "")]
+    pts = len(_ITEM_POINTS.findall(text or ""))
+    if nums:
+        return max(max(nums), len(nums), pts)
+    return pts if pts >= 2 else 1
+
+
+def split_report(store, material_id: int) -> dict[str, Any]:
+    """{found, expected, short} for a material marked graded: items split from it versus the problems its numbering
+    implies. The Materials page warns when short is true."""
+    m = store.material(material_id)
+    if not m:
+        return {"found": 0, "expected": 0, "short": False}
+    found = len(_items_of_material(store, m["course_id"], material_id))
+    expected = expected_items(_material_text(store, material_id))
+    return {"found": found, "expected": expected, "short": found < expected}
 
 
 def _items_of_material(store, course_id: int, material_id: int) -> list[dict[str, Any]]:
@@ -459,8 +510,9 @@ class _Text:
         self.erows = equation_rows(self.raw)
 
 
-def _overlap_score(q: str, b: str) -> float:
-    """0 when not a match, else a score in (0, 1]. q is the student's text, b the graded text."""
+def _overlap_score(q: str, b: str, paste_only: bool = False) -> float:
+    """0 when not a match, else a score in (0, 1]. q is the student's text, b the graded text. paste_only keeps just
+    the rules for a question that quotes (most of) the graded text, used for essay prompts."""
     qt, bt = set(tokens(q)), set(tokens(b))
     if not qt or not bt:
         return 0.0
@@ -475,6 +527,8 @@ def _overlap_score(q: str, b: str) -> float:
         score = max(score, jaccard)
     if len(bt) >= 6 and of_graded >= 0.6:
         score = max(score, of_graded)
+    if paste_only:
+        return score
     if ((len(qt) >= 5 and qn) or len(qt) >= 8) and of_question >= 0.8 and (not qn or nums_inside):
         score = max(score, of_question)
     if len(qn) >= 2 and nums_inside and of_question >= 0.5 and len(inter) >= 4:
@@ -525,7 +579,7 @@ def _prob_refs(text: str) -> set[str]:
     text = re.sub(r"[-_]+", " ", text or "")
     # drop "problem set 2" style phrases so the 2 is not read as a problem number
     text = re.sub(r"\bproblem set\s*\d+", " ", text, flags=re.I)
-    return {(m.group(1) or m.group(2)).lower() for m in _PROB_REF.finditer(text)}
+    return {(m.group(1) or m.group(2) or m.group(3)).lower() for m in _PROB_REF.finditer(text)}
 
 
 def _title_words(text: str) -> str:
@@ -557,6 +611,13 @@ _PROSE_NOUN = re.compile(r"\b(thesis|intro|introduction|opening|conclusion|concl
                          r"topic sentences?|essay|paper|first sentence|hook|counter-?argument|rebuttal)\b", re.I)
 _WRITE_PHRASE = re.compile(r"(\ban?\s+essay\s+(?:on|about)\b|\bparagraph\s+(?:arguing|that argues|about|on)\b|\boutline\s+with\b|"
                            r"\btopic\s+sentences?\b.*\b(?:written|out|for me)\b|\bessay\s+for\s+me\b)", re.I)
+_MODEL_PHRASE = re.compile(
+    r"(\b(?:model|sample|example|exemplar|a[- ]?grade|a\+?[- ]?grade|perfect|ideal|full[- ]marks?|top[- ]scoring)\s+"
+    r"(?:[\w-]+\s+){0,2}(?:answers?|essays?|responses?|theses|thesis|paragraphs?|introductions?|intro|conclusions?|papers?)\b|"
+    r"\bwhat\s+would\s+(?:a|an|the)\s+(?:[\w-]+\s+){0,3}(?:thesis|intro|introduction|essay|paragraph|conclusion)\b[^?]{0,30}\blook\s+like|"
+    r"\b(?:good|strong|great|sample|winning)\s+thesis\b|"
+    r"\bpretend\s+(?:you(?:'re| are)|to be)\s+(?:a\s+|my\s+)?(?:professor|student|me)\b|"
+    r"\bdo\s+(?:my|the|this|our)\s+(?:[\w']+\s+){0,2}(?:essay|paper)\b)", re.I)
 _ESSAY_POSS = re.compile(r"\b(?:my|the|this|our|that)\s+(?:[\w']+\s+){0,2}(?:essay|paper)\b|\bessay\s*#?\s*\d+\b", re.I)
 _ESSAY_PART = re.compile(r"\b(thesis|intro(?:duction)?(?:\s+paragraph)?|opening(?:\s+(?:paragraph|sentence))?|"
                          r"concluding(?:\s+paragraph)?|conclusion(?:\s+paragraph)?|topic\s+sentences?|body\s+paragraph|"
@@ -568,7 +629,7 @@ pages due word words footnote footnotes chicago prompt rubric students student p
 def writing_request(text: str) -> bool:
     """A request to write, draft or word prose (thesis, intro, outline with topic sentences, an essay on ...)."""
     t = text or ""
-    return bool((_WRITE_VERB.search(t) and _PROSE_NOUN.search(t)) or _WRITE_PHRASE.search(t))
+    return bool((_WRITE_VERB.search(t) and _PROSE_NOUN.search(t)) or _WRITE_PHRASE.search(t) or _MODEL_PHRASE.search(t))
 
 
 def _essay_topic_tokens(it: dict[str, Any]) -> set[str]:
@@ -585,7 +646,9 @@ def _essay_match(question: str, essays: list[dict[str, Any]]) -> tuple[float, di
     best = None
     for it in essays:
         shared = len(qtok & _essay_topic_tokens(it))
-        ok = (wr and (poss or part or shared >= 1)) or (poss and (shared >= 1 or len(essays) == 1))
+        # only a request for wording or a model answer goes to concepts mode; questions about the essay (due date, AI
+        # policy, what a source says) are answered normally
+        ok = wr and (poss or part or shared >= 1 or len(essays) == 1 and bool(_MODEL_PHRASE.search(question)))
         if ok:
             sc = 0.8 + min(0.15, 0.03 * shared)
             if best is None or sc > best[0]:
@@ -607,6 +670,41 @@ def _combined(store, items: list[dict[str, Any]], kind: str = "essay") -> dict[s
             "label": "", "source": "material" if first.get("material_id") else "item", "members": [i["id"] for i in items]}
 
 
+_CHECK_ASK = re.compile(
+    r"\b(check|verify|confirm|double[- ]?check|grade (?:my|this)|sanity[- ]check|"
+    r"(?:is|was|are)\b[^.?!\n]{0,60}\b(?:right|correct|wrong|incorrect|good)\b|"
+    r"am i\s+(?:right|correct|close|on track)|did i\s+(?:get|do|solve|make|mess)|"
+    r"(?:right|correct|ok(?:ay)?)\s*\?|"
+    r"i\s+(?:got|get|found|came up with|calculated|computed|ended up with|think (?:it|the answer) is)|"
+    r"my\s+(?:answer|solution|result|work|attempt|value))\b", re.I)
+
+
+def is_check_ask(text: str) -> bool:
+    """'Check my answer', 'I got 5.11 g, right?', 'is x = (1,1,2) correct': a request to confirm or deny an answer."""
+    t = text or ""
+    return bool(_CHECK_ASK.search(t)) or bool(re.search(r"(?:right|correct)\s*\?\s*$", t.strip(), re.I))
+
+
+def _own_ref(question: str, item: dict[str, Any]) -> bool:
+    """The question names this item's own problem number ('Problem 3', 'problem 3 of pset 2', '#3')."""
+    mine = _prob_refs(item.get("label") or "") or _prob_refs(item.get("title") or "")
+    return bool(mine and mine & _prob_refs(question))
+
+
+def _closeness(q: _Text, item: dict[str, Any], b: _Text) -> float:
+    """Tie-break among items with the same score: token overlap plus the share of the item's own numbers (and matrix
+    rows) the question carries."""
+    qt, bt = set(tokens(q.raw)), set(tokens(item.get("body") or ""))
+    jac = len(qt & bt) / len(qt | bt) if qt and bt else 0.0
+    g = len(b.sig)
+    m = sum(1 for n in b.sig if b.fm.get(n, {n}) & q.forms)
+    rows = 0.0
+    if b.mrows and q.mrows:
+        brows = {tuple(r) for r in b.mrows}
+        rows = sum(1 for r in q.mrows if tuple(r) in brows) / max(1, len(brows))
+    return jac + (m / g if g else 0.0) + rows
+
+
 def match_graded(store, course_id: int, question: str) -> dict | None:
     """The graded item this request is about (a paraphrase, one step, a notation change, a reference, or a request to
     write prose for a graded essay), or None. The result is the graded_items row plus `kind`, `score` and `source`
@@ -618,14 +716,27 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     if not items:
         return None
     q = _Text(question)
+    wants_prose = writing_request(question)
+    check = is_check_ask(question)
     scored: list[tuple[float, dict[str, Any]]] = []
     refs: list[dict[str, Any]] = []
+    texts: dict[int, _Text] = {}
     for it in items:
-        if _reference_match(question, it):
+        essay_kind = it["kind"] == "essay" and bool((it.get("body") or "").strip())
+        b = texts[it["id"]] = _Text(it.get("body") or "")
+        if _reference_match(question, it) and (not essay_kind or wants_prose):
             refs.append(it)
             scored.append((1.0, it))
             continue
-        sc = score_text(q, _Text(it.get("body") or ""))
+        if essay_kind:  # essays match by writing requests or by pasting the prompt, never by shared numbers or words
+            sc = _overlap_score(q.raw, b.raw, paste_only=True)
+        else:
+            sc = score_text(q, b)
+            if sc == 0 and check and it["kind"] in ("problem", "proof"):
+                shared = len(q.tok & b.tok) + sum(1 for a in set(re.findall(r"\b[A-Z]{2,4}\b", q.raw))
+                                                  if re.search(rf"\b{a}\b", b.raw))
+                if shared >= 2 or (shared >= 1 and _POSSESSIVE.search(q.raw)):
+                    sc = 0.6
         if sc > 0:
             scored.append((sc, it))
     em = _essay_match(question, [i for i in items if i["kind"] == "essay" and (i.get("body") or "").strip()])
@@ -633,7 +744,8 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
         scored.append(em)
     if not scored:
         return None
-    best = max(scored, key=lambda x: (x[0], -x[1]["id"]))
+    best = max(scored, key=lambda x: (round(x[0], 2), _own_ref(question, x[1]),
+                                      round(_closeness(q, x[1], texts.get(x[1]["id"]) or _Text("")), 3), -x[1]["id"]))
     score, item = best
     if score >= 1.0 and len(refs) > 1 and not _prob_refs(question):
         out = _combined(store, refs)
@@ -674,12 +786,12 @@ def prose_paragraphs(text: str, min_words: int = 25) -> list[str]:
     return out
 
 
-def _leaks_problem(r: _Text, b: _Text, reply: str, question_matches: bool = False) -> bool:
+def _leaks_problem(r: _Text, b: _Text, reply: str, question_matches: bool = False, worked_required: bool = True) -> bool:
     """Does the reply restate a graded problem's own numbers inside worked steps?"""
     g = len(b.sig)
     if g == 0:
         return False
-    worked = bool(_WORKED.search(reply))
+    worked = bool(_WORKED.search(reply)) or not worked_required
     matched = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
     m, dm = len(matched), sum(1 for n in matched if _distinctive(n))
     if not worked:
@@ -703,9 +815,44 @@ def _quote_ratio(p: str, source: str) -> float:
     return sum(1 for g in grams if g in sw) / len(grams) if grams else 0.0
 
 
+_ARGUE = re.compile(r"\b(shows?|proves?|argues?|argued|demonstrates?|vindicat\w*|although|whereas|despite|because|"
+                    r"therefore|thus|undermin\w*|refutes?|contends?|reveals?|illustrates?|fails?|succeeds?)\b", re.I)
+_SENT_COACH = re.compile(r"\b(you|your|yours|you're|should|could|consider|try to|ask yourself|rubric|assignment|must|needs? to|"
+                         r"aim to|make sure|remember|a strong|a good|a clear|students?|requires?)\b", re.I)
+
+
+def _finished_sentences(reply: str, topic: set[str], asked: bool, source: str = "") -> list[str]:
+    """Sentences that read like the essay's own claims: quoted or colon-introduced ('For example: "Although ..."'), or,
+    when the student asked for writing, any argumentative sentence about the essay's topic with no coaching words in
+    the sentence itself."""
+    out = []
+    for line in re.split(r"\n+", reply or ""):
+        line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip()
+        if not line:
+            continue
+        cands: list[tuple[str, bool]] = []
+        for m in re.finditer(r"[\"\u201c]([^\"\u201d]{25,})[\"\u201d]", line):
+            cands.append((m.group(1), True))
+        if ":" in line:
+            cands.append((line.rsplit(":", 1)[1], True))
+        for sent in re.split(r"(?<=[.!?])\s+", line):
+            cands.append((sent, False))
+        for sent, marked in cands:
+            sent = sent.strip().strip("\"\u201c\u201d*_ ")
+            if len(sent.split()) < 8 or "?" in sent or _SENT_COACH.search(sent):
+                continue
+            if source and _quote_ratio(sent, source) >= 0.5:  # quoting the assignment's own requirement
+                continue
+            if len(content_tokens(sent) & topic) >= 2 and _ARGUE.search(sent) and (marked or asked):
+                out.append(sent)
+    return out
+
+
 def _leaks_essay(it: dict[str, Any], reply: str, question: str, force_asked: bool = False) -> bool:
     asked = force_asked or writing_request(question) or bool(_ESSAY_POSS.search(question))
     topic = _essay_topic_tokens(it)
+    if _finished_sentences(reply, topic, asked, f"{it.get('body', '')} {it.get('title', '')}"):
+        return True
     for p in prose_paragraphs(reply):
         if _COACHING.search(p) or _quote_ratio(p, f"{it.get('body', '')} {it.get('title', '')}") >= 0.5:
             continue
@@ -723,13 +870,43 @@ def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
                             or score_text(_Text(question), b) >= 0.5)
 
 
-def check_reply(store, course_id: int, question: str, raw_reply: str) -> dict | None:
+def _hit(it: dict[str, Any], reason: str = "reply") -> dict[str, Any]:
+    out = dict(it)
+    out["source"] = "material" if it.get("material_id") else "item"
+    out["score"] = 1.0
+    out["reason"] = reason
+    return out
+
+
+def _leaks_forced(it: dict[str, Any], reply: str, question: str) -> bool:
+    """The chat is already about this graded item, so the reply is judged more strictly: one of the item's distinctive
+    numbers, or two of its numbers, in worked or result-like text, is enough."""
+    kind = it.get("kind") or _item_kind(it)
+    body = (it.get("body") or "").strip()
+    if kind == "problem" and body:
+        b, r = _Text(body), _Text(reply)
+        matched = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
+        if _leaks_problem(r, b, reply, True):
+            return True
+        return bool(matched) and (len(matched) >= 2 or any(_distinctive(n) for n in matched)) \
+            and bool(re.search(r"[=\u2248]|\banswer\b|\bresult\b|\bis\b", reply))
+    if kind == "proof" and body:
+        return _leaks_proof(it, reply, question)
+    if kind == "essay" and body:
+        return _leaks_essay(it, reply, question, True)
+    return False
+
+
+def check_reply(store, course_id: int, question: str, raw_reply: str, force_item: dict | None = None) -> dict | None:
     """Return the graded item when the reply solves it (its numbers in worked steps, a finished proof, or submittable
-    essay prose for a graded essay), else None. Callers discard the reply and route to twin / concepts mode."""
+    essay prose for a graded essay), else None. Callers discard the reply and route to twin / concepts mode.
+    force_item: an item the chat is already about (see sticky_item); the reply is checked against it too."""
     _, reply = read_marker(raw_reply or "")
     reply = _CITE_STRIP.sub("", reply)
     if not reply.strip():
         return None
+    if force_item and _leaks_forced(force_item, reply, question or ""):
+        return _hit(force_item, "sticky")
     items = graded_view(store, course_id)
     if not items:
         return None
@@ -747,12 +924,45 @@ def check_reply(store, course_id: int, question: str, raw_reply: str) -> dict | 
         elif kind == "essay" and body:
             hit = _leaks_essay(it, reply, question or "")
         if hit:
-            out = dict(it)
-            out["source"] = "material" if it.get("material_id") else "item"
-            out["score"] = 1.0
-            out["reason"] = "reply"
-            return out
+            return _hit(it)
     return None
+
+
+# --------------------------------------------------------------------------- sticky graded context
+_CONTINUATION = re.compile(r"\b(that|it|this|those|these|then|now|next|previous|above|earlier|final|again|result|so far|"
+                           r"the entry|the answer|that answer|the same|continue|go on|and the|what about|how about)\b", re.I)
+
+
+def sticky_item(store, course_id: int, turns: int = 6) -> dict[str, Any] | None:
+    """The graded item a recent chat turn was routed to (its twin guide records the item id), or whose request
+    matched a graded item, looking at the last few messages, newest first. None when the chat has not touched one."""
+    try:
+        msgs = store.chat_messages(course_id, turns)
+    except Exception:
+        return None
+    for m in reversed(msgs):
+        if m.get("role") == "assistant" and m.get("guide_id"):
+            g = store.guide(m["guide_id"]) or {}
+            d = g.get("data") or {}
+            iid = d.get("graded_item_id")
+            if g.get("kind") == "twin" and iid:
+                it = store.graded_item(int(iid))
+                if it and it.get("course_id") == course_id:
+                    return dict(it, kind=_item_kind(it), source="material" if it.get("material_id") else "item",
+                                score=1.0, reason="sticky")
+        elif m.get("role") == "user":
+            found = match_graded(store, course_id, m.get("content") or "")
+            if found and found.get("id"):
+                return dict(found, reason="sticky")
+    return None
+
+
+def is_continuation(question: str) -> bool:
+    """A short follow-up that leans on the previous turn ('now multiply that by 58.44', 'and the -2 below the pivot?',
+    'what is the final mass again?') rather than starting a new topic."""
+    q = (question or "").strip()
+    words = q.split()
+    return 0 < len(words) <= 22 and bool(_CONTINUATION.search(q)) or (0 < len(words) <= 8 and bool(re.search(r"\d", q)))
 
 
 # --------------------------------------------------------------------------- twin
@@ -822,11 +1032,22 @@ def _parse_twin(raw: str) -> tuple[str, str] | None:
     return p.group(1).strip(), s.group(1).strip()
 
 
+_SMALL_INT = re.compile(r"^-?(?:[3-9]|10)$")
+
+
+def overlap_numbers(text: str) -> set[str]:
+    """Significant numbers for judging whether a twin reuses the original's. Small whole numbers 3 to 10 are usually
+    structural ('rows 2 and 3', 'step 4', '3 by 3') and are ignored, except where they are matrix or equation entries."""
+    sig = significant_numbers(text)
+    entries = {e for r in matrix_rows(text) + equation_rows(text) for e in r}
+    return {n for n in sig if not _SMALL_INT.match(n) or n in entries}
+
+
 def numbers_changed(original: str, twin_problem: str) -> bool:
     """True when the twin really uses different numbers than the original."""
     if " ".join(original.split()).lower() == " ".join(twin_problem.split()).lower():
         return False
-    orig, new = significant_numbers(original), significant_numbers(twin_problem)
+    orig, new = overlap_numbers(original), overlap_numbers(twin_problem)
     if not orig:
         return True
     if not new:
@@ -835,17 +1056,53 @@ def numbers_changed(original: str, twin_problem: str) -> bool:
     return shared == 0 or shared * 2 < len(new)
 
 
+_ORIGINAL_RESULT = re.compile(
+    r"(\b(?:for|in|to)\s+(?:your|the)\s+(?:own|original|actual|graded|real)\s+(?:problem|question|task|assignment|exercise|version)\b|"
+    r"\b(?:your|the\s+original|the\s+graded)\s+(?:own\s+|actual\s+)?(?:problem|question|assignment)(?:'s|\s+(?:result|answer|solution|comes|gives|is|has))\b|"
+    r"\b(?:your|the original|the graded)\s+(?:own\s+)?(?:answer|result|solution)\s+(?:is|should be|would be|comes|equals|=)\b)", re.I)
+_ORIGINAL_RESULT_TAIL = re.compile(r"(?:\bis\b|\bare\b|=|\bequals\b|\bgives\b|\bcomes\b|\bresult\b|\banswer\b|\bsolution\b)"
+                                   r"[^\n]{0,60}?[-\u2212(]?\d|=\s*[\w(\[-]", re.I)
+_CONFIRMS = re.compile(r"\b(?:your\s+(?:answer|result|value|solution|work)\s+(?:is|looks|seems)\s+(?:right|correct|wrong|incorrect|good)|"
+                       r"(?:that|this|it)(?:'s|\s+is)\s+(?:right|correct|wrong|incorrect)|"
+                       r"yes,?\s+(?:that|this|your|it)\b[^.\n]{0,30}\b(?:correct|right)|"
+                       r"you(?:'re|\s+are)\s+(?:right|correct|wrong)|you\s+got\s+it\s+(?:right|wrong))\b", re.I)
+
+
+def reveals_original(solution: str) -> bool:
+    """A twin solution that goes on to state the original's result ('for your own problem the result is ...') or
+    confirms or denies the student's answer."""
+    sol = _CITE_STRIP.sub("", solution or "")
+    for m in _ORIGINAL_RESULT.finditer(sol):
+        rest = re.split(r"(?<=[.!?])\s", sol[m.start(): m.start() + 200], maxsplit=1)[0]
+        if _ORIGINAL_RESULT_TAIL.search(rest):
+            return True
+    return bool(_CONFIRMS.search(sol))
+
+
 def _solution_leaks(original: str, solution: str) -> bool:
-    """A twin's solution that reuses the original's numbers is working the original."""
-    orig = significant_numbers(original)
+    """A twin's solution that reuses the original's numbers is working the original, or appends its result."""
+    if reveals_original(solution):
+        return True
+    orig = overlap_numbers(original)
     if len(orig) < 2:
         return False
-    shared = len(orig & significant_numbers(_CITE_STRIP.sub("", solution)))
+    shared = len(orig & overlap_numbers(_CITE_STRIP.sub("", solution)))
     return shared >= max(2, math.ceil(0.6 * len(orig)))
 
 
+def search_safe(store, course_id: int, query: str, *, limit: int = 6, **kw) -> list[dict]:
+    """retrieval.search that never returns graded material. Uses exclude_graded=True; if retrieval does not take that
+    argument, filters the graded materials' chunks out of the results here."""
+    try:
+        return retrieval.search(store, course_id, query, limit=limit, exclude_graded=True, **kw)
+    except TypeError:
+        graded = {m["id"] for m in store.materials(course_id) if m.get("graded")}
+        return [s for s in retrieval.search(store, course_id, query, limit=limit, **kw) if s.get("material_id") not in graded]
+
+
 def _assignment_sources(store, graded: dict, limit_chars: int = 6000) -> list[dict]:
-    """The graded essay's own prompt, requirements and rubric, so coaching is specific to them."""
+    """The graded essay's own prompt, requirements and rubric (concepts mode only), so coaching is specific to them.
+    Never used for a material that also holds numeric or proof problems: those would reach the model as sources."""
     mids = []
     for iid in graded.get("members") or [graded.get("id")]:
         it = store.graded_item(iid) if iid else None
@@ -856,6 +1113,10 @@ def _assignment_sources(store, graded: dict, limit_chars: int = 6000) -> list[di
     out: list[dict] = []
     total = 0
     for mid in mids[:2]:
+        siblings = [i for i in store.graded_items(graded.get("course_id") or (store.material(mid) or {}).get("course_id") or 0)
+                    if i.get("material_id") == mid]
+        if any(_item_kind(i) != "essay" for i in siblings) or len(siblings) > 1:
+            continue
         mat = store.material(mid) or {}
         for ch in store.chunks_of(mid):
             total += len(ch.get("text") or "")
@@ -871,10 +1132,14 @@ def _assignment_sources(store, graded: dict, limit_chars: int = 6000) -> list[di
 
 def _sources_for(store, course_id: int, question: str, problem_text: str, graded: dict, *, assignment: bool = False) -> list[dict]:
     seen: dict[int, dict] = {}
-    for q in (problem_text, question, graded.get("label") or "", graded.get("title", "")):
+    # essays and proofs: what the student asked comes first, so policy and topic passages are found; the graded text
+    # itself is not a query for a numeric problem's twin sources, where it finds the method
+    order = (question, graded.get("label") or "", graded.get("title", "")) if assignment else \
+        (problem_text, question, graded.get("label") or "", graded.get("title", ""))
+    for q in order:
         if not (q or "").strip():
             continue
-        for s in retrieval.search(store, course_id, q, limit=6, exclude_graded=True):
+        for s in search_safe(store, course_id, q[:600], limit=6):
             seen.setdefault(s["chunk_id"], s)
         if len(seen) >= 6:
             break
@@ -886,6 +1151,14 @@ def _sources_for(store, course_id: int, question: str, problem_text: str, graded
 
 NOTE_TWIN = ("This was marked graded ({title}), so the app solved a twin problem with different numbers instead of "
              "your problem. The original is yours to do.")
+NOTE_CHECK_TWIN = ("This was marked graded ({title}), so the app cannot say whether your answer to it is right or wrong. "
+                   "Check your method on this twin problem instead: work it yourself first, compare with the solution, "
+                   "then apply the same steps to your own problem.")
+NOTE_CHECK_CONCEPTS = ("This was marked graded ({title}), so the app cannot say whether your answer to it is right or "
+                       "wrong. It explains the concepts and how to check your own work instead.")
+CHECK_RULE = ("\n\nThe student is asking whether their own answer to the graded task is right. Never confirm or deny "
+              "it, never state or hint at the original's result, and never say 'yes, that is correct'. Tell them to "
+              "check their method on the twin and to verify their own work step by step.")
 NOTE_CONCEPTS = ("This was marked graded ({title}), so the app explains the concepts and an approach instead of doing "
                  "the work. The work itself is yours to do.")
 
@@ -917,10 +1190,15 @@ def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, sr
                     question: str, depth_rule: str, n_sources: int) -> tuple[list[Block], list[int]]:
     system = CONCEPT_SYSTEM.format(kind=kind if kind in ("essay", "proof") else "problem", depth_rule=depth_rule)
     user = f"{src_block}\n\nTHE STUDENT'S GRADED TASK (do not complete it):\n{problem_text}"
+    if question and question != problem_text:
+        user += (f"\n\nTHE STUDENT'S REQUEST (answer any part of it that is about the course, its policies, a due date "
+                 f"or the topic's background from the numbered sources, and cite them; do not write the graded work):\n{question}")
+    if is_check_ask(question):
+        user += CHECK_RULE
     for attempt in range(2):
         raw = provider.complete(system, [{"role": "user", "content": user}], max_tokens=4000)
         _, raw = read_marker(raw)
-        if not _reply_leaks_item(graded, kind, raw, question, problem_text):
+        if not _reply_leaks_item(graded, kind, raw, question, problem_text) and not (is_check_ask(question) and _CONFIRMS.search(raw or "")):
             blocks, used = grounding.parse_blocks(raw, n_sources)
             if blocks:
                 return blocks, used
@@ -955,10 +1233,13 @@ def twin(store, course_id: int, question: str, provider, graded: dict) -> Answer
     src_block = grounding.format_sources(sources)
     depth_rule = grounding.DEPTH_RULES["standard"]
     mode, twin_problem, blocks, used, fell_back = "concepts", "", [], [], False
+    check = is_check_ask(question)
 
     if kind == "problem" and numbers(problem_text):
         system = TWIN_SYSTEM.format(depth_rule=depth_rule)
         user = f"{src_block}\n\nTHE STUDENT'S GRADED PROBLEM (do not solve it):\n{problem_text}"
+        if check:
+            user += CHECK_RULE
         messages = [{"role": "user", "content": user}]
         for attempt in range(2):
             raw = provider.complete(system, messages, max_tokens=4000)
@@ -979,12 +1260,12 @@ def twin(store, course_id: int, question: str, provider, graded: dict) -> Answer
                                        depth_rule, len(sources))
 
     if mode == "twin":
-        note = NOTE_TWIN.format(title=title)
+        note = (NOTE_CHECK_TWIN if check else NOTE_TWIN).format(title=title)
         lead = [Block("text", "**Twin problem**\n\n" + twin_problem, []), Block("text", "**Worked solution of the twin**", [])]
         blocks = lead + blocks
         guide_title = f"Twin of {title}"
     else:
-        note = NOTE_CONCEPTS.format(title=title)
+        note = (NOTE_CHECK_CONCEPTS if check else NOTE_CONCEPTS).format(title=title)
         if fell_back:
             note += " The app could not write a safe twin with different numbers, so it explains the concepts."
         guide_title = f"Concepts for {title}"
@@ -1016,3 +1297,93 @@ def item_for_marker(store, course_id: int, item_id: int | None, question: str) -
         return found
     return {"id": None, "title": "graded work", "body": "", "material_id": None, "label": "",
             "kind": classify(question), "source": "item", "score": 0.0, "reason": "marker"}
+
+
+# --------------------------------------------------------------------------- a guide written by the student's AI app
+_EN_WORDS = frozenset("the of and to a in is that it for with as are this be on by or an at from your you can which "
+                      "then use each have not but all one will what when how step first second".split())
+_WRITTEN_LINE = re.compile(r"^\s*(?:[-*+>]|\d+[.)])?\s*(?:\*\*|__)?\s*(?:(thesis|topic sentence \d*|claim|argument|opening|"
+                           r"intro(?:duction)?|conclusion)\s*\d*\s*(?:\*\*|__)?\s*[:\u2014-]\s*)?(.+)$", re.I)
+
+
+def _prose_word_count(text: str) -> int:
+    return len([w for w in re.findall(r"[^\W\d_]{3,}", _CITE_STRIP.sub("", text or ""))])
+
+
+def _looks_english(text: str) -> bool:
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    if len(words) < 12:
+        return True
+    return sum(1 for w in words if w in _EN_WORDS) / len(words) >= 0.12
+
+
+def _outline_sentences(it: dict[str, Any], body: str) -> list[str]:
+    """List or labelled lines of the guide that are written sentences about the essay's topic (a thesis, topic
+    sentences) rather than coaching."""
+    topic = _essay_topic_tokens(it)
+    out = []
+    for line in (body or "").splitlines():
+        m = _WRITTEN_LINE.match(line)
+        if not m:
+            continue
+        label, text = m.group(1), (m.group(2) or "").strip().strip("\"\u201c\u201d*_ ")
+        listy = bool(re.match(r"^\s*(?:[-*+>]|\d+[.)])", line))
+        if not (label or listy) or len(text.split()) < 8 or "?" in text or _SENT_COACH.search(text):
+            continue
+        if len(content_tokens(text) & topic) >= (1 if label else 2) and (label or _ARGUE.search(text) or text.endswith(".")):
+            out.append(text)
+    return out
+
+
+def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
+    """The graded item a guide saved by the AI app works or gives away, or None. Stricter than check_reply and
+    language and format agnostic: a bare final answer, a fragment of the solution (one matrix, one vector), a worked
+    answer in another language, an essay outline with written topic sentences, or essay prose. Applies to every kind."""
+    items = graded_view(store, course_id)
+    if not items:
+        return None
+    hit = check_reply(store, course_id, title, body)
+    if hit:
+        return hit
+    clean = _CITE_STRIP.sub("", body or "")
+    r = _Text(clean)
+    problems = [i for i in items if i["kind"] in ("problem", "proof") and (i.get("body") or "").strip()]
+    essays = [i for i in items if i["kind"] == "essay" and (i.get("body") or "").strip()]
+    english = _looks_english(clean)
+    for it in problems:
+        b = _Text(it["body"])
+        if it["kind"] == "problem" and _leaks_problem(r, b, clean, True, worked_required=False):
+            return _hit(it, "guide")
+    # a short body that is only results: final answers, one matrix, one vector, a number with a unit
+    has_math = bool(re.search(r"\d", clean)) and bool(re.search(r"[=\u2248]|\d\s*(?:ml|l|g|kg|mg|mol|mmol)\b", clean, re.I)
+                                                     or r.mrows or matrix_rows(clean))
+    topical = [it for it in problems if len(content_tokens(clean) & _Text(it["body"]).tok) >= 1]
+    if problems and _prose_word_count(clean) <= 14 and (has_math or (topical and bool(numbers(clean)))):
+        return _hit((topical or problems)[0], "answer_only")
+    # an answer given in another language: numbers or topic words of a graded item inside a non-English body
+    if not english:
+        for it in problems + essays:
+            b = _Text(it["body"])
+            matched = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
+            if (it["kind"] != "essay" and len(matched) >= 1) or \
+                    (it["kind"] == "essay" and len(content_tokens(clean) & _essay_topic_tokens(it)) >= 2 and prose_paragraphs(clean)):
+                return _hit(it, "translated")
+    for it in essays:
+        if _outline_sentences(it, clean) and (len(content_tokens(f"{title} {clean}") & _essay_topic_tokens(it)) >= 2):
+            return _hit(it, "outline")
+    return None
+
+
+def check_card(store, course_id: int, front: str, back: str) -> dict | None:
+    """The graded item a flashcard gives away (its own numbers in the card, worked or not), or None. Cards are short,
+    so unlike check_guide this does not treat a brief back as an answer fragment."""
+    text = f"{front}\n{back}"
+    hit = check_reply(store, course_id, front, text)
+    if hit:
+        return hit
+    r = _Text(_CITE_STRIP.sub("", text))
+    for it in graded_view(store, course_id):
+        if it["kind"] == "problem" and (it.get("body") or "").strip() and \
+                _leaks_problem(r, _Text(it["body"]), text, True, worked_required=False):
+            return _hit(it, "card")
+    return None

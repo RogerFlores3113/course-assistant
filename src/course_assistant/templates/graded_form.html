@@ -1,11 +1,11 @@
-{% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}Edit graded item - {{ course.name }} - Course Assistant{% endblock %}
-{% block body %}<section class="narrow"><h1>Edit graded item</h1><p class="muted">{{ course.name }}. The app will not solve this; it explains the ideas and writes a similar problem instead.</p>
+{% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}{{ 'Add' if is_new else 'Edit' }} graded item - {{ course.name }} - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>{{ 'Add graded item' if is_new else 'Edit graded item' }}</h1><p class="muted">{{ course.name }}. The app will not solve this; it explains the ideas and writes a similar problem instead.</p>
 <form method="post" class="form card">
   <label>Title <input name="title" required value="{{ item.title }}" {{ fa('graded', 'title') }}></label>{{ fe('graded', 'title') }}
   <label>Label (optional) <input name="label" value="{{ item.label }}" placeholder="Problem 2" aria-describedby="gl-help"></label>
   <p id="gl-help" class="muted small">A short name for one problem or essay, such as Problem 3 or Essay 1.</p>
   <label>Kind <select name="kind">{% for k, l in graded_kinds.items() %}<option value="{{ k }}" {% if item.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
   <label>Text of the problem or assignment <textarea name="body" rows="8">{{ item.body }}</textarea></label>
-  <div class="row"><button class="btn" type="submit">Save changes</button> <a class="btn ghost" href="/courses/{{ course.id }}">Cancel</a></div>
+  <div class="row"><button class="btn" type="submit">{{ 'Add it' if is_new else 'Save changes' }}</button> <a class="btn ghost" href="/courses/{{ course.id }}">Cancel</a></div>
 </form>
-<p><a class="danger-link" href="/graded/{{ item.id }}/delete">Remove from graded work</a></p></section>{% endblock %}
+{% if not is_new %}<p><a class="danger-link" href="/graded/{{ item.id }}/delete">Remove from graded work</a></p>{% endif %}</section>{% endblock %}

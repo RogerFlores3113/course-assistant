@@ -205,7 +205,7 @@ def test_concept_map_valid_and_cleaned(world):
     assert g["kind"] == "concept_map"
     assert [n["id"] for n in g["data"]["nodes"]] == ["a", "b"]
     assert g["data"]["nodes"][0]["cites"] == [1]
-    assert g["data"]["edges"] == [{"a": "a", "b": "b", "label": "has", "cites": [2]}]
+    assert g["data"]["edges"] == [{"a": "a", "b": "b", "label": "has", "cites": [2], "cites_removed": True}]
     assert g["body_md"].endswith(disclaimer.FOOTER)
 
 
@@ -624,7 +624,7 @@ def test_concept_map_edges_carry_cites_and_cover_all_kinds(world):
     g = s.guide(study.concept_map(s, cid, p))
     assert "Federalist No. 10" in user_msg(p) and "Syllabus" not in user_msg(p)
     assert '"cites"' in user_msg(p).split("SOURCES")[0] and "Every edge needs at least" in user_msg(p)
-    assert g["data"]["edges"] == [{"a": "a", "b": "b", "label": "leads to", "cites": [3]}]
+    assert g["data"]["edges"] == [{"a": "a", "b": "b", "label": "leads to", "cites": [3], "cites_removed": True}]
     assert 3 in {x["n"] for x in g["sources"]} and g["data"]["mode"] == "answer"
 
 

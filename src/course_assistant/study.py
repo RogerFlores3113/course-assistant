@@ -63,6 +63,7 @@ class FlashcardResult(list):
 
     dropped: int = 0          # cards whose cite pointed at no source
     duplicates: int = 0       # cards the student already has
+    guarded: int = 0          # cards left out because they gave away graded work
     malformed: int = 0
     note: str = ""
 
@@ -98,6 +99,12 @@ def _material_sources(store: Store, material_id: int, limit: int = 12, *, spread
     if not m:
         return []
     chunks = [c for c in store.chunks_of(material_id) if not _is_noise(c["text"])]
+    if spread:  # sampling across a file: skip bare titles and byline blocks, which only say who wrote it
+        r = _mod("retrieval")
+        is_title, is_head = getattr(r, "is_title_only", None), getattr(r, "is_header_chunk", None)
+        body = [c for c in chunks if not (is_title and is_title(c["text"], c.get("heading", "")))
+                and not (is_head and is_head(c["text"], m.get("title", "")))]
+        chunks = body or chunks
     chunks = _spread_pick(chunks, limit) if spread else chunks[:limit]
     return [_source_from_chunk(c, m["title"], m["kind"]) for c in chunks]
 
@@ -105,7 +112,13 @@ def _material_sources(store: Store, material_id: int, limit: int = 12, *, spread
 def _search(store: Store, course_id: int, query: str, limit: int = 6, **kw) -> list[dict[str, Any]]:
     if not query.strip():
         return []
-    return _mod("retrieval").search(store, course_id, query, limit=limit, **kw)
+    kw.setdefault("exclude_graded", True)  # graded material never reaches the model as a numbered source
+    retrieval = _mod("retrieval")
+    try:
+        return retrieval.search(store, course_id, query, limit=limit, **kw)
+    except TypeError:  # an older retrieval without exclude_graded: filter the graded materials out here
+        graded = _graded_ids(store, course_id) if kw.pop("exclude_graded", False) else set()
+        return [x for x in retrieval.search(store, course_id, query, limit=limit, **kw) if x.get("material_id") not in graded]
 
 
 def _merge(*lists: list[dict[str, Any]], cap: int = MAX_SOURCES) -> list[dict[str, Any]]:
@@ -171,10 +184,19 @@ def _past_label(store: Store, course_id: int, material_id: int, cache: dict) -> 
     return label
 
 
-def _prepare(store: Store, course_id: int, sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _graded_ids(store: Store, course_id: int) -> set[int]:
+    return {m["id"] for m in store.materials(course_id) if m.get("graded")}
+
+
+def _prepare(store: Store, course_id: int, sources: list[dict[str, Any]], keep_graded: bool = False) -> list[dict[str, Any]]:
+    """Copies of the sources with past-offering labels. Passages of graded materials are dropped (they are never sent to
+    the model as numbered sources), unless keep_graded: a twin's own essay-prompt sources, numbered by integrity."""
     cache: dict = {}
     out = []
+    graded = set() if keep_graded else _graded_ids(store, course_id)
     for s in sources:
+        if s.get("material_id") in graded:
+            continue
         s = dict(s)
         label = _past_label(store, course_id, s["material_id"], cache)
         if label:
@@ -239,6 +261,21 @@ def _system(store: Store, course_id: int) -> str:
     return "\n\n".join(parts)
 
 
+def _route_graded(store: Store, course_id: int, provider, question: str, graded: dict[str, Any]) -> int:
+    """Answer a request that matched graded work with integrity.twin (a twin, or coaching for an essay or proof) and
+    return the guide id."""
+    ans = _mod("integrity").twin(store, course_id, question, provider, graded)
+    gid = getattr(ans, "guide_id", None)
+    if not gid:
+        mode = getattr(ans, "mode", "") or "concepts"
+        gid = store.add_guide(course_id, "twin", f"Twin problem: {graded.get('title', '')}"[:90],
+                              _clean_body(getattr(ans, "body_md", "")) + "\n\n" + disclaimer.FOOTER,
+                              data={"blocks": _block_dicts(getattr(ans, "blocks", None)), "mode": mode,
+                                    "graded_item_id": graded.get("id")},
+                              question=question, model=getattr(provider, "model", "") or "")
+    return int(gid)
+
+
 def _guard(store: Store, course_id: int, provider, raw: str, question: str) -> tuple[str, int | None]:
     """Integrity post-check of a reply. Returns (reply without marker, id of a twin/concepts guide if routed)."""
     integ = _mod("integrity")
@@ -262,9 +299,11 @@ def _guard(store: Store, course_id: int, provider, raw: str, question: str) -> t
         ans = integ.twin(store, course_id, question, provider, graded)
         gid = getattr(ans, "guide_id", None)
         if not gid:  # a twin that was not saved by its author: save it so the student gets it
+            mode = getattr(ans, "mode", "") or ("twin" if getattr(ans, "twin", False) else "concepts")
             gid = store.add_guide(course_id, "twin", f"Twin problem: {graded.get('title', '')}"[:90],
                                   _clean_body(getattr(ans, "body_md", "")) + "\n\n" + disclaimer.FOOTER,
-                                  data={"blocks": _block_dicts(getattr(ans, "blocks", None)), "mode": "twin"},
+                                  data={"blocks": _block_dicts(getattr(ans, "blocks", None)), "mode": mode,
+                                        "graded_item_id": graded.get("id")},
                                   question=question, model=getattr(provider, "model", "") or "")
         return raw, int(gid)
     return raw, None
@@ -414,7 +453,7 @@ def study_form_options(store: Store, course_id: int) -> dict[str, Any]:
             "past_lectures": [row(e) for e in evs if e["kind"] == "lecture" and e["date"] <= today][-20:],
             "exams": [row(e) for e in evs if e["kind"] in ("exam", "quiz")],
             "materials": [{"id": m["id"], "title": m["title"], "kind": m["kind"]} for m in store.materials(course_id)
-                          if not m.get("duplicate_of") and m["kind"] not in ("syllabus", "past_offering")]}
+                          if not m.get("duplicate_of") and not m.get("graded") and m["kind"] not in ("syllabus", "past_offering")]}
 
 
 def _pick_event(store: Store, course_id: int, event_id: int | None, kind: str) -> dict[str, Any]:
@@ -631,6 +670,18 @@ def _valid_cites(raw, n_sources: int) -> list[int]:
     return out
 
 
+def _dropped_cite(raw, n_sources: int) -> bool:
+    """True when a raw cite list held a number that points at no source (it was dropped)."""
+    for c in raw or []:
+        try:
+            ci = int(c)
+        except (TypeError, ValueError):
+            return True
+        if not 1 <= ci <= n_sources:
+            return True
+    return False
+
+
 def _clean_graph(graph: dict[str, Any], n_sources: int) -> dict[str, Any]:
     nodes, ids = [], set()
     for n in graph.get("nodes") or []:
@@ -640,15 +691,21 @@ def _clean_graph(graph: dict[str, Any], n_sources: int) -> dict[str, Any]:
         if nid in ids:
             continue
         ids.add(nid)
-        nodes.append({"id": nid, "label": str(n["label"]).strip(), "cites": _valid_cites(n.get("cites"), n_sources)})
+        node = {"id": nid, "label": str(n["label"]).strip(), "cites": _valid_cites(n.get("cites"), n_sources)}
+        if _dropped_cite(n.get("cites"), n_sources):
+            node["cites_removed"] = True
+        nodes.append(node)
     edges = []
     for e in graph.get("edges") or []:
         if not isinstance(e, dict):
             continue
         a, b = str(e.get("a", "")).strip(), str(e.get("b", "")).strip()
         if a in ids and b in ids and a != b:
-            edges.append({"a": a, "b": b, "label": str(e.get("label", "")).strip(),
-                          "cites": _valid_cites(e.get("cites"), n_sources)})  # out-of-range cites are dropped
+            edge = {"a": a, "b": b, "label": str(e.get("label", "")).strip(),
+                    "cites": _valid_cites(e.get("cites"), n_sources)}  # out-of-range cites are dropped
+            if _dropped_cite(e.get("cites"), n_sources):
+                edge["cites_removed"] = True
+            edges.append(edge)
     return {"nodes": nodes, "edges": edges}
 
 
@@ -709,6 +766,9 @@ def explain(store: Store, course_id: int, provider, topic: str, *, depth: str = 
                              "words. Work exactly one example, taken from the sources when they have one. Connect it "
                              "back to how the course uses it. End with a section '## Check your understanding' that "
                              "has 2 questions for the student to try, with no answers."}[depth]
+    hit = _mod("integrity").match_graded(store, course_id, topic)
+    if hit:  # a graded problem pasted into Explain: a twin (or coaching), decided before the model sees it
+        return _route_graded(store, course_id, provider, topic, hit)
     sources = _search(store, course_id, topic, 10, exclude_graded=True)
     task = f"Explain \"{topic}\" for a student in {_course_name(store, course_id)}. Depth: {depth}. {guide}"
     return _generate(store, course_id, provider, "explain", f"Explain ({depth}): {topic}", task, sources,
@@ -734,14 +794,20 @@ def _graded_overlaps(store: Store, course_id: int, topic: str, limit: int = 3) -
             out.append(g)
 
     add(_mod("integrity").match_graded(store, course_id, topic))
-    words = {w for w in re.findall(r"[a-z]{4,}", topic.lower()) if w not in _STOP_WORDS}
+    words = {w for w in re.findall(r"[a-z]{5,}", topic.lower()) if w not in _STOP_WORDS and w not in _TOPIC_GENERIC}
     for it in store.graded_items(course_id):
         text = f"{it.get('title', '')} {it.get('label', '')} {it.get('body', '')}".lower()
-        if len(words & set(re.findall(r"[a-z]{4,}", text))) >= 2:
+        iwords = set(re.findall(r"[a-z]{5,}", text)) - _TOPIC_GENERIC
+        # a key term meets the item when the words match or share a 5-letter stem (molarity ~ molar)
+        hit = {w for w in words if w in iwords or any(w[:5] == x[:5] for x in iwords)}
+        if len(hit) >= 2 or (len(hit) == 1 and len(words) <= 2):
             add(dict(it, source="item"))
     return out[:limit]
 
 
+_TOPIC_GENERIC = {"solution", "system", "number", "equation", "problem", "problems", "question", "questions", "points",
+                  "using", "value", "values", "write", "explain", "describe", "determine", "step", "steps", "course",
+                  "chapter", "lecture", "which", "graded", "show"}
 _CITE_MARK = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
@@ -822,11 +888,18 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     blocks: list[dict[str, Any]] = []
     all_sources: list[dict[str, Any]] = []
     used: list[int] = []
+    real = [t for t in twins if t["mode"] == "twin"]
+    coach = [t for t in twins if t["mode"] != "twin"]
     titles = ", ".join(t["title"] for t in twins)
-    blocks.append({"kind": "text", "cites": [], "md": (
-        f"This set has {count} question{'s' if count != 1 else ''}. {len(twins)} "
-        f"{'is a twin' if len(twins) == 1 else 'are twins'} of your graded work ({titles}), with different numbers, "
-        "so your original stays yours to do.")})
+    parts = [f"This set has {count} question{'s' if count != 1 else ''}."]
+    if real:
+        parts.append(f"{len(real)} {'is a twin' if len(real) == 1 else 'are twins'} of your graded work "
+                     f"({', '.join(t['title'] for t in real)}), with different numbers, so your original stays yours to do.")
+    if coach:
+        parts.append(f"{len(coach)} {'is coaching' if len(coach) == 1 else 'are coaching notes'} for graded work "
+                     f"({', '.join(t['title'] for t in coach)}): concepts and an approach, no twin problem, because it is "
+                     "an essay, a proof or could not be turned into a safe twin.")
+    blocks.append({"kind": "text", "cites": [], "md": " ".join(parts)})
     if normal:
         all_sources = list(normal["sources"])
         used = list(normal["used"])
@@ -835,8 +908,9 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
         offset = len(all_sources)
         tsrc = [dict(s) for s in t["sources"]]
         shifted = [_shift_block(b, offset) for b in t["blocks"]]
-        all_sources += _prepare(store, course_id, tsrc)
-        blocks.append({"kind": "text", "cites": [], "md": f"## Twin of graded work: {t['title']}"})
+        all_sources += _prepare(store, course_id, tsrc, keep_graded=True)
+        blocks.append({"kind": "text", "cites": [], "md": (f"## Twin of graded work: {t['title']}" if t["mode"] == "twin"
+                                                           else f"## Coaching for graded work: {t['title']}")})
         blocks += shifted
         used += [c + offset for b in t["blocks"] if b.get("kind") == "text" for c in b.get("cites") or []]
     verify = getattr(_mod("grounding"), "verify_quotes", None)
@@ -847,11 +921,11 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
         blocks = _block_dicts(objs)
     body = f"{_render_blocks(blocks)}\n\n{disclaimer.FOOTER}"
     only_twins = normal is None
-    mode = twins[0]["mode"] if only_twins and len({t['mode'] for t in twins}) == 1 else "answer"
-    data = {"twin": True, "count": count, "mode": mode, "blocks": blocks, "outside": any(b["kind"] == "outside" for b in blocks),
+    mode = twins[0]["mode"] if only_twins and len({t['mode'] for t in twins}) == 1 else "answer"  # twin only if one was made
+    data = {"twin": bool(real), "count": count, "mode": mode, "blocks": blocks, "outside": any(b["kind"] == "outside" for b in blocks),
             "not_covered": bool(normal and normal["not_covered"]), "graded": titles,
             "twins": [{"graded": t["title"], "mode": t["mode"]} for t in twins]}
-    return store.add_guide(course_id, "practice", f"Practice (twin): {topic}" if only_twins else f"Practice: {topic}", body,
+    return store.add_guide(course_id, "practice", f"Practice (twin): {topic}" if only_twins and real else f"Practice: {topic}", body,
                            sources=_guide_sources(all_sources, sorted(set(used))), data=data, question=topic,
                            model=getattr(provider, "model", "") or "")
 
@@ -879,6 +953,15 @@ def _section_chunks(store: Store, chunk_id: int, cap: int = 4) -> list[dict[str,
     return out
 
 
+def _card_gives_away(store: Store, course_id: int, front: str, back: str) -> bool:
+    integ = _mod("integrity")
+    card = getattr(integ, "check_card", None)
+    if card:
+        return bool(card(store, course_id, front, back))
+    reply = getattr(integ, "check_reply", None)
+    return bool(reply and reply(store, course_id, front, f"{front}\n{back}"))
+
+
 def make_flashcards(store: Store, course_id: int, provider, *, material_id: int | None = None, topic: str = "",
                     count: int = 12) -> FlashcardResult:
     _need(provider)
@@ -887,6 +970,9 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
         m = store.material(material_id)
         if not m or m["course_id"] != course_id:
             raise ValueError("That material is not in this course.")
+        if m.get("graded"):
+            raise ValueError("That material is marked as graded work, so the app will not make flashcards from it. "
+                             "Pick another material or type a topic.")
         mat_sources = _material_sources(store, material_id, 10_000)  # the whole material
         if topic.strip():
             hits = _search(store, course_id, topic, MAX_SOURCES, material_ids=[material_id])
@@ -935,6 +1021,8 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
             res.dropped += 1
         elif _norm(front) in seen:
             res.duplicates += 1
+        elif _card_gives_away(store, course_id, front, back):
+            res.guarded += 1  # a card whose back works a graded problem
         else:
             seen.add(_norm(front))
             ok.append((front, back, cite))
@@ -955,6 +1043,9 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
                     f"{'their' if res.dropped != 1 else 'its'} source number did not match any passage.")
     if res.duplicates:
         bits.append(f"{res.duplicates} you already have {'were' if res.duplicates != 1 else 'was'} skipped.")
+    if res.guarded:
+        bits.append(f"{res.guarded} card{'s' if res.guarded != 1 else ''} left out because "
+                    f"{'they' if res.guarded != 1 else 'it'} would give away graded work.")
     res.note = " ".join(bits)
     return res
 

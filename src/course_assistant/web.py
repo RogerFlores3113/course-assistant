@@ -469,10 +469,21 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         """The graded items the app protects, so the student can check what was detected."""
         items = store.graded_items(cid)
         titles = {m["id"]: m["title"] for m in store.materials(cid)}
+        integ = _safe_mod("integrity")
+        plain = getattr(integ, "plain_text", None) or (lambda t: " ".join((t or "").split()))
         rows = [{**i, "kind_label": GRADED_KINDS.get(i.get("kind") or "problem", "Problem"),
                  "material_title": titles.get(i.get("material_id") or 0, ""),
-                 "excerpt": " ".join((i.get("body") or "").split())[:160]} for i in items]
-        return {"items": rows, "count": len(rows)}
+                 "excerpt": plain(i.get("body") or "")[:160]} for i in items]
+        warnings = []
+        report = getattr(integ, "split_report", None)
+        if callable(report):
+            for m in store.materials(cid):
+                if m.get("graded"):
+                    r = report(store, m["id"])
+                    if r.get("short"):
+                        warnings.append(f"Found {r['found']} of {r['expected']} problems in {m['title']}. Check the list "
+                                        "and use Add graded item for anything missing, so the app protects all of it.")
+        return {"items": rows, "count": len(rows), "warnings": warnings}
 
     def tab_context(cid: int, tab: str, extra: dict[str, Any]) -> dict[str, Any]:
         ctx: dict[str, Any] = {}
@@ -699,6 +710,24 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         if not it:
             raise _NotFound("That graded item was not found.")
         return it
+
+    @app.get("/courses/{course_id}/graded/new", response_class=HTMLResponse)
+    def graded_new(request: Request, course_id: int):
+        return page(request, "graded_form.html", is_new=True, item={"title": "", "label": "", "kind": "problem", "body": ""},
+                    course=require_course(course_id), page_title="Add graded item")
+
+    @app.post("/courses/{course_id}/graded/new")
+    def graded_create(request: Request, course_id: int, kind: str = Form("problem"), label: str = Form(""),
+                      title: str = Form(""), body: str = Form("")):
+        course = require_course(course_id)
+        vals = {"kind": kind if kind in GRADED_KINDS else "problem", "label": label.strip(), "title": title.strip(),
+                "body": body.strip()}
+        if not vals["title"]:
+            msg = "Give the item a title, like Problem Set 2."
+            return page(request, "graded_form.html", status_code=400, is_new=True, item=vals, course=course, error=msg,
+                        field_error={"form": "graded", "field": "title", "message": msg}, page_title="Add graded item")
+        store.add_graded_item(course_id, vals["title"], vals["body"], kind=vals["kind"], label=vals["label"])
+        return redirect(course_url(course_id), notice=f"Added {vals['label'] or vals['title']} to the graded list.")
 
     @app.get("/graded/{item_id}/edit", response_class=HTMLResponse)
     def graded_edit(request: Request, item_id: int):
@@ -1227,7 +1256,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                 title = (store.material(mat) or {}).get("title", "")
                 due = [c for c in due if c.get("chunk_id") in chunk_ids or (title and c.get("deck") == title)]
             shown, count, position = (due[0] if due else None), len(due), 1
-        mats = [{"id": m["id"], "title": m["title"]} for m in store.materials(course_id) if not m.get("duplicate_of")]
+        mats = [{"id": m["id"], "title": m["title"]} for m in store.materials(course_id)
+                if not m.get("duplicate_of") and not m.get("graded")]
         return page(request, "flashcards.html", course=course, accent=course_color(course), card=shown,
                     due=len(due), total=total, cram=cram_on, material_id=mat, done=",".join(str(i) for i in done_ids),
                     count=count, position=position, filter_materials=mats,

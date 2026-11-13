@@ -293,7 +293,7 @@ def _graded_list_text(st, course_id: int) -> str:
         return ""
     lines = []
     for i in items[:40]:
-        ex = " ".join((i.get("body") or "").split())
+        ex = _integrity().plain_text(i.get("body") or "")
         lines.append(f"- item {i['id']}: {i['title']} ({i['kind']})" + (f": {ex[:300]}" if ex else ""))
     return "\n".join(lines)
 
@@ -339,7 +339,10 @@ def get_twin_instructions(course_id: int, problem_text: str) -> str:
         return head + _TWIN_STEPS
     title = match.get("title") or match.get("material_title") or "a graded item"
     kind = match.get("kind", "problem")
-    extra = ("\nThis is writing or a proof: explain concepts, the assignment's requirements and a plan. Do not write "
+    check = _integrity().is_check_ask(text)
+    extra = ("\nThe student wants their answer checked. Never say it is right or wrong. Write a twin and tell them to "
+             "check their method on the twin.\n" if check else "")
+    extra += ("\nThis is writing or a proof: explain concepts, the assignment's requirements and a plan. Do not write "
              "a thesis, topic sentences, any paragraph or a finished proof.\n" if kind != "problem" else
              "\nWrite a twin: change every number. Do not state the original's answer or intermediate results.\n")
     return f"GRADED: this matches '{title}', which the student marked as graded work.\n" + extra + "\n" + _TWIN_STEPS
@@ -538,11 +541,13 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
         sources.append({"n": n, "chunk_id": cid, "material_id": ch["material_id"], "label": ch.get("loc_label", ""),
                         "title": mat.get("title", ""), "href": f"/read/{ch['material_id']}?at={cid}#c{cid}"})
     from . import grounding
-    hit = _integrity().check_reply(st, c["id"], t, b) if hasattr(_integrity(), "check_reply") else None
+    ig = _integrity()
+    gate = getattr(ig, "check_guide", None) or getattr(ig, "check_reply", None)
+    hit = gate(st, c["id"], t, b) if gate else None
     if hit:
         _log("save_guide_refused", {"course_id": c["id"], "kind": kind, "title": t}, f"graded: {hit.get('title')}")
         return (f"NOT SAVED: this guide works graded item '{hit.get('title')}' (it uses the problem's own numbers in "
-                "worked steps, or contains essay or proof text the student could submit). Rewrite it as a twin with "
+                "worked steps, gives only its final answer or a fragment of it, is a translation of it, or contains essay or proof text or an outline with written topic sentences the student could submit). Rewrite it as a twin with "
                 "different numbers, or as concepts and an approach only, then call save_guide again.")
     g_match = _integrity().match_graded(st, c["id"], t) if hasattr(_integrity(), "match_graded") else None
     if kind == "twin":
