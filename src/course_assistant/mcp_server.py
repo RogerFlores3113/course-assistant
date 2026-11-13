@@ -560,7 +560,7 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
         hit = essay.guide_hit(st, c["id"], t, b, quote_sources)
         if hit:
             return (f"NOT SAVED: this guide writes part of graded item '{hit.get('label') or hit.get('title')}' "
-                    f"(a thesis, outline, paragraph or finished answer). This is the problem: "
+                    f"(a thesis, position, outline, paragraph or finished answer). The sentence that matched: "
                     f"\"{(hit.get('sentence') or '')[:200]}\". Write concepts, what the assignment and rubric ask for, "
                     "and questions the student can ask themselves, citing the materials; no sentence the student could "
                     "submit. Then call save_guide again.")
@@ -569,7 +569,7 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
         sent = (hit.get("sentence") or "").strip()
         sent = (sent[:200] + "...") if len(sent) > 200 else sent
         return (f"NOT SAVED: this guide gives away graded item '{hit.get('label') or hit.get('title')}'"
-                + (f". This sentence is the problem: \"{sent}\"" if sent else "")
+                + (f". The sentence that matched: \"{sent}\"" if sent else "")
                 + ". Remove or rewrite it: a twin must use different numbers and never state the original's values; "
                 "otherwise write concepts and an approach only. Then call save_guide again.")
     g_match = _integrity().match_graded(st, c["id"], t) if hasattr(_integrity(), "match_graded") else None
@@ -632,9 +632,10 @@ def add_flashcards(course_id: int, cards: list[dict[str, Any]], deck: str = "") 
             hit = essay.card_hit(st, c["id"], front, back, src)
         if hit:
             _log("add_flashcards_refused", {"course_id": c["id"], "card": i}, f"graded: {hit.get('title')}")
-            return (f"NOT ADDED: card {i} gives away graded item '{hit.get('label') or hit.get('title')}' (its final "
-                    "answer or its own numbers). No cards were added. Make cards about the concepts instead, then "
-                    "call add_flashcards again.")
+            what = ("a thesis, position, conclusion or finished answer" if hit.get("kind") == "essay"
+                    else "its final answer or its own numbers")
+            return (f"NOT ADDED: card {i} gives away graded item '{hit.get('label') or hit.get('title')}' ({what}). "
+                    "No cards were added. Make cards about the concepts instead, then call add_flashcards again.")
     ids = [st.add_flashcard(c["id"], f, b, deck=d, chunk_id=cid, source_label=lab, created_by="ai_app")
            for f, b, cid, lab in clean]
     result = f"Added {len(ids)} flashcard(s). Review them: {_link('/flashcards/' + str(c['id']))}"

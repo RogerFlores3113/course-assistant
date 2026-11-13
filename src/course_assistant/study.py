@@ -246,8 +246,36 @@ SYSTEM = """You are Course Assistant, a patient study helper for a college stude
 - Never invent page numbers, quotes, dates or deadlines. If the materials do not say, say so.
 - A source marked "from a past offering" comes from an earlier term. Say so when you use it ("in Fall 2018, ...") and never present it as this term's policy, dates or exam format.
 - Use plain, friendly language a student can read quickly. Define jargon the first time you use it.
-- This is often STEM material: keep units and steps explicit.
+{subject_line}
 - Use Markdown with short headings, bullets and numbered lists."""
+
+_MATH_LINE = "- This is often STEM material: keep units and steps explicit."
+_TEXT_LINE = ("- This is often reading and argument based material: name the author or document, say what it claims, "
+              "and keep any quotation short and exact.")
+_MATH_SIGNS = re.compile(r"\$[^$\n]{2,}\$|\\frac|\\begin|\bsqrt\b|\^\d|[=\u2248]\s*-?\d|\b\d+(?:\.\d+)?\s*(?:mol|mmol|g|mg|kg|ml|l|m/s|hz|ev)\b",
+                         re.I)
+
+
+def has_math(store: Store, course_id: int) -> bool:
+    """The course's materials have math in them: a graded numeric problem, or several passages with equations, numbers
+    with units or LaTeX. Humanities courses say 'readings and arguments' in the prompts; STEM courses say numbers."""
+    try:
+        if any((g.get("kind") or "problem") in ("problem", "proof") and (g.get("body") or "").strip()
+               and re.search(r"\d", g.get("body") or "") for g in store.graded_items(course_id)):
+            return True
+        seen = 0
+        for m in store.materials(course_id):
+            if not _usable(m):
+                continue
+            for c in store.chunks_of(m["id"])[:60]:
+                if _MATH_SIGNS.search(c.get("text") or ""):
+                    seen += 1
+                    if seen >= 4:
+                        return True
+    except Exception:
+        return True  # unknown: keep the STEM wording that older versions used
+    return False
+
 
 FALLBACK_INTEGRITY = ("Academic integrity: never solve a problem the student says is graded. Work an example with "
                       "different numbers instead.")
@@ -255,7 +283,8 @@ FALLBACK_INTEGRITY = ("Academic integrity: never solve a problem the student say
 
 def _system(store: Store, course_id: int) -> str:
     """The study system prompt: base rules, the shared format rules, and the course's integrity block."""
-    parts = [SYSTEM, getattr(_mod("grounding"), "FORMAT_RULES", FALLBACK_FORMAT_RULES)]
+    parts = [SYSTEM.format(subject_line=_MATH_LINE if has_math(store, course_id) else _TEXT_LINE),
+             getattr(_mod("grounding"), "FORMAT_RULES", FALLBACK_FORMAT_RULES)]
     block = getattr(_mod("integrity"), "prompt_block", None)
     if not block:
         parts.append(FALLBACK_INTEGRITY)
@@ -793,6 +822,24 @@ def _relevant_materials(store: Store, mats: list[dict[str, Any]], topic_text: st
     return hit or rest or mats
 
 
+def _exam_sections(math: bool, plan: str) -> str:
+    """The section list of the exam guide prompt. Courses with math get formulas and new numbers; readings and
+    arguments get key terms, claims and short-answer or essay prompts."""
+    if math:
+        return ("Sections: ## What's covered (by topic, with citations), ## Key formulas and definitions, ## Common "
+                "mistakes, ## Practice set (4 to 6 short questions; put each answer in a block with <details> on its own "
+                "line, then <summary>Answer</summary> on the next line, the answer, then </details> on its own line; make "
+                "up new numbers and never copy a graded problem; if a graded problem would be the natural question, write "
+                f"a twin with different numbers instead), {plan}.")
+    return ("Sections: ## What's covered (by topic, with citations), ## Key terms, people and events (with citations), "
+            "## Main arguments and how they connect, ## Common mistakes, ## Practice set (4 to 6 short-answer or "
+            "essay-planning questions about the readings; put each model answer in a block with <details> on its own "
+            "line, then <summary>Answer</summary> on the next line, the answer built from the sources with citations, "
+            "then </details> on its own line; never copy a graded assignment or write the thesis or any paragraph of "
+            f"graded writing; if a graded assignment would be the natural question, ask a different question on the same "
+            f"reading instead), {plan}.")
+
+
 def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None = None,
                material_ids: list[int] | None = None) -> int:
     """Study guide for one exam. Topics come from the saved materials and syllabus rows between the previous exam and
@@ -879,14 +926,17 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
     plan_days = [(_date.fromisoformat(today) + timedelta(days=i)).isoformat() for i in range(min(days, 14) + 1)] \
         if re.match(r"\d{4}-\d{2}-\d{2}$", ev["date"]) and not past else []
     graded = _mod("integrity").match_graded(store, course_id, " ".join(topics_text))
+    math = has_math(store, course_id)
     notes = [scope_note, link_note]
     if past:
         notes.append(f"This exam was on {ev['date']}, so this is a review of what it covered.")
     if missing:
         notes.append("No saved materials for: " + "; ".join(missing) + ". Add them to cover those topics.")
     if graded:
-        notes.append("Practice questions below are original twins with different numbers. Questions you marked as "
-                     "graded are not solved here.")
+        notes.append(("Practice questions below are original twins with different numbers. "
+                      if math or (graded.get("kind") or "problem") != "essay" else
+                      "Practice questions below are original, not copies of your graded work. ") +
+                     "Questions you marked as graded are not solved here.")
     when = (f"this exam was on {ev['date']}, so it is already over (today is {today})" if past
             else f"{days} days from today, {today}")
     plan = ("## Review plan (the exam is over: three short bullets on what to revisit; no day-by-day schedule)" if past else
@@ -898,11 +948,7 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
             ("\nSyllabus rows:\n- " + "\n- ".join(syllabus_rows) if syllabus_rows else "") +
             (("\nThese lectures have NO saved materials, so say plainly that the guide cannot cover them and do not "
               "invent their content:\n- " + "\n- ".join(missing)) if missing else "") +
-            "\n\nSections: ## What's covered (by topic, with citations), ## Key formulas and definitions, ## Common "
-            "mistakes, ## Practice set (4 to 6 short questions; put each answer in a block with <details> on its own "
-            "line, then <summary>Answer</summary> on the next line, the answer, then </details> on its own line; make "
-            "up new numbers and never copy a graded problem; if a graded problem would be the natural question, write "
-            f"a twin with different numbers instead), {plan}.")
+            "\n\n" + _exam_sections(math, plan))
     return _generate(store, course_id, provider, "exam_guide", f"Exam guide: {ev['title']}", task, sources,
                      question=ev["title"], event_id=ev["id"],
                      data={"topics": topics, "previous_exam": prev, "missing_lectures": missing, "past": past,
@@ -1091,12 +1137,33 @@ def explain(store: Store, course_id: int, provider, topic: str, *, depth: str = 
     hit = _mod("integrity").match_graded(store, course_id, topic)
     if hit and hit.get("id") and hit.get("kind") != "essay" and not getattr(_mod("integrity"), "names_item", lambda t, i: True)(topic, hit):
         hit = None  # a bare topic never turns into a twin
+    if not hit:  # the request names a graded essay by its title ("Essay 2: The Federalist Essay"): its own prompt and rubric
+        hit = _named_essay(store, course_id, topic)
     if hit:  # a graded problem pasted into Explain: a twin (or coaching), decided before the model sees it
         return _route_graded(store, course_id, provider, topic, hit)
     sources = _search(store, course_id, topic, 10, exclude_graded=True)
     task = f"Explain \"{topic}\" for a student in {_course_name(store, course_id)}. Depth: {depth}. {guide}"
     return _generate(store, course_id, provider, "explain", f"Explain ({depth}): {topic}", task, sources,
                      question=topic, data={"depth": depth}, max_tokens=3500)
+
+
+def _gview(store: Store, course_id: int) -> list[dict[str, Any]]:
+    gv = getattr(_mod("integrity"), "graded_view", None)
+    return gv(store, course_id) if gv else [dict(g, kind=g.get("kind") or "problem") for g in store.graded_items(course_id)]
+
+
+def _named_essay(store: Store, course_id: int, topic: str) -> dict[str, Any] | None:
+    """A graded essay or short-answer item whose title the request names, in full or by its 'Essay 2' prefix."""
+    q = f" {_norm(topic)} "
+    for it in _gview(store, course_id):
+        title = (it.get("title") or "").strip()
+        if it.get("kind") != "essay" or not title or not (it.get("body") or "").strip():
+            continue
+        full = _norm(title)
+        prefix = _norm(title.split(":")[0]) if ":" in title else ""
+        if (full and f" {full} " in q) or (prefix and re.search(r"\d", prefix) and f" {prefix} " in q):
+            return dict(it, source="material" if it.get("material_id") else "item")
+    return None
 
 
 # ---------------------------------------------------------------- practice
@@ -1218,13 +1285,23 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     normal = None
     if n_normal > 0:
         sources = _search(store, course_id, topic, 10, exclude_graded=True)
-        task = (f"Write {n_normal} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to "
-                "hardest, in the style of the materials. For each, number it and state the question, then give the "
-                "worked solution step by step with citations, inside a block laid out exactly like this, with "
-                "<details> alone on its line and <summary> alone on the next line:\n<details>\n"
-                "<summary>Show solution</summary>\n\nsteps and final answer here\n\n</details>\n"
-                "Never show the solution outside the details block. Invent your own numbers; do not copy a question "
-                "from the materials.")
+        if has_math(store, course_id):
+            task = (f"Write {n_normal} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to "
+                    "hardest, in the style of the materials. For each, number it and state the question, then give the "
+                    "worked solution step by step with citations, inside a block laid out exactly like this, with "
+                    "<details> alone on its line and <summary> alone on the next line:\n<details>\n"
+                    "<summary>Show solution</summary>\n\nsteps and final answer here\n\n</details>\n"
+                    "Never show the solution outside the details block. Invent your own numbers; do not copy a question "
+                    "from the materials.")
+        else:
+            task = (f"Write {n_normal} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to "
+                    "hardest, about the readings and arguments in the materials (short-answer or source-analysis questions; "
+                    "no calculations). For each, number it and state the question, then give a model answer built from "
+                    "the sources, with citations, inside a block laid out exactly like this, with <details> alone on its "
+                    "line and <summary> alone on the next line:\n<details>\n<summary>Show answer</summary>\n\n"
+                    "the answer here\n\n</details>\n"
+                    "Never show the answer outside the details block. Do not write a thesis or any paragraph of an "
+                    "essay the student must submit, and do not copy a question from the materials.")
         normal = _compose(store, course_id, provider, task, sources, question=topic, max_tokens=5000)
         if normal["routed"] and not twins:
             return normal["routed"]
@@ -1309,8 +1386,10 @@ def _section_chunks(store: Store, chunk_id: int, cap: int = 4) -> list[dict[str,
     return out
 
 
-def _card_gives_away(store: Store, course_id: int, front: str, back: str) -> bool:
+def _card_gives_away(store: Store, course_id: int, front: str, back: str, source_text: str = "") -> bool:
     integ = _mod("integrity")
+    if hasattr(integ, "graded_view") and _mod("essay").card_hit(store, course_id, front, back, source_text):
+        return True  # an essay thesis, position or conclusion
     card = getattr(integ, "check_card", None)
     if card:
         return bool(card(store, course_id, front, back))
@@ -1322,13 +1401,18 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
                     count: int = 12) -> FlashcardResult:
     _need(provider)
     count = max(1, min(int(count), 50))
+    concept_only = False
     if material_id is not None:
         m = store.material(material_id)
         if not m or m["course_id"] != course_id:
             raise ValueError("That material is not in this course.")
         if m.get("graded"):
-            raise ValueError("That material is marked as graded work, so the app will not make flashcards from it. "
-                             "Pick another material or type a topic.")
+            numeric = [g for g in _gview(store, course_id)
+                       if g.get("material_id") == m["id"] and g.get("kind") in ("problem", "proof")]
+            if numeric or not any(g.get("material_id") == m["id"] for g in _gview(store, course_id)):
+                raise ValueError("That material is marked as graded work, so the app will not make flashcards from it. "
+                                 "Pick another material or type a topic.")
+            concept_only = True  # a graded essay assignment: cards on concepts, requirements and the rubric only
         mat_sources = _material_sources(store, material_id, 10_000)  # the whole material
         if topic.strip():
             hits = _search(store, course_id, topic, MAX_SOURCES, material_ids=[material_id])
@@ -1350,12 +1434,15 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
                 extra.append(_source_from_chunk(c, mm.get("title", ""), mm.get("kind", "")))
         sources = _merge(hits, extra, cap=MAX_SOURCES)
         deck = topic.strip()
-    sources = _prepare(store, course_id, sources)
+    sources = _prepare(store, course_id, sources, keep_graded=concept_only)
+    only = (" These sources are a graded essay assignment: make cards about concepts, key terms, requirements and what the "
+            "rubric rewards only. Never write a thesis, a position on the essay question, an argument or a conclusion for "
+            "the essay." if concept_only else "")
     user = (f"Make up to {count} study flashcards from these sources. Cover the main concepts, definitions, formulas and "
             "procedures, and spread the cards across the sources: at most 2 cards from one source. Reply with ONLY a "
             "JSON list: [{\"front\":\"question or term\",\"back\":\"short answer\",\"cite\":1}]. One idea per card, "
             "backs under 40 words, math as $...$, cite is the single source number the answer comes from. Skip anything "
-            f"the sources do not support.\n\nSOURCES\n\n{_sources_block(sources)}")
+            f"the sources do not support.{only}\n\nSOURCES\n\n{_sources_block(sources)}")
     cards, _ = _ask_json(provider, _system(store, course_id), user, list)
     res = FlashcardResult()
     seen = {_norm(c["front"]) for c in store.flashcards(course_id)}
@@ -1377,7 +1464,7 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
             res.dropped += 1
         elif _norm(front) in seen:
             res.duplicates += 1
-        elif _card_gives_away(store, course_id, front, back):
+        elif _card_gives_away(store, course_id, front, back, sources[cite - 1].get("text", "")):
             res.guarded += 1  # a card whose back works a graded problem
         else:
             seen.add(_norm(front))
