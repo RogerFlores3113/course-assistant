@@ -539,7 +539,7 @@ def test_plain_text_primary_source(fx_env):
     s, cid = fx_env
     mid = import_file(s, cid, FX / "federalist-10.txt")
     m = s.material(mid)
-    assert m["title"].startswith("Federalist No. 10") and m["kind"] == "handout"
+    assert m["title"].startswith("Federalist No. 10") and m["kind"] == "reading"
     ch = s.chunks_of(mid)
     assert ch and ch[0]["loc_kind"] == "line" and ch[0]["loc_label"].startswith("lines 1 to")
 
@@ -573,7 +573,7 @@ def test_syllabus_detected_and_events_made(fx_env):
 def test_detect_kind_basics():
     assert _imp.detect_kind("syllabus.pdf") == "syllabus"
     assert _imp.detect_kind("Lecture 4 slides.pdf") == "slides"
-    assert _imp.detect_kind("federalist-10.txt", "FEDERALIST No. 10") in {"handout", "other"}
+    assert _imp.detect_kind("federalist-10.txt", "FEDERALIST No. 10") == "reading"
 
 
 def test_duplicate_material_and_no_duplicate_syllabus_events(fx_env):
