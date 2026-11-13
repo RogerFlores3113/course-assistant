@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MATERIAL_KINDS = {
     "slides": "Lecture slides",
@@ -235,8 +235,25 @@ class Store:
         if self.path != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        self.conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
         self.conn.commit()
+
+    # Columns added after the first release. Each is added when missing, so old databases keep working.
+    _ADDED_COLUMNS = {
+        "materials": [("event_id", "INTEGER"),            # the lecture event this material belongs to
+                      ("duplicate_of", "INTEGER")],       # a near-identical material in the same course
+        "graded_items": [("kind", "TEXT NOT NULL DEFAULT 'problem'"),   # problem | proof | essay
+                         ("label", "TEXT NOT NULL DEFAULT ''")],        # e.g. "Problem 2"
+    }
+
+    def _migrate(self) -> None:
+        for table, cols in self._ADDED_COLUMNS.items():
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for name, decl in cols:
+                if name not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     # ------------------------------------------------------------ helpers
     def _rows(self, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
@@ -327,7 +344,7 @@ class Store:
 
     def update_material(self, material_id: int, **values: Any) -> None:
         allowed = {"kind", "title", "filename", "original_name", "mime", "source_url", "sha256", "lecture_date", "week",
-                   "status", "status_note", "page_count", "duration_seconds", "graded"}
+                   "status", "status_note", "page_count", "duration_seconds", "graded", "event_id", "duplicate_of"}
         self._update("materials", material_id, {k: v for k, v in values.items() if k in allowed})
 
     def delete_material(self, material_id: int) -> None:
@@ -438,9 +455,18 @@ class Store:
         self._exec("DELETE FROM guides WHERE id = ?", (guide_id,))
 
     # ------------------------------------------------------------ graded items (academic integrity, section 8)
-    def add_graded_item(self, course_id: int, title: str, body: str = "", material_id: int | None = None) -> int:
+    def add_graded_item(self, course_id: int, title: str, body: str = "", material_id: int | None = None, *,
+                        kind: str = "problem", label: str = "") -> int:
         return self._insert("graded_items", {"course_id": course_id, "title": title.strip(), "body": body,
-                                             "material_id": material_id, "created_at": now_iso()})
+                                             "material_id": material_id, "kind": kind, "label": label,
+                                             "created_at": now_iso()})
+
+    def graded_item(self, item_id: int) -> dict[str, Any] | None:
+        return self._row("SELECT * FROM graded_items WHERE id = ?", (item_id,))
+
+    def update_graded_item(self, item_id: int, **values: Any) -> None:
+        allowed = {"title", "body", "kind", "label", "material_id"}
+        self._update("graded_items", item_id, {k: v for k, v in values.items() if k in allowed})
 
     def graded_items(self, course_id: int) -> list[dict[str, Any]]:
         return self._rows("SELECT * FROM graded_items WHERE course_id = ? ORDER BY created_at DESC", (course_id,))
