@@ -424,6 +424,8 @@ def _strip_chrome(raw: list[dict[str, str]]) -> tuple[list[dict[str, str]], str,
                 md = pat.sub("", md)
         if _FAILED_FEEDBACK in md:
             failed = True
+            if not re.search(r"(?i)tried twice", md):  # the app wrote the feedback once more before giving up: say so
+                md = re.sub(r"\bI could not write safe feedback", "I tried twice and could not write safe feedback", md, count=1)
         md = re.sub(r"\n{3,}", "\n\n", md).strip("\n")
         if md.strip():
             out.append({**b, "md": md})

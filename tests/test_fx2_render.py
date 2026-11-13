@@ -191,7 +191,7 @@ def test_problem9_sources_merged_numbered_ordered():
 def test_problem9_sources_rows_show_numbers(ready):
     t = page(ready, [{"kind": "text", "md": "a [2] b [1]", "cites": [2, 1]}]).text
     main = t.split('<div class="sources">')[1]
-    assert main.index(">[1]</a>") < main.index(">[2]</a>")
+    assert main.index("[1]</span>") < main.index("[2]</span>")
 
 
 # 10 / 11

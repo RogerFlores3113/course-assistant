@@ -308,8 +308,10 @@ def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1, state: d
             if inner and (sm := SUMMARY_RE.match(inner[0])):
                 summary = sm.group(1)
                 inner = inner[1:]
-            out.append(f"<details><summary>{inline(summary, sources)}</summary>"
-                       f"{_blocks(inner, sources, depth + 1, offset)}</details>")
+            body_html = _blocks(inner, sources, depth + 1, offset)
+            if not body_html.strip():  # a "Show solution" with nothing inside is not shown
+                continue
+            out.append(f"<details><summary>{inline(summary, sources)}</summary>{body_html}</details>")
             continue
         if DETAILS_CLOSE_RE.match(line) or SUMMARY_RE.match(line):  # stray tag from the model: drop it
             flush()

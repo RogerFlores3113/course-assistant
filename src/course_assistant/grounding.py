@@ -663,6 +663,24 @@ _SIGNPOST_RECAP = re.compile(
     r"look|compare|plan|try|write\s+down)\b", re.I)
 
 
+# "Federalist No. 10 moves in a clear order." / "The chapter is organised in a clear sequence.": it names how the text is
+# laid out and states no fact of its own. A reference to a named document ("No. 10", "Chapter 3") is not a number claim.
+_DOC_REF = re.compile(r"\b(?:no\.?|nos\.?|number|chapter|ch\.?|paper|section|lecture|week|unit|part|book|article)\s*\d{1,3}\b", re.I)
+_SIGNPOST_ORDER = re.compile(
+    r"^\W*[^.!?:;]{2,60}?\b(?:moves?|proceeds?|unfolds?|runs?|goes|is\s+(?:organi[sz]ed|structured|laid\s+out|arranged)|"
+    r"is\s+built|builds?\s+its\s+argument)\s+(?:in|through|by)\s+(?:a|an|the)\s+(?:\w+\s+){0,2}"
+    r"(?:order|sequence|progression|way|pattern|path)\s*[.:]?\s*$", re.I)
+
+
+def signpost_opener(text: str) -> bool:
+    """A short orienting sentence about how a text is laid out ("Federalist No. 10 moves in a clear order.")."""
+    plain = re.sub(r"[*_`>#]", "", _strip_cites(text or "")).strip()
+    if not plain or len(plain.split()) > 16:
+        return False
+    plain = _DOC_REF.sub("X", plain)
+    return not re.search(r"[0-9=$]", plain) and bool(_SIGNPOST_ORDER.match(plain))
+
+
 _STRUCT_VERB = re.compile(
     r"\b(?:defines?|introduces?|argues?|shows?|turns?|moves?|compares?|explains?|addresses?|lays?|states?|describes?|"
     r"presents?|considers?|examines?|proposes?|answers?|notes?|sets?|names?|raises?|builds?|develops?|makes?|gives?|"
@@ -688,6 +706,8 @@ def _signpost(plain: str, next_cited: bool) -> bool:
     """A short sentence with no number or equation that orders or introduces what follows. The topic lead-in
     ("On AI, the syllabus says ...") counts only right before a cited sentence. A "Step N: Title" heading is one too."""
     if _step_heading(plain):
+        return True
+    if signpost_opener(plain):
         return True
     if len(plain.split()) > 20 or re.search(r"[0-9=$]", plain):
         return False
@@ -1056,6 +1076,8 @@ def _claimless_sentence(x: str, calc: bool, coach: bool = False, feedback: bool 
             or _META_SELF.search(plain) or _CAUTION.search(plain) or _ABOUT_DRAFT.match(plain)):
         return True
     if plain.endswith(":") and words <= 25:
+        return True
+    if signpost_opener(plain):
         return True
     if _POINTER.match(plain) or ((coach or feedback) and _ABOUT_ASSIGNMENT_IT.match(plain)):
         return True

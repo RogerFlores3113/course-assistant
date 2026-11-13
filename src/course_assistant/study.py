@@ -352,6 +352,19 @@ def normalize_details(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip("\n")
 
 
+_EMPTY_DETAILS = re.compile(r"<details>\s*(?:<summary>.*?</summary>)?\s*</details>[ \t]*", re.S | re.I)
+
+
+def drop_empty_details(text: str) -> str:
+    """A "Show solution" block with nothing inside is dropped (a stub tells the student nothing). Text without one
+    comes back as it was."""
+    norm = normalize_details(text or "")
+    out = _EMPTY_DETAILS.sub("", norm)
+    if out == norm:
+        return text
+    return re.sub(r"\n{3,}", "\n\n", out).strip("\n")
+
+
 def _clean_body(body: str) -> str:
     body = (body or "").replace(disclaimer.FOOTER, "").rstrip()
     return body
@@ -410,6 +423,8 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
         return {"routed": routed}
     integ = _mod("integrity")
     scrubbed, scrub_note, scrub_ids = 0, "", []
+    if practice:
+        raw = drop_empty_details(raw)
     before = raw
     if getattr(integ, "scrub_parts", None):  # drop only the parts the item's key flags, and say which item matched
         raw, scrubbed, scrub_note = integ.scrub_parts(store, course_id, raw, question or task[:300])

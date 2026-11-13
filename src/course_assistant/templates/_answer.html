@@ -1,4 +1,4 @@
-{% macro source_list(items) %}<ul class="src-list">{% for s in items %}<li><span class="src-n">{% for x in s.ns %}<a class="src-mark" href="{{ x.href }}" aria-label="Source {{ x.n }}: {{ s.title }}{% if s.label %}, {{ s.label }}{% endif %}{% if s.past %}, {{ s.past }}{% endif %}">[{{ x.n }}]</a>{% endfor %}</span> <a href="{{ s.ns[0].href }}">{{ s.title }}{% if s.label %}, {{ s.label }}{% endif %}</a>{% if s.past %} <span class="past-tag">({{ s.past }})</span>{% endif %}</li>{% endfor %}</ul>{% endmacro %}
+{% macro source_list(items) %}<ul class="src-list">{% for s in items %}<li><span class="src-n">{% for x in s.ns %}<span class="src-mark">[{{ x.n }}]</span>{% endfor %}</span> <a href="{{ s.ns[0].href }}">{{ s.title }}{% if s.label %}, {{ s.label }}{% endif %}</a>{% if s.past %} <span class="past-tag">({{ s.past }})</span>{% endif %}</li>{% endfor %}</ul>{% endmacro %}
 {# footer=false on all but the newest answer of a page: the AI disclaimer is said once per page #}
 {% macro answer(view, footer=true) %}
 <div class="answer"{% if view.partly_covered %} data-partly-covered{% endif %}>

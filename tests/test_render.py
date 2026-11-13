@@ -40,8 +40,8 @@ def test_sources_show_only_cited_with_also_searched_p4(ready):
     r = page(ready, [{"kind": "text", "md": "Claim [2].", "cites": [2]}])
     sec = r.text.split('<div class="sources">')[1]
     main, also = sec.split("Also searched (not cited)")
-    assert '>[2]</a>' in main and '>[1]</a>' not in main and '>[3]</a>' not in main
-    assert '>[1]</a>' in also and '>[3]</a>' in also and "<details" in r.text
+    assert '[2]</span>' in main and '[1]</span>' not in main and '[3]</span>' not in main
+    assert '[1]</span>' in also and '[3]</span>' in also and "<details" in r.text
 
 
 def test_no_also_searched_when_all_cited(ready):
