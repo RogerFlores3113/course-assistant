@@ -118,9 +118,9 @@ def test_link_route_rejects_other_course_event(ready):
 def test_link_buttons_render_with_study_suggestion(ready):
     s, c = ready.store, ready.client
     cid = s.add_course("Chem")
-    ev = s.add_event(cid, "lecture", "Lecture 2: Moles", day(-5))
+    ev = s.add_event(cid, "lecture", "Lecture 2: Moles and molar mass", day(-5))
     s.add_event(cid, "lecture", "Lecture 3: Solutions", day(-2))
-    mid = s.add_material(cid, "notes", "Moles review")
+    mid = s.add_material(cid, "notes", "Moles and molar mass review")
     s.replace_chunks(mid, [{"text": "moles", "loc_kind": "section", "loc_start": "1", "loc_label": "S1", "heading": "Moles"}])
     t = c.get(f"/courses/{cid}/materials").text
     assert "Link it?" in t and f'action="/materials/{mid}/link"' in t and "Link to Lecture 2" in t
