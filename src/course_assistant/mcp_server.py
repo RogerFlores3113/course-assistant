@@ -561,7 +561,7 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
     from . import grounding
     ig = _integrity()
     gate = getattr(ig, "check_guide", None) or getattr(ig, "check_reply", None)
-    hit = gate(st, c["id"], t, b) if gate else None
+    hit = (gate(st, c["id"], t, b, n_cites=len(ids)) if gate is getattr(ig, "check_guide", None) else gate(st, c["id"], t, b)) if gate else None
     if not hit:  # a finished thesis, outline or written answer for a graded essay or short-answer item
         from . import essay
         hit = essay.guide_hit(st, c["id"], t, b, quote_sources)
