@@ -15,6 +15,7 @@ How a reply is judged (parse_answer):
 """
 from __future__ import annotations
 
+import contextvars
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -149,6 +150,9 @@ def build_messages(question: str, sources: list[Source], *, depth: str = "standa
 REMOVED_MARK = "{{citation-removed}}"
 QUOTE_OPEN = "{{quote-not-found}}"
 QUOTE_CLOSE = "{{/quote-not-found}}"
+OUTSIDE_OPEN = "{{outside}}"        # an <outside> phrase inside a sentence stays inline (see _inline_outside)
+OUTSIDE_CLOSE = "{{/outside}}"
+OUTSIDE_INLINE_TEXT = "not from your materials"
 REMOVED_TEXT = "(citation removed)"
 QUOTE_FLAG_TEXT = "quote not found in the cited source"
 
@@ -191,10 +195,40 @@ _VALUE_BEFORE = re.compile(
 _VALUE_NEIGHBOUR = re.compile(r"(?:\[[\d\s,;.\-–]*[,\-–][\d\s,;.\-–]*\]\s*(?:,|and|or|to)?\s*)$", re.I)
 
 
+_N_SOURCES: contextvars.ContextVar[int | None] = contextvars.ContextVar("n_sources", default=None)
+# Words that mean a sentence is about numbers laid out in a vector, matrix, list or range. A bracketed run of numbers
+# inside such a sentence is data unless it reads as an ascending run of real source numbers.
+_MATH_WORDS = re.compile(
+    r"\b(?:vectors?|matri(?:x|ces)|rows?|columns?|entr(?:y|ies)|arrays?|indices|index|intervals?|"
+    r"coordinates?|components?|tuples?|lists?|elements?|sequence|slice|sorted|reversed|permutation|integers?)\b", re.I)
+_ROW_RANGE = re.compile(r"\b(?:rows?|columns?|entries|indices|index|elements?|items?|steps?\s+of|values?|from|between|over)\s*$", re.I)
+
+
+def _sentence_before(masked: str, s: int) -> str:
+    start = max(masked.rfind(". ", 0, s), masked.rfind("\n", 0, s), masked.rfind("? ", 0, s), masked.rfind("! ", 0, s))
+    return masked[start + 1:s] if start >= 0 else masked[:s]
+
+
+def _context_says_values(masked: str, s: int, e: int, spec: str, nums: list[int]) -> bool:
+    """Context rules for a bracketed list or range of numbers: values, not a run of citations."""
+    n_src = _N_SOURCES.get()
+    if n_src is not None and nums and all(k > n_src for k in nums):
+        return True  # nothing in it can be a source number
+    if re.search(r"\d\s*(?:-|–)\s*\d", spec) and not re.search(r"[,;]", spec):  # a range such as [1-3]
+        if _ROW_RANGE.search(masked[max(0, s - 24):s]):
+            return True
+        return bool(_MATH_WORDS.search(_sentence_before(masked, s) + masked[e:e + 60].split(".")[0]))
+    if len(nums) >= 3 and nums == sorted(nums, reverse=True):  # [3, 2, 1]: citations are written in ascending order
+        return True
+    return False
+
+
 def _is_value_bracket(masked: str, s: int, e: int, spec: str) -> bool:
     """A bare [1,2], [2, 3] or [1-3] that is a vector, interval or row of numbers rather than a citation."""
     before = masked[max(0, s - 40):s]
     multi = bool(re.search(r"[,;\-–]", spec))
+    if multi and _context_says_values(masked, s, e, spec, _expand(spec)):
+        return True
     m_before = _VALUE_BEFORE.search(before)
     if m_before and (multi or m_before.group(0).strip()[:1] in "=≈≠≤≥∈\\"):
         return True
@@ -263,7 +297,11 @@ def _rewrite(text: str, keep) -> tuple[str, list[int], list[int]]:
 def clean_citations(text: str, n_sources: int) -> tuple[str, list[int]]:
     """Drop out-of-range [n] marks (leaving a visible marker); return the text and the valid numbers cited, in order.
     Brackets inside $...$, code, or nested/numeric lists such as [[1,2],[3,4]] are never touched."""
-    out, kept, _ = _rewrite(text, lambda k: 1 <= k <= n_sources)
+    token = _N_SOURCES.set(n_sources)
+    try:
+        out, kept, _ = _rewrite(text, lambda k: 1 <= k <= n_sources)
+    finally:
+        _N_SOURCES.reset(token)
     return out, kept
 
 
@@ -395,6 +433,11 @@ _META_REFUSAL = re.compile(
     r"\b(?:ask|check\s+with|talk\s+to|email|see)\s+(?:your\s+)?(?:instructor|professor|teacher|TA|teaching\s+assistant)\b|"
     r"\bthis\s+(?:looks\s+like|is)\s+(?:part\s+of\s+)?your\s+graded\b|\bgraded\s+(?:work|problem|item|assignment)\b|"
     r"\bworth\s+asking\b|\bnot\s+covered\s+in\b", re.I)
+# A question to the student, or a pointer to what to do next, claims nothing about the subject.
+_META_ADVICE = re.compile(
+    r"^\s*(?:(?:try|ask|check|think\s+of|keep\s+in\s+mind|remember\s+to|consider|look\s+at|review|talk\s+to|"
+    r"bring|make\s+sure|start\s+with|begin\s+with|next,?\s+try|you\s+could\s+(?:ask|try)|you\s+might\s+(?:ask|try))\b)"
+    r"|\b(?:to\s+keep\s+in\s+mind|questions\s+to\s+(?:ask|think\s+about|consider))\b", re.I)
 _ABBREV = {"e.g", "i.e", "vs", "dr", "fig", "eq", "eqs", "etc", "cf", "no", "approx", "mr", "ms", "mrs", "prof", "sec", "ch", "al"}
 _SENT_SPLIT = re.compile(r"(?<=[.!?])((?:\s*\[\d+(?:\s*[,;–-]\s*\d+)*\])*)\s+(?=[A-Z0-9\"“*_])")
 
@@ -415,6 +458,98 @@ def _sentences(p: str) -> list[str]:
     return [x for x in out if x]
 
 
+# Practice questions the model writes are exercises for the student, not claims about the course, so a question
+# stem is never boxed as "Not from your materials". Their hidden solutions are still judged on their own.
+_IMPERATIVE = re.compile(
+    r"^\W*(?:calculate|compute|find|determine|solve|explain|describe|write|show|prove|convert|predict|identify|list|"
+    r"state|give|derive|evaluate|simplify|sketch|draw|compare|name|define|balance|estimate|verify|justify|discuss|"
+    r"outline|summari[sz]e|analy[sz]e|interpret|apply|use|decide|classify|rank|choose|suppose|given|let)\b", re.I)
+_STEM_LABEL = re.compile(r"^\W*(?:question|problem|exercise|practice|q)\s*\d*\s*[:.)\-–]?\s*|^\(?[a-z0-9]{1,2}[.)]\s+", re.I)
+
+
+def _stem_unit(unit: str, lenient: bool) -> bool:
+    plain = re.sub(r"[*_`>#]", "", _strip_cites(unit)).strip()
+    plain = _STEM_LABEL.sub("", plain, count=1).strip()
+    if not plain:
+        return True
+    sents = _sentences(plain)
+    ends_q = [x.rstrip().endswith("?") for x in sents]
+    imp = [bool(_IMPERATIVE.match(x)) for x in sents]
+    if lenient:  # a list item or a labelled question: its setup sentences belong to the question
+        return any(ends_q) or any(imp)
+    return all(q or i or _is_meta(x)[0] for x, q, i in zip(sents, ends_q, imp))
+
+
+def _is_stems(text: str) -> bool:
+    """True when every item of text is an exercise stem (a question or a task for the student)."""
+    if "$$" in text:
+        return False
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    items: list[list[str]] = []
+    for ln in lines:
+        if _LIST_ITEM.match(ln) or not items:
+            items.append([ln])
+        else:
+            items[-1].append(ln)
+    listy = any(_LIST_ITEM.match(i[0]) for i in items)
+    ok = False
+    for item in items:
+        raw = " ".join(x.strip() for x in item)
+        raw = _LIST_ITEM.sub("", raw, count=1)
+        labelled = bool(_STEM_LABEL.match(re.sub(r"[*_`>#]", "", raw)))
+        if not _stem_unit(raw, listy or labelled):
+            return False
+        ok = ok or bool(re.sub(r"[*_`>#]", "", raw).strip())
+    return ok
+
+
+def _details_segments(text: str) -> list[tuple[str, str]]:
+    """Cut a paragraph into ('prose', text) and ('details', text) pieces at <details> ... </details>."""
+    out: list[tuple[str, str]] = []
+    cur: list[str] = []
+    depth = 0
+    inside = False
+    for line in text.splitlines():
+        opens, closes = len(_DETAILS_OPEN.findall(line)), len(_DETAILS_CLOSE.findall(line))
+        if not inside and opens:
+            if cur:
+                out.append(("prose", "\n".join(cur)))
+            cur, inside = [], True
+        cur.append(line)
+        if inside:
+            depth += opens - closes
+            if depth <= 0:
+                out.append(("details", "\n".join(cur)))
+                cur, inside, depth = [], False, 0
+    if cur:
+        out.append(("details" if inside else "prose", "\n".join(cur)))
+    return [(k, t) for k, t in out if t.strip()]
+
+
+def _inline_outside(raw: str) -> str:
+    """An <outside>phrase</outside> in the middle of a line stays in its sentence as an inline marker; one that
+    stands on lines of its own (or runs long) stays a block."""
+    def repl(m: re.Match) -> str:
+        whole, inner = m.group(0), m.group(1)
+        if not whole.lower().endswith("</outside>") or "\n" in inner.strip() or len(inner.split()) > 30:
+            return whole
+        ls = raw.rfind("\n", 0, m.start()) + 1
+        le = raw.find("\n", m.end())
+        le = len(raw) if le < 0 else le
+        before = re.sub(r"^\s*(?:[-*+>]|\d+[.)]|#{1,6})\s*", "", raw[ls:m.start()])
+        after = raw[m.end():le]
+        if not before.strip() and not after.strip():
+            return whole
+        return f"{OUTSIDE_OPEN}{_strip_cites(inner).strip()}{OUTSIDE_CLOSE}"
+    return _OUTSIDE.sub(repl, raw)
+
+
+def _unmark(text: str) -> str:
+    return text.replace(OUTSIDE_OPEN, "").replace(OUTSIDE_CLOSE, "")
+
+
 def _is_meta(text: str) -> tuple[bool, bool]:
     """(every sentence of text is about the answer itself, any of them says the materials do not cover it)."""
     plain = re.sub(r"[*_`>#]", "", text).strip()
@@ -425,7 +560,8 @@ def _is_meta(text: str) -> tuple[bool, bool]:
         return False, False
     cov = [bool(_META_COVERAGE.search(x) or _NOT_COVERED_2.search(x)) for x in sents]
     ref = [bool(_META_REFUSAL.search(x)) for x in sents]
-    ok = all(c or r for c, r in zip(cov, ref))
+    adv = [x.rstrip().endswith("?") or bool(_META_ADVICE.search(x)) for x in sents]
+    ok = all(c or r or a for c, r, a in zip(cov, ref, adv))
     return ok, ok and any(cov)
 
 
@@ -442,7 +578,7 @@ def _split_sentences(cleaned: str, found: list[int]) -> list[Block]:
     flags = []  # True = label this sentence
     for i, x in enumerate(sents):
         plain = re.sub(r"[*_`>#]", "", _strip_cites(x)).strip()
-        flag = (not cites[i] and any(cites[:i]) and not any(cites[i + 1:]) and REMOVED_MARK not in x
+        flag = (not cites[i] and any(cites[:i]) and REMOVED_MARK not in x
                 and len(plain.split()) >= 5 and not _is_meta(plain)[0] and not _makes_no_claim(plain))
         flags.append(flag)
     if not any(flags):
@@ -492,7 +628,10 @@ def _split_mixed_list(cleaned: str, found: list[int]) -> list[Block]:
     out: list[Block] = []
     for item, c in zip(items, cites):
         text = "\n".join(item)
-        out.append(Block("text", text, c) if c else Block("outside", _LIST_ITEM.sub("", text, count=1).strip(), []))
+        if c or _is_stems(text) or _is_meta(_LIST_ITEM.sub("", text, count=1).strip())[0]:
+            out.append(Block("text", text, c))
+        else:
+            out.append(Block("outside", _unmark(_LIST_ITEM.sub("", text, count=1).strip()), []))
     return out
 
 
@@ -502,7 +641,40 @@ def _cites_in(text: str) -> list[int]:
 
 def _parse(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool]:
     """parse_blocks plus a flag: True when a line that only said "the materials do not cover this" was removed."""
-    raw = (raw or "").strip()
+    token = _N_SOURCES.set(n_sources)
+    try:
+        return _parse_inner(raw, n_sources)
+    finally:
+        _N_SOURCES.reset(token)
+
+
+def _uncited_blocks(cleaned: str, n_sources: int) -> tuple[list[Block], bool]:
+    """Blocks for one paragraph with no valid citation, and whether it only said the materials do not cover it."""
+    if _says_not_covered(cleaned):
+        return [], True
+    if _DETAILS_OPEN.search(cleaned):
+        out: list[Block] = []
+        for kind, seg in _details_segments(cleaned):
+            if kind == "details":
+                inner = _details_inner(seg)
+                out.append(Block("text" if not inner or _makes_no_claim(inner) else "outside",
+                                 seg if not inner or _makes_no_claim(inner) else _unmark(seg), []))
+            elif _is_stems(seg) or _is_meta(seg)[0] or (_makes_no_claim(seg) and (n_sources > 0 or _is_structural(seg))):
+                out.append(Block("text", seg, []))
+            else:
+                out.append(Block("outside", _unmark(seg), []))
+        return out, False
+    if (meta := _is_meta(cleaned))[0]:
+        return [Block("text", cleaned, [])], meta[1]
+    if _is_stems(cleaned):
+        return [Block("text", cleaned, [])], False
+    if _makes_no_claim(cleaned) and (n_sources > 0 or _is_structural(cleaned)):
+        return [Block("text", cleaned, [])], False
+    return [Block("outside", _unmark(cleaned), [])], False
+
+
+def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool]:
+    raw = _inline_outside((raw or "").strip())
     segments: list[tuple[str, str]] = []
     pos = 0
     for m in _OUTSIDE.finditer(raw):
@@ -528,6 +700,9 @@ def _parse(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool]:
                     said_not_covered = said_not_covered or meta[1]
                     blocks.append(Block("text", stripped, []))
                     continue
+                if _is_stems(stripped):
+                    blocks.append(Block("text", stripped, []))
+                    continue
                 blocks.append(Block("outside", stripped, []))
             elif not cleaned:
                 continue
@@ -539,22 +714,11 @@ def _parse(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool]:
                                   else _split_sentences(cleaned, found))
             elif REMOVED_MARK in cleaned and not cleaned.lstrip().startswith("#"):
                 # A line that tried to cite a source that doesn't exist is a claim, so it is never exempt.
-                blocks.append(Block("outside", cleaned, []))
-            elif _says_not_covered(cleaned):
-                said_not_covered = True
-            elif _DETAILS_OPEN.search(cleaned):
-                inner = _details_inner(cleaned)
-                if not inner or _makes_no_claim(inner):
-                    blocks.append(Block("text", cleaned, []))
-                else:
-                    blocks.append(Block("outside", cleaned, []))
-            elif (meta := _is_meta(cleaned))[0]:
-                said_not_covered = said_not_covered or meta[1]
-                blocks.append(Block("text", cleaned, []))
-            elif _makes_no_claim(cleaned) and (n_sources > 0 or _is_structural(cleaned)):
-                blocks.append(Block("text", cleaned, []))
+                blocks.append(Block("outside", _unmark(cleaned), []))
             else:
-                blocks.append(Block("outside", cleaned, []))
+                more, said = _uncited_blocks(cleaned, n_sources)
+                said_not_covered = said_not_covered or said
+                blocks.extend(more)
     used = sorted({c for b in blocks if b.kind == "text" for c in b.cites})
     return blocks, used, said_not_covered
 
@@ -566,18 +730,24 @@ def parse_blocks(raw: str, n_sources: int) -> tuple[list[Block], list[int]]:
 
 
 def is_not_covered(blocks: list[Block], n_sources: int, said: bool = False) -> bool:
-    """True when the materials do not cover the question: no sources, the reply said so, or most of it is outside."""
-    if n_sources == 0 or said:
+    """True when the materials do not cover the question: no sources, nothing cited and the reply said so, or most of
+    what the reply says is outside. A fully cited answer that ends with "your materials don't list anything else" is
+    covered."""
+    if n_sources == 0:
+        return True
+    cited = sum(len(b.md) for b in blocks if b.kind == "text" and b.cites)
+    if said and not cited:
         return True
     out = sum(len(b.md) for b in blocks if b.kind == "outside")
-    total = sum(len(b.md) for b in blocks if b.kind == "outside" or b.cites)
+    total = out + cited
     return bool(total) and out * 2 > total
 
 
 def plain_marks(md: str) -> str:
     """Turn the stored markers into words, for exports and plain-text views."""
     return (md.replace(REMOVED_MARK, REMOVED_TEXT).replace(QUOTE_OPEN, "")
-            .replace(QUOTE_CLOSE, f" [{QUOTE_FLAG_TEXT}]"))
+            .replace(QUOTE_CLOSE, f" [{QUOTE_FLAG_TEXT}]").replace(OUTSIDE_OPEN, "")
+            .replace(OUTSIDE_CLOSE, f" ({OUTSIDE_INLINE_TEXT})"))
 
 
 def render_body(blocks: list[Block], prefix: str = "") -> str:
@@ -660,6 +830,8 @@ def parse_answer(raw: str, sources: list[Source]) -> Answer:
     blocks, used, said = _parse(raw, len(sources))
     if not blocks and not said:
         blocks = [Block("outside", "The AI did not return an answer. Try asking again.", [])]
+        verify_quotes(blocks, sources)  # no answer is not "general knowledge", so no not-covered banner either
+        return make_answer(blocks, used, sources, not_covered=False)
     verify_quotes(blocks, sources)
     return make_answer(blocks, used, sources, not_covered=is_not_covered(blocks, len(sources), said))
 
@@ -667,9 +839,14 @@ def parse_answer(raw: str, sources: list[Source]) -> Answer:
 # --------------------------------------------------------------------------- saving
 def source_rows(sources: list[Source], used: list[int] | None = None) -> list[dict[str, Any]]:
     used_set = set(used or [])
-    return [{"n": i, "chunk_id": s["chunk_id"], "material_id": s["material_id"], "label": s.get("loc_label", ""),
-             "title": s.get("material_title", ""), "href": s.get("href", ""), "used": i in used_set}
-            for i, s in enumerate(sources, 1)]
+    rows = []
+    for i, s in enumerate(sources, 1):
+        row = {"n": i, "chunk_id": s["chunk_id"], "material_id": s["material_id"], "label": s.get("loc_label", ""),
+               "title": s.get("material_title", ""), "href": s.get("href", ""), "used": i in used_set}
+        if (past := _past_label(s)):
+            row["past"] = past  # "Past offering: Fall 2018", shown on the Sources row and in the chip's label
+        rows.append(row)
+    return rows
 
 
 def ask(store, course_id: int, question: str, provider, *, depth: str = "standard",

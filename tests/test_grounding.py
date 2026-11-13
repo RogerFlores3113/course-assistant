@@ -202,7 +202,7 @@ def test_outside_labelling_skips_structural_lines_p1_p3():
 
 def test_not_covered_lines_become_the_note_p3():
     a = grounding.parse_answer("The materials do not cover week 8.\n\nDoors close at noon [1].", srcs(1))
-    assert [b.md for b in a.blocks] == ["Doors close at noon [1]."] and a.not_covered
+    assert [b.md for b in a.blocks] == ["Doors close at noon [1]."] and not a.not_covered  # cycle 3: cited, so covered
     b = grounding.parse_answer("Real claim [1].", srcs(1))
     assert not b.not_covered
     c = grounding.parse_answer("<outside>The notes don't mention this at all.</outside>", srcs(1))

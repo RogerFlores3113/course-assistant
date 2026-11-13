@@ -18,7 +18,7 @@ from typing import Any
 
 from markupsafe import Markup
 
-from .grounding import QUOTE_CLOSE, QUOTE_FLAG_TEXT, QUOTE_OPEN, REMOVED_MARK
+from .grounding import OUTSIDE_CLOSE, OUTSIDE_OPEN, QUOTE_CLOSE, QUOTE_FLAG_TEXT, QUOTE_OPEN, REMOVED_MARK
 
 REMOVED_LABEL = "a citation here pointed to a source that doesn't exist and was removed"
 OUTSIDE_RE = re.compile(r"<outside>(.*?)</outside>", re.S | re.I)
@@ -47,7 +47,8 @@ def source_map(sources: list[dict[str, Any]] | None) -> dict[int, dict[str, Any]
         except (TypeError, ValueError):
             n = i
         out[n] = {"n": n, "title": s.get("title") or s.get("material_title") or "Material",
-                  "label": s.get("label") or s.get("loc_label") or "", "href": s.get("href") or ""}
+                  "label": s.get("label") or s.get("loc_label") or "", "href": s.get("href") or "",
+                  "past": s.get("past") or ""}
     return out
 
 
@@ -62,6 +63,10 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
     text = text.replace("\x00", "")
     text = text.replace(REMOVED_MARK, hold(
         f'<span class="cite-removed" title="{escape(REMOVED_LABEL)}">(citation removed)</span>'))
+    text = text.replace(OUTSIDE_OPEN, hold('<span class="outside-inline">'))
+    text = text.replace(OUTSIDE_CLOSE, hold(
+        '</span><span class="oi-tag" title="Not from your materials">outside'
+        '<span class="visually-hidden"> (not from your materials)</span></span>'))
     text = text.replace(QUOTE_OPEN, hold('<mark class="quote-unverified">'))
     text = text.replace(QUOTE_CLOSE, hold(f'</mark> <span class="quote-flag">({QUOTE_FLAG_TEXT})</span>'))
     text = re.sub(r"`([^`\n]+)`", lambda m: hold(f"<code>{escape(m.group(1))}</code>"), text)
@@ -92,7 +97,8 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
         s = sources.get(n)
         if not s or not s.get("href"):
             return m.group(0)
-        aria = escape(f"Source {n}: {s['title']}" + (f", {s['label']}" if s["label"] else ""))
+        aria = escape(f"Source {n}: {s['title']}" + (f", {s['label']}" if s["label"] else "")
+                      + (f", {s['past']}" if s.get("past") else ""))
         return hold(f'<a class="cite" href="{escape(s["href"])}" aria-label="{aria}">[{n}]</a>')
 
     text = re.sub(r"\[(\d{1,3})\]", cite, text)
@@ -101,6 +107,8 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
     text = re.sub(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*", r"<strong><em>\1</em></strong>", text)
     text = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"(?<![\w])__(?=\S)(.+?)(?<=\S)__(?![\w])", r"<strong>\1</strong>", text)
+    # textbook variables written *C*1*V*1: one or two letters between asterisks, digits may touch either side
+    text = re.sub(r"(?<![A-Za-z_*])\*([A-Za-z]{1,2})\*(?![A-Za-z*])", r"<em>\1</em>", text)
     # a closing * may touch a digit or letter: *V*1 is V followed by 1 (textbook variable names)
     text = re.sub(r"(?<![\w*])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?!\*)", r"<em>\1</em>", text)
     text = re.sub(r"(?<![\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\w_])", r"<em>\1</em>", text)
@@ -363,3 +371,51 @@ def split_outside(md: str) -> list[dict[str, str]]:
     if (md or "")[pos:].strip():
         blocks.append({"kind": "text", "md": md[pos:].strip()})
     return blocks
+
+
+# ---------------------------------------------------------------- textbook equations (the reader)
+_T = (r"\(?(?:\d+(?:\.\d+)?|[A-Za-z]\d{1,2}(?:[A-Za-z]\d{0,2}){0,3}|(?=[A-Za-z]*[A-Z])[A-Za-z]{1,3}|[a-z]{1,2})\)?")
+_EQ = re.compile(rf"(?<![\w$\\.])({_T}(?:\s*[=+\-*/\u00d7\u00b7^]\s*{_T})+)(?![\w$])")
+
+
+def _tex(expr: str) -> str:
+    t = expr.strip()
+    t = re.sub(r"\(([^()]+)\)\s*/\s*\(([^()]+)\)", r"\\frac{\1}{\2}", t)
+    t = re.sub(r"(?<![\w{\\])([A-Za-z0-9]+)\s*/\s*([A-Za-z0-9]+)(?![\w}])", r"\\frac{\1}{\2}", t)
+    t = re.sub(r"([A-Za-z])(\d+)", r"\1_{\2}", t)
+    return t.replace("*", r" \cdot ").replace("\u00d7", r" \times ").replace("\u00b7", r" \cdot ")
+
+
+def _math_line(line: str) -> str:
+    if "$" in line or "`" in line or line.lstrip().startswith(("#", "|", ">")):
+        return line
+    if "=" in line:  # *C*1*V*1 = *C*2*V*2: the asterisks were italics for variable names
+        line = re.sub(r"(?<![A-Za-z_*])\*([A-Za-z]{1,2})\*(?![A-Za-z*])", r"\1", line)
+
+    def sub(m: re.Match) -> str:
+        e = m.group(1)
+        if "=" not in e or not re.search(r"/|[A-Za-z]\d|\^", e):
+            return e
+        return f"${_tex(e)}$"
+    return _EQ.sub(sub, line)
+
+
+def mathify(md: str) -> str:
+    """Recognisable equations in flat textbook text ("V2= (C1V1)/(C2)") become $...$ so the page can typeset them.
+    Only a run of short variable names, numbers and operators with an equals sign and a fraction, a subscripted
+    variable or a power is touched; code fences, code spans and text that already has math are left alone."""
+    out: list[str] = []
+    fence: str | None = None
+    for line in (md or "").replace("\r\n", "\n").split("\n"):
+        fm = FENCE_RE.match(line)
+        if fm and (fence is None or fm.group(2) == fence):
+            fence = None if fence else fm.group(2)
+            out.append(line)
+        else:
+            out.append(line if fence else _math_line(line))
+    return "\n".join(out)
+
+
+def render_reader(md: str, *, base_level: int = 3, math: bool = True) -> Markup:
+    """The textbook reader's rendering: markdown emphasis plus recognisable equations as math."""
+    return render(mathify(md) if math else md, base_level=base_level)

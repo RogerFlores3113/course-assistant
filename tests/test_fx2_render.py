@@ -52,7 +52,7 @@ def test_problem2_real_outside_still_boxed():
 
 
 def test_problem2_banner_wording(ready):
-    r = page(ready, [{"kind": "text", "md": "x [1]", "cites": [1]}], data={"not_covered": True})
+    r = page(ready, [{"kind": "text", "md": "x", "cites": []}], data={"not_covered": True})  # nothing cited
     assert "Your saved materials don&#39;t cover this." in r.text and "general knowledge" not in r.text
     r = page(ready, [{"kind": "text", "md": "x [1]", "cites": [1]}, {"kind": "outside", "md": "Other.", "cites": []}],
              data={"not_covered": True})
