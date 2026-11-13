@@ -1,13 +1,18 @@
+{% macro source_list(items) %}<ol>{% for s in items %}<li value="{{ s.n }}"><a href="{{ s.href }}">{{ s.title }}{% if s.label %}, {{ s.label }}{% endif %}</a></li>{% endfor %}</ol>{% endmacro %}
 {% macro answer(view) %}
 <div class="answer">
   {% if view.twin %}<p class="twin-note"><strong>Worked twin problem.</strong> This is a similar problem with different numbers, solved step by step. Your original graded problem is left for you to solve.</p>{% endif %}
+  {% if view.concepts %}<p class="twin-note"><strong>Graded work: help with concepts only.</strong> This looks like part of your graded work, so this covers the ideas behind it and leaves the solving to you.</p>{% endif %}
+  {% if view.not_covered %}<p class="notice" data-not-covered>{{ view.not_covered_note }}</p>{% endif %}
   {% for b in view.blocks %}
-    {% if b.kind == 'outside' %}<div class="outside" role="group" aria-label="Not from your materials"><p class="outside-label">Not from your materials</p>{{ b.html }}</div>
+    {% if b.kind == 'outside' %}<div class="outside"><p class="outside-label">Not from your materials</p>{{ b.html }}</div>
     {% else %}<div class="block">{{ b.html }}</div>{% endif %}
   {% endfor %}
-  {% if view.sources %}<div class="sources"><h3>Sources</h3><ol>
-    {% for s in view.sources %}<li value="{{ s.n }}"><a href="{{ s.href }}">{{ s.title }}{% if s.label %}, {{ s.label }}{% endif %}</a></li>{% endfor %}</ol></div>
-  {% else %}<p class="muted">No passages from your materials were used for this answer.</p>{% endif %}
+  {% if view.sources %}<div class="sources"><h3>Sources</h3>{{ source_list(view.sources) }}</div>
+  {% else %}<p class="muted">No passages from your materials were cited in this answer.</p>{% endif %}
+  {% if view.unused_sources %}<details class="sources also"><summary>Also searched (not cited)</summary>{{ source_list(view.unused_sources) }}</details>{% endif %}
+  {% if view.removed_citations %}<p class="muted small" data-removed-citations>{{ view.removed_citations }} citation{{ 's' if view.removed_citations != 1 else '' }} in this text pointed to a source that doesn't exist and {{ 'were' if view.removed_citations != 1 else 'was' }} removed. Check the marked spot{{ 's' if view.removed_citations != 1 else '' }}.</p>{% endif %}
+  {% if view.unverified_quotes %}<p class="muted small" data-unverified-quotes>{{ view.unverified_quotes }} quotation{{ 's' if view.unverified_quotes != 1 else '' }} could not be found word for word in the cited source. Check {{ 'them' if view.unverified_quotes != 1 else 'it' }} against the original.</p>{% endif %}
   <p class="footer-note">{{ view.footer }}</p>
 </div>
 {% endmacro %}
