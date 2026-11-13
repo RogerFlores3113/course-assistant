@@ -39,3 +39,11 @@ details[open] > summary { margin-bottom: 6px; }
 }
 :root[data-theme="dark"] .chunk.hit a, :root[data-theme="dark"] .chunk:target a { color: #c8d6ff; }
 .src-mark { font-size: 12px; font-weight: 700; padding: 0 5px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line); text-decoration: none; margin-right: 2px; }
+
+/* An <outside> phrase inside a sentence stays in the sentence: dashed underline and a small "outside" tag */
+.outside-inline { border-bottom: 2px dashed var(--warn); }
+.oi-tag { font-size: 11px; font-weight: 700; color: var(--text); background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 6px; padding: 0 4px; margin-left: 3px; white-space: nowrap; vertical-align: baseline; }
+.past-tag { font-size: 12px; font-weight: 700; color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; white-space: nowrap; }
+.check-line { background: var(--surface-2); border-left: 4px solid var(--warn); padding: 6px 12px; border-radius: 6px; margin: 0 0 10px; }
+.routing-note + .inline-form { margin: -4px 0 12px; }
+.inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

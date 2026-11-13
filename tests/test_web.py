@@ -767,7 +767,7 @@ def test_p1_delete_warns_and_reader_explains_deleted_source(ready):
     assert "source deleted" in ready.client.get(f"/materials/{mid}/delete").text
     ready.client.post(f"/materials/{mid}/delete")
     r = ready.client.get(f"/read/{mid}?at=5")
-    assert r.status_code == 410 and "Source deleted" in r.text and "deleted" in r.text and "not found" not in r.text.lower()
+    assert r.status_code == 410 and "This passage is no longer in your materials" in r.text and "deleted" in r.text and "not found" not in r.text.lower()
 
 
 def test_upload_reports_already_saved(ready, monkeypatch):

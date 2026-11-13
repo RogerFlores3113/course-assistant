@@ -244,6 +244,44 @@ def plain_math(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def enrich_sources(store: Any, sources: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Saved source rows with a "past" label ("Past offering: Fall 2018") added for passages of a material saved as a
+    past offering. Rows already carrying one are left alone; a missing material or store changes nothing."""
+    rows = [dict(s) for s in (sources or [])]
+    if store is None:
+        return rows
+    from . import offerings
+    cache: dict[int, str] = {}
+    for r in rows:
+        if r.get("past") or not r.get("material_id"):
+            continue
+        mid = int(r["material_id"])
+        if mid not in cache:
+            try:
+                cache[mid] = offerings.source_label(store.material(mid)) or ""
+            except Exception:  # noqa: BLE001 - a label is a hint, never a reason to fail a page
+                cache[mid] = ""
+        if cache[mid]:
+            r["past"] = cache[mid]
+    return rows
+
+
+_MISSING_RE = re.compile(r"No saved materials for: (.+?)\. (Add them to cover those topics\.)", re.S)
+
+
+def _missing_as_list(md: str) -> str:
+    """"No saved materials for: a; b; c. Add them ..." as an intro line plus one bullet per lecture."""
+    def sub(m: re.Match) -> str:
+        items = [x.strip() for x in m.group(1).split(";") if x.strip()]
+        if len(items) < 2:
+            return m.group(0)
+        return "No saved materials for these lectures. " + m.group(2) + "\n\n" + "\n".join(f"- {x}" for x in items) + "\n"
+    return _MISSING_RE.sub(sub, md)
+
+
+_CONCEPT_LISTS_RE = re.compile(r"^#{1,6}\s*Concepts and links\s*#*\s*$", re.I | re.M)
+
+
 def _merge_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One row per distinct title and location, in source-number order. A row holds every number it stands for, so
     two cited passages from the same section show once with [2][5]."""
@@ -262,18 +300,27 @@ def _merge_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(rows.values())
 
 
+ROUTING_FALLBACK = {"twin": "This looks like your graded work, so here is a similar problem with different numbers.",
+                    "concepts": "This looks like your graded work, so this covers the ideas behind it."}
+
+
 def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: list[Any] | None = None,
                 twin: bool = False, ai_app: bool = False, mode: str | None = None,
-                data: dict[str, Any] | None = None, base_level: int = 4) -> dict[str, Any]:
+                data: dict[str, Any] | None = None, base_level: int = 4, store: Any = None,
+                course_id: int | None = None, question: str = "", tree_shown: bool = False) -> dict[str, Any]:
     """Everything the answer partial needs, from live grounding output or from a saved guide/chat message.
 
     Banners come only from mode ("twin", "concepts"); a saved guide with no mode falls back to its kind (twin).
+    A twin or concepts page shows its routing sentence (data["routing_note"]) and an "Ask normally" button instead of
+    the not-covered banner. The not-covered banner shows only when nothing is cited or most of the answer is outside.
     Sources: view["sources"] holds only the ones the text cites, one row per distinct passage, in number order, each
-    with its [n] marks; view["unused_sources"] holds the rest (a collapsed "Also searched (not cited)" list).
+    with its [n] marks and, for a past offering, its "Past offering: Fall 2018" tag; view["unused_sources"] holds the
+    rest (a collapsed "Also searched (not cited)" list). tree_shown drops the flat "Concepts and links" lists of a
+    concept map, since the tree on the page reads the same graph.
     base_level is the heading level the shallowest heading of the text gets (the container's heading level + 1)."""
     from . import grounding
 
-    sources = list(sources or [])
+    sources = enrich_sources(store, sources)
     smap = source_map(sources)
     raw: list[dict[str, str]] = []
     for b in blocks or []:
@@ -283,6 +330,17 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
             raw.append({"kind": "outside" if kind == "outside" else "text", "md": str(md)})
     if not raw:
         raw = split_outside(body_md or "")
+    data = data or {}
+    if tree_shown:
+        for i, b in enumerate(raw):  # the flat list is the same graph the tree shows
+            if _CONCEPT_LISTS_RE.search(b["md"]):
+                head = _CONCEPT_LISTS_RE.search(b["md"])
+                keep = b["md"][:head.start()].strip()
+                raw = raw[:i] + ([{"kind": b["kind"], "md": keep}] if keep else [])
+                break
+    for b in raw:
+        if b["kind"] == "text":
+            b["md"] = _missing_as_list(b["md"])
     top = shallowest_heading(*[b["md"] for b in raw])
     uid = next(_UID)
     out_blocks: list[dict[str, Any]] = []
@@ -298,34 +356,54 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
             n_out += 1
             b["id"] = f"out-{uid}-{n_out}"
     cited = {k for b in raw if b["kind"] == "text" for k in grounding.cited_numbers(b["md"])}
+    if tree_shown:  # the map's own nodes and links cite sources too
+        for key in ("nodes", "edges"):
+            for item in data.get(key) or []:
+                cited |= {c for c in _cite_list(item.get("cites") if isinstance(item, dict) else None)}
     removed = sum(count_marks(b["md"])[0] for b in raw)
     unverified = sum(count_marks(b["md"])[1] for b in raw)
     gb = [grounding.Block(b["kind"], b["md"], grounding.cited_numbers(b["md"]) if b["kind"] == "text" else [])
           for b in raw]
-    data = data or {}
-    not_covered = bool(raw) and (bool(data.get("not_covered")) or grounding.is_not_covered(gb, len(sources)))
+    any_cited = any(b.cites for b in gb)
+    # the saved flag counts only when nothing is cited; a cited answer that ends "your materials don't list more" is covered
+    not_covered = bool(raw) and (grounding.is_not_covered(gb, len(sources)) or (bool(data.get("not_covered")) and not any_cited))
     has_outside = any(b["kind"] == "outside" for b in raw)
     if mode in ("twin", "concepts"):
         is_twin, is_concepts = mode == "twin", mode == "concepts"
     else:
         is_twin, is_concepts = bool(twin), False
+    routed = is_twin or is_concepts
+    routing_note = str(data.get("routing_note") or "").strip() if routed else ""
+    if routed and not routing_note:
+        routing_note = ROUTING_FALLBACK["twin" if is_twin else "concepts"]
+    parts = []
+    if removed:
+        parts.append(f"{removed} citation{'s' if removed != 1 else ''} removed")
+    if unverified:
+        parts.append(f"{unverified} quote{'s' if unverified != 1 else ''} not found")
+    ask_normal = None
+    if routed and course_id and (question or data.get("question")):
+        ask_normal = {"course_id": int(course_id), "question": question or str(data.get("question"))}
     return {"blocks": out_blocks,
             "sources": _merge_sources([smap[k] for k in sorted(smap) if k in cited]),
             "unused_sources": _merge_sources([smap[k] for k in sorted(smap) if k not in cited]),
             "twin": is_twin, "concepts": is_concepts,
-            "outside": has_outside, "not_covered": not_covered,
+            "routing_note": routing_note, "ask_normal": ask_normal,
+            "outside": has_outside, "not_covered": not_covered and not routed,
             "not_covered_note": NOT_COVERED_NOTE + (NOT_COVERED_EXTRA if has_outside else ""),
             "removed_citations": removed, "unverified_quotes": unverified, "base_level": base_level,
+            "check_line": ("Check: " + ", ".join(parts)) if parts else "",
             "footer": disclaimer.AI_APP_FOOTER if ai_app else disclaimer.FOOTER}
 
 
-def guide_view(guide: dict[str, Any], base_level: int = 2) -> dict[str, Any]:
+def guide_view(guide: dict[str, Any], base_level: int = 2, *, store: Any = None, tree_shown: bool = False) -> dict[str, Any]:
     data = guide.get("data") if isinstance(guide.get("data"), dict) else {}
     saved = data.get("blocks") if isinstance(data.get("blocks"), list) else None
     mode = data.get("mode") if data.get("mode") in ("answer", "twin", "concepts") else None
     return answer_view(guide.get("body_md", ""), guide.get("sources"), blocks=saved,
                        twin=guide.get("kind") == "twin", ai_app=guide.get("created_by") == "ai_app",
-                       mode=mode, data=data, base_level=base_level)
+                       mode=mode, data=data, base_level=base_level, store=store,
+                       course_id=guide.get("course_id"), question=guide.get("question") or "", tree_shown=tree_shown)
 
 
 def _wrap(text: str, width: int) -> list[str]:

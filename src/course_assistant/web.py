@@ -33,8 +33,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import __version__, disclaimer, paths
 from .store import EVENT_KINDS, GUIDE_KINDS, MATERIAL_KINDS, Store, now_iso
 from .web_md import render as render_md
+from .web_md import render_reader
 from .web_helpers import (DEPTHS, MODELS, PALETTE, TABS, THEMES, accent_style, answer_view, chunk_range_label, clean_color,
-                          clean_event_title, concept_graph, course_color, day_label, group_guides, guide_view,
+                          clean_event_title, concept_graph, course_color, day_label, enrich_sources, group_guides, guide_view,
                           merge_events, parse_day, time_label, week_label, week_start)
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -48,6 +49,7 @@ FLASH = "ca_flash"
 MAX_UPLOAD = 2 * 1024 * 1024 * 1024  # a long lecture recording
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+CODE_EXT = {".py", ".java", ".c", ".h", ".cpp", ".js", ".ts", ".ipynb", ".r", ".m", ".go", ".rs", ".rb", ".sh", ".sql", ".cs"}
 MEDIA_EXT = {".mp3": "audio", ".m4a": "audio", ".wav": "audio", ".mp4": "video", ".mov": "video", ".webm": "video"}
 INLINE_TYPES = ("application/pdf", "audio/", "video/", "image/png", "image/jpeg", "image/gif", "image/webp", "text/plain")
 GRADED_KINDS = {"problem": "Problem", "proof": "Proof", "essay": "Essay or paper"}
@@ -562,7 +564,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                                                blocks=saved if isinstance(saved, list) else None,
                                                twin=bool(g and g["kind"] == "twin"),
                                                mode=((g or {}).get("data") or {}).get("mode"),
-                                               data=(g or {}).get("data"))
+                                               data=(g or {}).get("data"), store=store, course_id=cid,
+                                               question=last_q)
                     item["question"] = last_q
                 history.append(item)
             ctx["history"] = history
@@ -1084,7 +1087,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         if not is_htmx(request):
             return redirect(f"/guides/{int(result)}", notice=ready)
         return after(request, course_id, "study", notice=ready, result_guide=guide,
-                     result_view=guide_view(guide, base_level=4) if guide else None)
+                     result_view=guide_view(guide, base_level=4, store=store) if guide else None)
 
     # ------------------------------------------------------------------ ask
     @app.post("/courses/{course_id}/ask")
@@ -1200,10 +1203,10 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
     def reader(request: Request, material_id: int, at: str | None = None):
         m = store.material(material_id)
         if not m:
-            return friendly_page(request, 410, "Source deleted",
-                                 "This passage came from a material that has been deleted, so it can no longer be "
-                                 "opened. Answers and guides that cited it are still saved, but their link to it is "
-                                 "gone. Add the material again if you still need it.")
+            return friendly_page(request, 410, "This passage is no longer in your materials",
+                                 "This passage is no longer in your materials. It came from a material that has been "
+                                 "deleted, so it can no longer be opened. Answers and guides that cited it are still "
+                                 "saved, but their link to it is gone. Add the material again if you still need it.")
         course = store.course(m["course_id"])
         chunks = store.chunks_of(material_id)
         media = MEDIA_EXT.get(Path(m.get("filename") or "").suffix.lower(), "") if file_of(m) else ""
@@ -1218,13 +1221,19 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                                "re-imported or replaced. The whole material is shown below.")
             else:
                 at_note = "This link's passage reference is not valid, so no passage is highlighted."
+        code_like = Path(m.get("filename") or m.get("original_name") or "").suffix.lower() in CODE_EXT
         for c in chunks:
             c["seek"] = int(float(c["loc_start"])) if c["loc_kind"] == "time" and re.match(r"^\d+(\.\d+)?$", str(c["loc_start"])) else None
             c["range_label"] = chunk_range_label(c)
-            c["html"] = render_md(c["text"], base_level=3)
+            c["html"] = render_reader(c["text"], base_level=3, math=not code_like)
+        file_frag = ""
+        if at_id and Path(m.get("filename") or m.get("original_name") or "").suffix.lower() == ".pdf":
+            hit = next((c for c in chunks if c["id"] == at_id), None)
+            if hit and hit.get("loc_kind") == "page" and re.fullmatch(r"\d{1,5}", str(hit.get("loc_start") or "").split(".")[0]):
+                file_frag = f"#page={str(hit['loc_start']).split('.')[0]}"
         source = m["source_url"] if re.match(r"^https?://\S+$", m.get("source_url") or "") else ""
         return page(request, "read.html", m=m, course=course, accent=course_color(course), chunks=chunks, at=at_id,
-                    at_note=at_note, media=media, has_file=bool(file_of(m)), source_url=source,
+                    at_note=at_note, media=media, has_file=bool(file_of(m)), source_url=source, file_frag=file_frag,
                     kind_label=MATERIAL_KINDS.get(m["kind"], m["kind"]))
 
     @app.get("/files/{material_id}")
@@ -1256,8 +1265,10 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             raise _NotFound("That guide was not found.")
         course = store.course(g["course_id"])
         graph = concept_graph(g["data"]) if g["kind"] == "concept_map" else None
-        smap = {s.get("n", i): s for i, s in enumerate(g.get("sources") or [], start=1)}
-        return page(request, "guide.html", g=g, course=course, accent=course_color(course), view=guide_view(g),
+        smap = {s.get("n", i): s for i, s in enumerate(enrich_sources(store, g.get("sources")), start=1)}
+        tree = bool(graph and not graph.get("empty"))
+        return page(request, "guide.html", g=g, course=course, accent=course_color(course),
+                    view=guide_view(g, store=store, tree_shown=tree),
                     graph=graph, smap=smap, kind_label=GUIDE_KINDS.get(g["kind"], g["kind"]))
 
     @app.get("/guides/{guide_id}/delete", response_class=HTMLResponse)

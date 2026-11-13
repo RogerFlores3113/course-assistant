@@ -54,7 +54,7 @@ def test_not_covered_note_p4(ready):
     assert "Your saved materials don&#39;t cover this. Parts below come from general knowledge." in r.text
     r2 = page(ready, [{"kind": "text", "md": "Fine [1].", "cites": [1]}])
     assert "cover this" not in r2.text
-    r3 = page(ready, [{"kind": "text", "md": "Fine [1].", "cites": [1]}], data={"not_covered": True})
+    r3 = page(ready, [{"kind": "text", "md": "Fine.", "cites": []}], data={"not_covered": True})
     assert "cover this." in r3.text and "general knowledge" not in r3.text  # no outside content: no extra sentence
 
 
