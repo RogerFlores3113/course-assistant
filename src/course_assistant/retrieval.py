@@ -66,6 +66,9 @@ SYNONYMS: dict[str, list[str]] = {
     "due": ["deadline", "submit", "date"],
     "late": ["penalty", "extension"],
     "code": ["function", "julia", "python", "loop"],
+    "exchang": ["swap", "swaps", "permutation"],
+    "swap": ["exchange", "permutation"],
+    "permut": ["swap", "exchange"],
     "dilut": ["molarity", "concentration"],
     "molar": ["concentration", "solution", "moles", "liter"],
     "empir": ["formula", "percent", "composition"],
@@ -164,6 +167,9 @@ def _filters(course_id: int, kinds, material_ids, exclude_graded) -> tuple[str, 
         params.extend(int(i) for i in material_ids)
     else:
         sql += " AND (m.duplicate_of IS NULL OR m.duplicate_of = 0)"  # a copy of another saved file
+        # a README is a listing of other files: it never ranks as a source unless asked for by id
+        sql += (" AND lower(COALESCE(m.original_name, '')) NOT IN "
+                "('readme', 'readme.md', 'readme.txt', 'readme.markdown', 'readme.rst')")
     if exclude_graded:
         sql += (" AND m.graded = 0 AND c.material_id NOT IN "
                 "(SELECT material_id FROM graded_items WHERE material_id IS NOT NULL)")
@@ -1152,6 +1158,8 @@ def search(store, course_id: int, query: str, *, limit: int = 8, kinds: list[str
     merged = _round_robin(lanes, limit, [])
     if intent["this_term"] and (not kinds or "syllabus" in kinds) and not material_ids:
         merged = _with_syllabus(store, course_id, query, merged, limit, exclude_graded)
+    if not kinds and not material_ids and is_comparison(query, intent):
+        merged = _comparison_fill(store, course_id, query, merged, limit, exclude_graded, intent)
     if not lead:
         return merged
     kept = [_shingles(s["text"]) for s in lead]
@@ -1170,6 +1178,242 @@ def search(store, course_id: int, query: str, *, limit: int = 8, kinds: list[str
         out.append(s)
         seen.add(s["chunk_id"])
     return out[:limit]
+
+
+_COMPARE_RX = re.compile(r"\b(compar\w*|vs\.?|versus|differ\w*|different(?:ly)?|changed?|same|unlike|than)\b", re.I)
+_ASSIGNMENT_TOPIC = re.compile(r"\b(essays?|papers?|assignments?|homework|problem sets?|psets?|projects?|labs?|grad\w+|late)\b",
+                               re.I)
+
+
+def is_comparison(query: str, intent: dict[str, Any] | None = None) -> bool:
+    """'exam dates last year vs this term', 'this term vs Fall 2023': a question that sets a past offering beside the
+    current term, so the passages of both sides are wanted."""
+    intent = intent or query_intent(query)
+    named = {t for t in (_term_key(m.group(0)) for m in _TERM_RX.finditer(query or "")) if t}
+    past = intent["past"] or intent["past_ref"]
+    return bool(past and (intent["this_term"] or len(named) >= 2 or _COMPARE_RX.search(query or "")))
+
+
+def _comparison_fill(store, course_id: int, query: str, merged: list[Source], limit: int, exclude_graded: bool,
+                     intent: dict[str, Any]) -> list[Source]:
+    """Make sure a comparison question has passages from the past offering AND from this term: the past offering's
+    sections on the topic ('Exam 1', 'Exam 2', 'Exam 3'), this term's syllabus rows and files on the same topic, and this
+    term's policies when the topic is graded work. The rest of the room goes to the ordinary results."""
+    stripped = _THIS_TERM.sub(" ", _TERM_RX.sub(" ", query))
+    stripped = _PAST_REF.sub(" ", stripped)
+    stripped = _COMPARE_RX.sub(" ", re.sub(r"\b(offering|since|whether|term|semester|year)\b", " ", stripped, flags=re.I))
+    nq = normalize_query(stripped)
+    if not nq["core"] or limit < 4:
+        return merged
+    sint = {**query_intent(stripped), "past": intent["past"], "past_ref": intent["past_ref"]}
+    topic = {_stem(t) for t in nq["strong"] if t not in _DATE_WORDS and t not in _GENERIC_TOPIC and not t.isdigit()
+             and t not in _SEASONS_WORDS}
+
+    def about(r: Source) -> bool:
+        head = {_stem(w) for w in _words(r["heading"] + " " + r["material_title"])}
+        return bool(topic & head) or not topic
+
+    def usable(r: Source) -> bool:
+        return not is_title_only(r["text"], r["heading"]) and not is_header_chunk(r["text"], r["material_title"]) \
+            and not is_manifest_noise(r["text"])
+
+    try:
+        pe, pp = _filters(course_id, ["past_offering"], None, exclude_graded)
+        named = _named_offerings(store, query, pe, pp)
+        if named:
+            pe += f" AND c.material_id IN ({','.join(str(int(i)) for i in named)})"
+        kinds = [r["kind"] for r in store._rows("SELECT DISTINCT kind FROM materials WHERE course_id = ?", (course_id,))
+                 if r["kind"] != "past_offering"]
+        te, tp = _filters(course_id, kinds, None, exclude_graded) if kinds else ("", [])
+        past = [r for r in _search_lane(store, course_id, stripped, sint, pe, pp, 8) if usable(r)]
+        this = [r for r in _search_lane(store, course_id, stripped, {**sint, "past": False, "past_ref": False},
+                                        te, tp, 8) if usable(r)] if kinds else []
+        policy: list[Source] = []
+        if kinds and _ASSIGNMENT_TOPIC.search(stripped):
+            for r in store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE m.kind = 'syllabus' "
+                                 f"AND (lower(c.heading) LIKE '%polic%' OR lower(c.heading) LIKE '%late%'){te} ORDER BY c.id LIMIT 3",
+                                 tp):
+                policy.append(_source(r, 0.0))
+    except Exception:  # a comparison fill must never break search
+        return merged
+    n_past = min(4, max(2, limit // 2)) if past else 0
+    n_this = min(3, limit - n_past) if this else 0
+    def choose(rows: list[Source], n: int) -> list[Source]:
+        on = [r for r in rows if about(r)]
+        return (on or rows[:2])[:n]  # only passages on the topic; the best two when none carries its words
+
+    past_pick, this_pick = choose(past, n_past), choose(this, n_this)
+    pick: list[Source] = []
+    for a, b in zip(this_pick + [None] * 4, past_pick + [None] * 4):  # this term and the past offering side by side
+        for r in (a, b):
+            if r is not None and r["chunk_id"] not in {x["chunk_id"] for x in pick}:
+                pick.append(r)
+    if policy and not any(r["chunk_id"] == policy[0]["chunk_id"] for r in pick):
+        pick.append(policy[0])
+    pick = pick[:limit]
+    have = {r["chunk_id"] for r in pick}
+    rest = [r for r in merged if r["chunk_id"] not in have and not (
+        r["material_kind"] == "past_offering" and past_pick and not about(r))]
+    return (pick + rest)[:limit]
+
+
+
+# ---------------------------------------------------------------- graded item topics (contract 1)
+_TOPIC_KINDS = ("slides", "recording", "textbook", "reading", "notes", "lecture_notes", "website", "other")
+_ITEM_NOISE = frozenset("""problem problems question questions points point part parts find found number numbers value values
+compute calculate determine show explain give state use using write describe obtain make let consider following given each
+both what which when how many much does would could should will must need needed also then than that this these those
+with without from into over under about between during after before using answer answers solve solution solutions
+equation equations system systems matrix matrices vector vectors forces force force one two three four five six seven
+eight nine ten third first second non ones explicitly forming back set sets exercise exercises example prove proof why because whether true false list name""".split())
+# units and notations that name the concept the words do not: '0.350 M' is a molarity, 'g/mol' a molar mass
+_UNIT_HINTS = ((re.compile(r"\d\s*M\b(?!\w)"), ("molarity", "molar")), (re.compile(r"mol\s*/\s*L\b", re.I), ("molarity",)),
+               (re.compile(r"\bg\s*/\s*mol\b", re.I), ("molar", "mass")), (re.compile(r"\bppm\b", re.I), ("ppm",)),
+               (re.compile(r"\bpH\b"), ("pH",)))
+_CODE_MARKS = re.compile(r"```|\busing\s+\w+\b|\bfunction\s+\w+\(|\bimport\s+\w+|\bplot\(|\bend\s*$|[;{}]\s*$", re.M)
+
+
+_SWAP_KEYS = frozenset({"exchang", "swap", "permut", "dilut", "molar", "empir"})
+
+
+def tstem_set(terms: list[str]) -> set[str]:
+    return set(terms)
+
+
+def _is_code_chunk(r: dict[str, Any]) -> bool:
+    """A code listing (a notebook cell, a program): not a passage that teaches a method."""
+    text = r["text"] or ""
+    if re.match(r"\s*```", text) or re.search(r"(?i)\bcode\b", r["heading"] or "") and "```" in text:
+        return True
+    if len(text.split()) < 160 and re.search(r"(?i)\b(?:julia|python|matlab|jupyter|pluto)\s+(?:notebook|code|cell|script)\b", text):
+        return True  # a line that only points at a notebook
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    fenced, inside = 0, False
+    for ln in lines:
+        if ln.strip().startswith("```"):
+            inside = not inside
+            fenced += 1
+        elif inside:
+            fenced += 1
+    return fenced / len(lines) >= 0.5 or sum(1 for ln in lines if _CODE_MARKS.search(ln)) / len(lines) >= 0.5
+
+
+def _item_concepts(item: dict[str, Any]) -> tuple[list[str], list[tuple[str, str]], set[str]]:
+    """(concept words, adjacent word pairs, notation-implied words) of a graded item: what it is about, without its
+    numbers, its givens or the words every problem uses."""
+    text = f"{item.get('label') or ''} {item.get('body') or ''}"
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"^#+\s*Problem\s*\d+[^\n]*", " ", text, flags=re.I | re.M)
+    hints: list[str] = []
+    for rx, words in _UNIT_HINTS:
+        if rx.search(text):
+            hints += list(words)
+    words: list[str] = []
+    pairs: list[tuple[str, str]] = []
+    prev = ""
+    for raw in re.findall(r"[A-Za-z][A-Za-z'\-]*|[.;:?!(){}\[\]=]|\d+(?:\.\d+)?", text):
+        if len(raw) == 1 and not raw.isalpha() or raw[0].isdigit():
+            prev = ""
+            continue
+        for w in re.split(r"[-']", raw.lower()):
+            if len(w) < 3 or w in STOPWORDS or w in _ITEM_NOISE:
+                prev = ""
+                continue
+            if w not in words:
+                words.append(w)
+            if prev and prev != w:
+                pairs.append((prev, w))
+            prev = w
+    return words, pairs, set(hints)
+
+
+def topic_sources(store, item: dict[str, Any], k: int = 6) -> list[Source]:
+    """Passages on the graded item's own topic, from materials that are not graded work: the lecture the item belongs to
+    first, then sections whose headings or definitions match the item's concept words ('row exchange', 'molarity').
+    Never the syllabus, a past offering, code listings, handouts, assignment files or scaffolding (summaries, glossary,
+    exercises). [] when nothing on the topic is saved."""
+    course_id = int(item.get("course_id") or 0)
+    if not course_id or k <= 0:
+        return []
+    words, pairs, hints = _item_concepts(item)
+    if not words and not hints:
+        return []
+    extra, fparams = _filters(course_id, list(_TOPIC_KINDS), None, True)
+    terms = list(dict.fromkeys([*hints, *words]))[:16]
+    alias: dict[str, set[str]] = {}  # a term and its stated equivalents ('exchange' is also 'swap')
+    for t in terms:
+        st_ = _stem(t)
+        alias[t] = {st_} | {_stem(v) for key, vals in SYNONYMS.items() if key in _SWAP_KEYS and (st_.startswith(key) or (
+            key.startswith(st_) and len(st_) >= 5)) for v in vals}
+    try:
+        weights = _term_weights(store, terms, extra, fparams)
+        pool: dict[int, dict[str, Any]] = {}
+        fts_terms = list(dict.fromkeys([*terms, *(v for t in terms for v in alias[t] if v not in tstem_set(terms))]))
+        for r, _ in _fts_rows(store, " OR ".join(_fts_term(t) for t in fts_terms), extra, fparams, 400):
+            pool[r["id"]] = r
+        for t in fts_terms[:10]:  # a heading that names the concept is found even when its body is long
+            for r in store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id "
+                                 f"WHERE lower(c.heading) LIKE ?{extra} LIMIT 60", [f"%{t[:max(4, len(t) - 2)]}%", *fparams]):
+                pool.setdefault(r["id"], r)
+    except Exception:
+        return []
+    lecture_mats: set[int] = set()
+    if item.get("material_id"):  # the lecture the item's own file is linked to
+        gm = store.material(item["material_id"]) or {}
+        if gm.get("event_id"):
+            lecture_mats = {m["id"] for m in store.materials(course_id) if m.get("event_id") == gm["event_id"]}
+    wt = {t: weights.get(t, 0.5) ** 2 for t in terms}  # a word every passage carries ('elimination') counts for little
+    pair_list = [(a_, b_) for a_, b_ in dict.fromkeys(pairs) if a_ in alias and b_ in alias]
+    hint_stems = {_stem(h) for h in hints}
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for r in pool.values():
+        if (is_manifest_noise(r["text"]) or is_title_only(r["text"], r["heading"]) or is_scaffold_chunk(r["text"], r["heading"])
+                or is_header_chunk(r["text"], r["material_title"]) or _is_code_chunk(r) or _is_notes_chunk(r["text"])):
+            continue
+        hseq = [_stem(w) for w in _words(r["heading"])]
+        bseq = [_stem(w) for w in _words(r["text"])]
+        head, body = set(hseq), set(bseq)
+        sc = 0.0
+        for t in terms:
+            w = wt[t] * (1.6 if _stem(t) in hint_stems else 1.0)
+            if alias[t] & head:
+                sc += 3.0 * w
+            if alias[t] & body:
+                sc += 1.0 * w
+        for a_, b_ in pair_list:
+            w = (wt[a_] + wt[b_]) / 2
+            if any(hseq[i] in alias[a_] and hseq[i + 1] in alias[b_] for i in range(len(hseq) - 1)):
+                sc += 3.0 * w
+            elif any(bseq[i] in alias[a_] and bseq[i + 1] in alias[b_] for i in range(len(bseq) - 1)):
+                sc += 1.2 * w
+        if sc <= 0:
+            continue
+        if len(bseq) < 25:
+            sc *= 0.5
+        if r["material_id"] in lecture_mats:
+            sc += 2.0
+        if r["material_kind"] == "recording":
+            sc *= 0.8
+        scored.append((sc, r))
+    scored.sort(key=lambda x: (-x[0], x[1]["id"]))
+    if scored:  # passages far behind the best one are about something else
+        scored = [x for x in scored if x[0] >= 0.3 * scored[0][0]]
+    out: list[tuple[float, dict[str, Any]]] = []
+    per: dict[int, int] = {}
+    kept: list[set[str]] = []
+    for sc, r in scored:
+        if len(out) >= k:
+            break
+        sh = _shingles(r["text"])
+        if per.get(r["material_id"], 0) >= 3 or any(_near_duplicate(sh, o) or _contained(sh, o, 0.8) for o in kept):
+            continue
+        per[r["material_id"]] = per.get(r["material_id"], 0) + 1
+        kept.append(sh)
+        out.append((sc, r))
+    return [_source(r, sc) for sc, r in out]
+
 
 
 def _like_search(store, terms: list[str], extra: str, fparams: list[Any], limit: int):

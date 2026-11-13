@@ -449,10 +449,14 @@ def guide_view(guide: dict[str, Any], base_level: int = 2, *, store: Any = None,
     data = guide.get("data") if isinstance(guide.get("data"), dict) else {}
     saved = data.get("blocks") if isinstance(data.get("blocks"), list) else None
     mode = data.get("mode") if data.get("mode") in ("answer", "twin", "concepts") else None
-    return answer_view(guide.get("body_md", ""), guide.get("sources"), blocks=saved,
+    view = answer_view(guide.get("body_md", ""), guide.get("sources"), blocks=saved,
                        twin=guide.get("kind") == "twin", ai_app=guide.get("created_by") == "ai_app",
                        mode=mode, data=data, base_level=base_level, store=store,
                        course_id=guide.get("course_id"), question=guide.get("question") or "", tree_shown=tree_shown)
+    if guide.get("kind") not in ("answer", "twin"):  # a primer or a guide was not asked as a question
+        what = {"primer": "this primer", "missed": "this catch-up", "exam_guide": "this guide"}.get(guide.get("kind"), "this guide")
+        view["partly_covered_note"] = f"Part of {what} is not covered by your saved materials."
+    return view
 
 
 def _wrap(text: str, width: int) -> list[str]:

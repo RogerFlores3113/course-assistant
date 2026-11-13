@@ -542,13 +542,29 @@ def link_suggestions(store: Store, course_id: int, events: list[dict[str, Any]] 
     for m in store.materials(course_id):
         if not _usable(m) or m["kind"] not in _NOTE_KINDS or m.get("event_id") or m.get("lecture_date"):
             continue
-        ranked = sorted(((_title_score(m, e, common), e) for e in evs), key=lambda x: -x[0])
+        if _is_readme(m):
+            continue
+
+        def score(e):  # a lecture number in the name is a strong match; otherwise 2 or more shared content words
+            num = _lecture_number(e)
+            if num is not None and _name_has_number(m, num):
+                return 100
+            sc = _title_score(m, e, common)
+            return sc if sc >= 2 else 0
+
+        ranked = sorted(((score(e), e) for e in evs), key=lambda x: -x[0])
         if not ranked or ranked[0][0] < 1 or (len(ranked) > 1 and ranked[1][0] == ranked[0][0]):
             continue
-        score, e = ranked[0]
-        out.append({"material": m, "event": e, "score": score,
+        sc, e = ranked[0]
+        out.append({"material": m, "event": e, "score": sc,
                     "why": f"'{m['title']}' looks like {event_label(e)}"})
     return out
+
+
+def _is_readme(m: dict[str, Any]) -> bool:
+    """A README is a file listing, not notes for one lecture: never suggested or matched."""
+    name = re.sub(r"\.[a-z0-9]{2,4}$", "", str(m.get("original_name") or m.get("filename") or "").lower().rsplit("/", 1)[-1])
+    return name.strip() in ("readme", "read me", "read_me", "read-me")
 
 
 def _is_recording(m: dict[str, Any]) -> bool:
@@ -579,7 +595,7 @@ def lecture_materials(store: Store, course_id: int, ev: dict[str, Any]) -> list[
             add(m, f"dated {ev['date']}")
     num, words = _lecture_number(ev), _topic_words(ev)
     for m in mats:
-        if m["id"] in seen or (out and not _is_recording(m)):
+        if m["id"] in seen or (out and not _is_recording(m)) or _is_readme(m):
             continue
         if m.get("event_id") or (m.get("lecture_date") and m["lecture_date"] != ev["date"]):
             continue  # belongs to some other lecture
@@ -812,14 +828,23 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         gone = {x["event"]["id"] for x in suggestions}
         missing = [f"{event_label(l)} ({l['date']})" for l in lectures
                    if l["id"] not in gone and not lecture_materials(store, course_id, l)]
-        link_note = ("Matched by title, not linked: " + "; ".join(x["why"] for x in suggestions[:6]) +
-                     ". Link them to their lectures in Materials to make this certain.")
+        more = len(suggestions) - 4
+        link_note = ("Matched by title, not linked: " + "; ".join(x["why"] for x in suggestions[:4]) +
+                     (f"; and {more} more" if more > 0 else "") + ". Link them to their lectures in Materials to make this certain.")
     topics = [" ".join(x for x in (clean_title(e), e.get("topics", "")) if x) for e in lectures]
     topics_text = [t for t in topics if t] or [" ".join(x for x in (ev["title"], ev.get("topics", "")) if x)]
     scope_note = ""
+    graded_ids = {i.get("material_id") for i in store.graded_items(course_id) if i.get("material_id")}
+    graded_chosen = [m for m in chosen if m.get("graded") or m["id"] in graded_ids]
     if chosen:
         mats = chosen
         scope_note = "Limited to the materials you chose."
+        if graded_chosen:  # graded work is never a source, so a ticked handout adds nothing: say so
+            names = ", ".join(m["title"] for m in graded_chosen[:3])
+            scope_note += (f" {names} {'is' if len(graded_chosen) == 1 else 'are'} graded work, so "
+                           f"{'it adds' if len(graded_chosen) == 1 else 'they add'} nothing to this guide and "
+                           f"{'was' if len(graded_chosen) == 1 else 'were'} not used.")
+            mats = [m for m in chosen if m not in graded_chosen] or chosen
     elif in_window:
         mats = list(in_window.values())
         scope_note = f"Built from the materials saved for {'the lectures since ' + prev if prev else 'the course so far'}."

@@ -483,7 +483,7 @@ def link_to_lecture(store: Store, material_id: int) -> int | None:
 def delete_material(store: Store, material_id: int) -> int:
     """Delete a material and the calendar events its syllabus import created (events carry source_material_id and
     added_by = 'syllabus'; events the student added or edited by hand stay). Lectures linked to those events are
-    unlinked first. Returns how many events went with it."""
+    unlinked first. The graded items split from it go too (items added by hand stay). Returns how many events went with it."""
     m = store.material(material_id)
     if not m:
         return 0
@@ -493,6 +493,9 @@ def delete_material(store: Store, material_id: int) -> int:
         if other.get("event_id") in gone:
             store.update_material(other["id"], event_id=None)
     store.clear_syllabus_events(material_id)
+    for item in store.graded_items(m["course_id"]):  # the graded items made from this file go with it: re-adding it and
+        if item.get("material_id") == material_id:  # marking it graded again must not list every problem twice
+            store.delete_graded_item(item["id"])
     store.delete_material(material_id)
     return len(gone)
 

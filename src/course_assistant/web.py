@@ -1059,8 +1059,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             raise _NotFound("That material was not found.")
         return page(request, "confirm.html", title=f"Delete {m['title']}?", back=course_url(m["course_id"]),
                     action=f"/materials/{material_id}/delete", button="Delete it",
-                    message="This removes the material, its searchable text, the calendar dates it added and the saved "
-                            "original file from this computer. Guides and answers you already made stay, but their links to this material "
+                    message="This removes the material, its searchable text, the calendar dates it added, the graded items "
+                            "made from it and the saved original file from this computer. Guides and answers you already made stay, but their links to this material "
                             "will show \"source deleted\" instead of opening it. It cannot be undone.")
 
     @app.post("/materials/{material_id}/delete")

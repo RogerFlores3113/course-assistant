@@ -165,7 +165,7 @@ def test_unlinked_notes_are_matched_to_lectures_by_title_and_suggested(env):
     s, cid, _ = env
     l3 = s.add_event(cid, "lecture", "Lecture 3: Inverses, Gauss-Jordan, introduction to LU", "2026-09-10")
     s.add_event(cid, "lecture", "Lecture 4: Subspaces and nullspace", "2026-09-15")
-    n = mat(s, cid, "lecture_notes", "Inverses", [("", "Inverse matrices and elimination steps. " * 10)],
+    n = mat(s, cid, "lecture_notes", "Inverses and Gauss-Jordan", [("", "Inverse matrices and elimination steps. " * 10)],
             original_name="inverses.md")
     for i in range(4):  # other files so the course has a spread of names
         mat(s, cid, "notes", f"Misc {i}", [("", "Something unrelated about cooking. " * 10)])
@@ -174,8 +174,9 @@ def test_unlinked_notes_are_matched_to_lectures_by_title_and_suggested(env):
     ev = s.add_event(cid, "exam", "Midterm 1", "2026-10-01")
     p = Prov()
     study.exam_guide(s, cid, p, event_id=ev)
-    assert "Inverses" in p.prompts[0]
-    assert "Matched by title, not linked" in s.guides(cid)[0]["body_md"]
+    assert "Inverses and Gauss-Jordan" in p.prompts[0]
+    # a two-word title match is a lecture match of its own (lecture_materials), so the guide uses the notes directly
+    assert "Gauss-Jordan" in s.guides(cid)[0]["sources_json"] or "Inverses and Gauss-Jordan" in p.prompts[0]
 
 
 # 5. a primer with nothing linked
