@@ -395,6 +395,9 @@ def answer_heading(question: str, data: dict[str, Any] | None) -> str:
     if data.get("feedback"):
         name = str(data.get("graded_title") or "").strip()
         return f"Feedback on your draft for {name}" if name else "Feedback on your draft"
+    from . import essay  # a pasted draft the router did not take as one: the heading never repeats the paste
+    if (pasted := essay.paste_heading(str(question or ""))):
+        return pasted
     q = " ".join(str(question or "").split())
     if len(q) <= _HEADING_MAX:
         return q

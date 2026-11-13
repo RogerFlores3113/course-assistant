@@ -123,7 +123,7 @@ def test_guide_view_can_hide_ask_normally():
 def test_long_draft_question_makes_a_short_heading():
     long_q = "Here is my draft intro for Essay 1: " + "Eigenvectors matter because they make repeated multiplication simple. " * 6
     h = web_helpers.answer_heading(long_q, {})
-    assert len(h) <= 80 and h.endswith("...")
+    assert len(h) <= 80 and "Eigenvectors" not in h  # fx10: the heading names the request, it never repeats the paste
     assert web_helpers.answer_heading(long_q, {"feedback": True, "graded_title": "Essay 1"}) == "Feedback on your draft for Essay 1"
     assert web_helpers.answer_heading("What is a basis?", {}) == "What is a basis?"
     v = web_helpers.answer_view("x", [], question=long_q)
