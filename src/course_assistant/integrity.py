@@ -384,7 +384,14 @@ def _row_entries(seg: str, loose: bool = False) -> list[str]:
     return out if sum(1 for e in out if not _SYMBOL.match(e)) >= 2 else []
 
 
-_NAME_PREFIX = re.compile(r"^\s*(?:`|\$)*\s*[A-Za-z][A-Za-z0-9_]{0,15}\s*(?:=|:=|:)\s*(?=[-+\u2212\d.(])")
+# an answer written as "X = rows", "Result: X = rows", "Answer: rows", "X -> rows", "So U gives rows", "=> rows": the words and
+# arrows before the first row are a prefix, never a reason to skip the row
+_LEAD_WORDS = (r"(?i:(?:the\s+)?(?:final\s+answer|final|result|results|answer|answers|solution|so|thus|hence|therefore|then|now|"
+               r"we\s+get|you\s+get|get|gives|becomes|is|are|equals)\b[ \t]*[:,\-\u2013]*[ \t]*)*")
+_ARROWS = r"(?i:=|:=|:|->|=>|-->|==>|\u2192|\u21d2|\u27f9|\u2794|\bis\b|\bgives\b|\bbecomes\b|\bequals?\b)"
+ANSWER_PREFIX = (r"(?:`|\$)*[ \t]*" + _LEAD_WORDS + r"(?:(?:[A-Za-z][A-Za-z0-9_]{0,15}\b[ \t]*" + _ARROWS + r"|" + _ARROWS +
+                 r")[ \t]*(?:" + _LEAD_WORDS + r"))*")
+_NAME_PREFIX = re.compile(r"^\s*" + ANSWER_PREFIX + r"(?=[-+\u2212\d.(\[<])")
 
 
 def matrix_rows(text: str) -> list[list[str]]:
@@ -1676,7 +1683,7 @@ _NUMROW = r"-?(?:\d+/\d+|\d*\.?\d+)"
 _ROWSEP = r"(?:[ \t]*\|[ \t]*|[ \t]+)"  # entries of one row: spaces, or an augmented bar
 _SLASH_ROWS = re.compile(r"(?<![\w./])(" + _NUMROW + r"(?:" + _ROWSEP + _NUMROW + r")+)((?:[ \t]*[/;][ \t]*" + _NUMROW +
                          r"(?:" + _ROWSEP + _NUMROW + r")+)+)(?![\w./])")
-_LINE_ROW = re.compile(r"^[ \t>]*(?:[A-Za-z][A-Za-z0-9_]{0,15}[ \t]*(?::=|=|:)[ \t]*)?(?:[\[(|]\s*)?(" + _NUMROW + r"(?:[ \t,|&]+" + _NUMROW + r")+)\s*[\])|]?[ \t]*,?[ \t]*$")
+_LINE_ROW = re.compile(r"^[ \t>]*" + ANSWER_PREFIX + r"(?:[\[(|<]\s*)?(" + _NUMROW + r"(?:[ \t,|&]+" + _NUMROW + r")+)\s*[\])|]?[ \t]*,?[ \t]*$")
 
 
 def _bracket_rows(rows: list[list[str]]) -> str:
@@ -1737,6 +1744,26 @@ def _tables_to_brackets(t: str) -> str:
     return _SLASH_ROWS.sub(slash, t)
 
 
+_ANGLE_VEC = re.compile(r"[<\u27e8\u2329\u3008]\s*(-?[\d./]+(?:\s*[,;]\s*-?[\d./]+)+)\s*[>\u27e9\u232a\u3009]")
+
+# a number that counts something ("one unknown", "only one pivot", "1 solution", "two equations", "one at a time") is
+# prose, never a value of the problem
+_COUNT_NOUN = (r"(?:unknowns?|pivots?|solutions?|variables?|equations?|steps?|rows?|columns?|cols?|entr(?:y|ies)|components?|"
+               r"parameters?|constraints?|dimensions?|times?|ways?|cases?|degrees?|operations?|terms?|iterations?|elements?|"
+               r"vectors?|matri(?:x|ces)|systems?|lines?|planes?|values?|answers?|numbers?|things?|zeros?|nonzeros?|"
+               r"at\s+a\s+time|by\s+one|per\b)")
+_COUNT_MOD = r"(?:(?:more|other|free|extra|additional|nonzero|distinct|different|separate|independent|dependent|unique|"
+_COUNT_MOD += r"single|pivot|basic)\s+)*"
+_COUNT_PHRASE = re.compile(r"(?<![\w.])(?<![\d,;/\-]\s)(?<![\d,;/\-])(" + "|".join(sorted(_WORDNUM, key=len, reverse=True)) +
+                           r"|\d{1,2})(?![\d.]|\s*[,;/])(?=\s+" + _COUNT_MOD + _COUNT_NOUN + r"\b)", re.I)
+
+
+def blank_counts(text: str) -> str:
+    """Blank the number of 'one unknown', 'only one pivot', '1 solution', 'two equations' (same length): a number that
+    counts things is prose, not a value."""
+    return _COUNT_PHRASE.sub(lambda m: " " * len(m.group(0)), text or "")
+
+
 def _norm_hay(text: str) -> str:
     t = (text or "").replace("\u2212", "-").replace("\u2044", "/").replace("\u2215", "/").translate(_SUB_DIGITS)
 
@@ -1746,6 +1773,7 @@ def _norm_hay(text: str) -> str:
         return "[" + ", ".join("[" + ", ".join(c.strip() for c in r.split("&")) + "]" for r in rows) + "]"
 
     t = _ENV.sub(mat, t)
+    t = _ANGLE_VEC.sub(lambda m: "(" + m.group(1) + ")", t)  # <1, 1, 2> and \u27e81, 1, 2\u27e9 are tuples
     t = _tables_to_brackets(t)
     t = re.sub(r"<sub>(.*?)</sub>", r"\1", t, flags=re.I)
     t = re.sub(r"_\{?([A-Za-z0-9]+)\}?", r"\1", t)
@@ -1830,7 +1858,7 @@ class _KeyVal:
         m = re.match(r"^([A-Za-z][A-Za-z]*\d*(?:\([^)]*\))?)\s*(?:=|:|\u2248)\s*(.+)$", t, re.S)
         self.name = (re.sub(r"\(.*", "", m.group(1)).lower() if m else "")
         body = (m.group(2) if m else t).strip().rstrip(".")
-        self.kind, self.nums, self.rows, self.unit, self.formula = "text", [], [], "", ""
+        self.kind, self.nums, self.rows, self.unit, self.formula, self.sig = "text", [], [], "", "", 0
         if re.fullmatch(r"(?:[A-Z][a-z]?\d*){2,}", body) and re.search(r"\d", body):
             self.kind, self.formula = "formula", body
             return
@@ -1848,7 +1876,7 @@ class _KeyVal:
             return
         nm = _NUM.search(body)
         if nm and body[nm.end():].strip().split(" ")[0:1] is not None:
-            self.kind, self.nums = "num", [_canon(nm.group(0))]
+            self.kind, self.nums, self.sig = "num", [_canon(nm.group(0))], _sig(nm.group(0).replace(",", ""))
             rest = re.sub(r"^[\s^*x\u00d7\d.eE+-]*", "", body[nm.end():]).strip().split()
             u = rest[0].strip(".,;)").lower() if rest else ""
             self.unit = _UNIT_ALIASES.get(u, "")
@@ -1883,7 +1911,7 @@ class _Hay:
     """Everything key matching needs from one piece of text."""
 
     def __init__(self, text: str):
-        self.t = _blank_logistics(_strip_pct(_norm_hay(text)))
+        self.t = _blank_logistics(_strip_pct(_norm_hay(blank_counts(text))))
         self.low = self.t.lower()
         self.nums = [(m.start(), _canon(m.group(0)), m.end()) for m in _NUM.finditer(self.t)]
         for m in _COMMA_DEC.finditer(self.t):  # 5,11 g (a decimal comma): also read it as 5.11
@@ -1920,6 +1948,8 @@ class _Hay:
         for m in re.finditer(r"\brows?\s*\d+\s*[:=]\s*((?:-?\d[\d./]*[\s,;]*)+)", self.t, re.I):  # "row 1: 1 0 0"
             self.seqs.append((m.start(1), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(1))]))
         for m in re.finditer(r"(?<![\w.])-?\d[\d./]*(?:\s*(?:[,;:]|\band\b)\s*-?\d[\d./]*){2,}", self.t):  # 3 : 4 : 3, 2, -8 and 1
+            self.seqs.append((m.start(), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(0))]))
+        for m in re.finditer(r"(?<![\w.\-/])-?\d[\d./]*(?:[ \t]+-?\d[\d./]*){2}(?![\w./]|[ \t]+-?\d)", self.t):  # 1 1 2
             self.seqs.append((m.start(), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(0))]))
         # a flat run of entries with spaces or commas between them ("1 0 0 2 1 0 -1 -1 1 and 2 1 1 0 -8 -2 0 0 1")
         for m in re.finditer(r"(?<![\w.])-?\d[\d./]*(?:(?:\s*(?:[,;:|]|\band\b)\s*|\s+)-?\d[\d./]*){3,}", self.t):
@@ -1993,9 +2023,9 @@ class _Hay:
         return bool(name) and bool(re.search(r"(?<![a-z0-9_])" + re.escape(name) + r"\s*" + _CONNECT + r"\s*[\[(]?\s*$",
                                              self.low[max(0, pos - 40):pos]))
 
-    def unit_num(self, k: str, unit: str) -> bool:
+    def unit_num(self, k: str, unit: str, ksig: int = 0) -> bool:
         for st, c, en in self.nums:
-            if num_eq(c, k):
+            if num_eq(c, k) and not _thin(self.t[st:en], ksig):
                 m = re.match(r"\s*([A-Za-z]+)", self.t[en:])
                 if m and _UNIT_ALIASES.get(m.group(1).lower()) == unit:
                     return True
@@ -2019,6 +2049,13 @@ def _seq_match(h: _Hay, key: list[str], name: str) -> bool:
     return False
 
 
+def _thin(raw: str, ksig: int) -> bool:
+    """A decimal the reply writes with fewer than 3 significant figures against a key value written with 3 or more
+    ('0.010 M' against 0.0100 M, '0.1 M' against 0.100 M): a coarser value is the same number only by rounding, so it is
+    not evidence on its own."""
+    return ksig >= 3 and "." in raw and "/" not in raw and _sig(raw.replace(",", "").strip()) <= 2
+
+
 def _hit_one(h: _Hay, kv: _KeyVal) -> bool:
     if kv.kind == "formula":
         parts = re.findall(r"[A-Z][a-z]?\d*", kv.formula)
@@ -2033,10 +2070,10 @@ def _hit_one(h: _Hay, kv: _KeyVal) -> bool:
         k = kv.nums[0]
         if kv.name and h.named(kv.name, k):
             return True
-        if kv.unit and h.unit_num(k, kv.unit):
+        if kv.unit and h.unit_num(k, kv.unit, kv.sig):
             return True
         if _strong(k):
-            return any(num_eq(c, k) and (_sig(c) >= 2) for _, c, _ in h.nums)
+            return any(num_eq(c, k) and (_sig(c) >= 2) and not _thin(h.t[st:en], kv.sig) for st, c, en in h.nums)
     return False
 
 
@@ -2185,10 +2222,10 @@ _ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "last
 
 
 class _Entry:
-    __slots__ = ("name", "val", "unit", "derived", "word")
+    __slots__ = ("name", "val", "unit", "derived", "word", "sig")
 
-    def __init__(self, name: str, val: str, unit: str = "", derived: bool = False, word: str = ""):
-        self.name, self.val, self.unit, self.derived, self.word = name, val, unit, derived, word
+    def __init__(self, name: str, val: str, unit: str = "", derived: bool = False, word: str = "", sig: int = 0):
+        self.name, self.val, self.unit, self.derived, self.word, self.sig = name, val, unit, derived, word, sig
 
 
 class _Comp:
@@ -2282,7 +2319,7 @@ def _build_index(raws: tuple[str, ...], body: str) -> _Index:
             if nm == "u" and len(kv.rows) >= 3 and all(len(r) == len(kv.rows) for r in kv.rows):
                 ix.comps.append(_Comp("diag", "vec", [[kv.rows[i][i] for i in range(len(kv.rows))]]))
         elif kv.kind == "num":
-            ix.entries.append(_Entry(nm, kv.nums[0], kv.unit))
+            ix.entries.append(_Entry(nm, kv.nums[0], kv.unit, sig=kv.sig))
             if nm:
                 explicit[nm] = kv.nums[0]
             for v2, u2 in _conversions(kv.nums[0], kv.unit):
@@ -2413,7 +2450,7 @@ def _is_const(n: str) -> bool:
 
 
 def _reply_numbers(text: str) -> list[str]:
-    t = _LABEL_NUM.sub(" ", _blank_logistics(_strip_pct(_norm_hay(text))))
+    t = _LABEL_NUM.sub(" ", _blank_logistics(_strip_pct(_norm_hay(blank_counts(text)))))
     return [_canon(m.group(0)) for m in _NUM.finditer(t)]
 
 
@@ -2437,7 +2474,15 @@ def _stated(v: list[str], given: set[tuple[str, ...]]) -> bool:
     return any(tuple(g[i:i + n]) == tuple(v) for g in given for i in range(len(g) - n + 1))
 
 
-def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None) -> bool:
+# words that make a bare run of numbers an answer: 'the solution is (1, 1, 2)', 'Answer: 1 1 2', 'x is the vector (..)'
+_ANSWER_NEAR = re.compile(r"(?<![a-z0-9_])(?:solutions?|answers?|results?|final|key|ans|x|unknowns?|entries\s+of\s+x)(?![a-z0-9_])")
+
+
+def _near_answer(h: "_Hay", pos: int) -> bool:
+    return bool(_ANSWER_NEAR.search(h.low[max(0, pos - 60):pos]))
+
+
+def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None, loose: int = 0) -> bool:
     """given: the vectors and rows the problem itself states; a whole value or a piece of one that the problem gives
     ('A has rows (2,1,3)', which is also row 1 of U) is data, never a leaked value."""
     given = given or set()
@@ -2448,7 +2493,10 @@ def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None)
     if comp.kind == "vec":
         if _stated(comp.rows[0], given):
             return False
-        return any(_vec_hit(s, comp.rows[0], True, bool(comp.name) and h.named_before(comp.name, p)) for p, s in live)
+        # loose: the chat or the text is already about this item, so an exact-order run equal to the vector is the vector in
+        # any rendering (1 = anywhere in the text when the chat is touched, 2 = only right after 'solution', 'answer' ...)
+        return any(_vec_hit(s, comp.rows[0], True, (bool(comp.name) and h.named_before(comp.name, p)) or loose == 2
+                            or (loose == 1 and _near_answer(h, p))) for p, s in live)
     if comp.kind == "sys":  # a row of the triangular system that the problem does not state itself
         return any(sum(1 for x in r if x not in ("0", "-0")) >= 2 and not _stated(r, given)
                    and any(_vec_hit(sq, r, True) for sq in seqs) for r in comp.rows)
@@ -2460,7 +2508,14 @@ def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None)
         return True  # the whole matrix, rows as they stand
     if any(_vec_hit(s, flat, True) for s in seqs):
         return True
-    pieces = list(dict.fromkeys(tuple(v) for v in [*rows, *cols] if not _stated(v, given)))
+    # a 3 by 3 or larger factor: two of its rows that the problem does not state, in place, are the answer even when every
+    # entry is small ('U = 2 1 1 / 0 -8 -2 / 0 0 1' with row 1 given, or just its last two rows)
+    if len(rows) >= 3 and all(len(r) >= 3 for r in rows):
+        fresh = [r for r in rows if not _stated(r, given)]
+        there = [r for r in fresh if any(len(s) == len(r) and all(num_eq(a, b) for a, b in zip(s, r)) for s in [x for _, x in h.seqs])]
+        if len(there) >= 2 and any(x not in _TRIV for r in there for x in r):
+            return True
+    pieces = list(dict.fromkeys(tuple(v) for v in [*rows, *cols] if not _stated(v, given))) 
     got = [v for v in pieces if any(_vec_hit(s, list(v), False) for s in seqs)]
     # one row or column of small whole numbers is a coincidence (a twin's b = (1, 2, 3) is a column of any 3x3 factor):
     # it counts with a distinctive entry, or when a second row or column of the same matrix is there too
@@ -2509,11 +2564,11 @@ def _bound_small(h: "_Hay", ix: _Index, reply: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _bound_names(h: "_Hay", ix: _Index) -> list[str]:
+def _bound_names(h: "_Hay", ix: _Index, data: frozenset | set = frozenset()) -> list[str]:
     """The names of the key that the reply gives their value ('d = 10, z = -2, y = 1'), whatever the size of the value."""
     out = []
     for e in ix.entries:
-        if e.name and e.unit != "atom" and h.named(e.name, e.val) and not _is_const(e.val):
+        if e.name and e.unit != "atom" and h.named(e.name, e.val) and not _is_const(e.val) and e.val not in data:
             out.append(e.name)
     return list(dict.fromkeys(out))
 
@@ -2523,6 +2578,8 @@ def _entry_in(h: "_Hay", e: _Entry) -> bool:
     0.1000 L; a bare number matches it only when it is a precise decimal or bound to the entry's own name."""
     for st, c, en in h.nums:
         if not num_eq(c, e.val):
+            continue
+        if _thin(h.t[st:en], e.sig) and not (e.name and h.named(e.name, e.val)):
             continue
         if not e.unit or e.unit == "atom":
             return True
@@ -2556,15 +2613,18 @@ def key_leak(reply, item=None, ctx=None):
     if not ix.entries and not ix.comps:
         return []
     h = _Hay(reply)
-    for comp in ix.comps:
-        if _comp_hit(h, comp, _given_seqs(item)):
-            return [comp.name or "value"]
     named, sticky = bool(c.get("named")), bool(c.get("sticky"))
+    loose = 2 if (c.get("vec") or sticky or (named and not c.get("guide"))) else (1 if named and c.get("small") else 0)
+    for comp in ix.comps:
+        if _comp_hit(h, comp, _given_seqs(item), loose):
+            return [comp.name or "value"]
     nums = [n for _, n, _ in h.nums]
     asked = c.get("asked") or ()
+    # data: numbers the cited materials give as constants (a molar mass, a gas constant): reference data, never a key value
+    data = {_canon(x) for x in numbers(" ".join(str(d) for d in (c.get("data") or ())))} if c.get("data") else set()
     seen: list[str] = []
     for e in ix.entries:
-        if e.unit == "atom" or not _distinct_val(e.val) or e.val in ix.given or e.val in seen or _is_const(e.val):
+        if e.unit == "atom" or not _distinct_val(e.val) or e.val in ix.given or e.val in seen or _is_const(e.val) or e.val in data:
             continue
         if any(num_eq(a, e.val) for a in asked):
             continue  # the student's own number, echoed back, is not a leaked value
@@ -2574,10 +2634,10 @@ def key_leak(reply, item=None, ctx=None):
             seen.append(e.val)
     if len(seen) >= 2 or (seen and (named or sticky or c.get("lone"))):
         return seen
-    bound = _bound_names(h, ix)
+    bound = _bound_names(h, ix, data)
     same = {}
     for e in ix.entries:  # one parameter given two of its key values ('d = 10 ... d = 11'): the whole list of its answers
-        if e.name and e.unit != "atom" and e.val not in _TRIV and not _is_const(e.val) and h.named(e.name, e.val):
+        if e.name and e.unit != "atom" and e.val not in _TRIV and not _is_const(e.val) and e.val not in data and h.named(e.name, e.val):
             same.setdefault(e.name, set()).add(e.val)
     for nm, vals in same.items():
         if len(vals) >= 2:
