@@ -363,12 +363,24 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                 and len(e["title"]) > 3 and not junk(e)]
         return past[-1] if past else None
 
+    def catch_up_options(cid: int, limit: int = 6) -> list[dict[str, Any]]:
+        """Past lectures nobody has caught up on yet (no "What did I miss" guide for them), newest first."""
+        today = date.today().isoformat()
+        try:
+            junk = _mod("study").is_junk_event
+        except (_Missing, AttributeError):
+            junk = lambda e: False  # noqa: E731
+        done = {g["event_id"] for g in store.guides(cid) if g.get("kind") == "missed" and g.get("event_id") is not None}
+        past = [e for e in merge_events(store.events(cid)) if e["kind"] == "lecture" and e["date"] <= today
+                and len(e["title"]) > 3 and not junk(e) and e["id"] not in done]
+        return list(reversed(past))[:limit]
+
     def course_card(c: dict[str, Any]) -> dict[str, Any]:
         cid = c["id"]
         today = date.today().isoformat()
         nxt = store.events(cid, today)[:1]
         return {**c, "accent": course_color(c), "next_event": nxt[0] if nxt else None,
-                "next_exam": next_exam(cid), "catch_up": latest_past_lecture(cid),
+                "next_exam": next_exam(cid), "catch_up_options": catch_up_options(cid),
                 "event_count": len(store.events(cid)), "guide_count": len(store.guides(cid)),
                 "due_cards": len(store.flashcards(cid, due_only=True))}
 
@@ -448,13 +460,13 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         """What is happening with a recording or photo, and what the student can do next."""
         waiting = m["status"] == "needs_transcription" or (j is not None and j["status"] in ("queued", "running", "error"))
         if not waiting and not (j and j["status"] == "done"):
-            return {"text": "", "next": "", "retry": False}
+            return {"text": "", "next": "", "retry": False, "poll": False}
         noun = "transcription" if is_media else "reading"
         if j is None:
             text = "Waiting to be transcribed" if is_media else "Photo of notes: waiting to be read"
             nxt = "Press Start now to begin. It can take a few minutes for a long recording." if is_media else (
                 "Press Start now to read it." if ai_connected else "Connect an AI first, then press Start now.")
-            return {"text": text, "next": nxt, "retry": True}
+            return {"text": text, "next": nxt, "retry": True, "poll": False}
         status = j["status"]
         pct = int(float(j.get("progress") or 0) * 100)
         if status == "queued":
@@ -467,15 +479,16 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             elif is_media and not whisper_available():
                 nxt = ("Next step: this computer cannot transcribe yet. Add a captions file (.vtt or .srt) for this "
                        "recording, or install the transcribe extra.")
-            return {"text": f"Waiting in line for {noun}", "next": nxt, "retry": True}
+            can_run = worker_alive() and ((ai_connected if not is_media else whisper_available()))
+            return {"text": f"Waiting in line for {noun}", "next": nxt, "retry": True, "poll": can_run}
         if status == "running":
             text = f"Transcribing, {pct}% done" if is_media else "Reading the photo"
-            return {"text": text, "next": "Keep the app open. Reload this page to see progress.", "retry": False}
+            return {"text": text, "next": "Keep the app open. This updates by itself.", "retry": False, "poll": True}
         if status == "done":
-            return {"text": "Transcription finished" if is_media else "Photo read", "next": "", "retry": False}
+            return {"text": "Transcription finished" if is_media else "Photo read", "next": "", "retry": False, "poll": False}
         note = (j.get("note") or "").strip()
         return {"text": f"{noun.capitalize()} did not finish" + (f": {note}" if note else ""),
-                "next": "Fix what the message says, then press Try again.", "retry": True}
+                "next": "Fix what the message says, then press Try again.", "retry": True, "poll": False}
 
     def material_rows(cid: int) -> list[dict[str, Any]]:
         jobs: dict[int, dict[str, Any]] = {}
@@ -491,11 +504,21 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             info = job_info(m, jobs.get(m["id"]), is_media, ai_connected)
             orig = by_id.get(m.get("duplicate_of")) if m.get("duplicate_of") else None
             rows.append({**m, "kind_label": MATERIAL_KINDS.get(m["kind"], m["kind"]), "job_text": info["text"],
-                         "job_next": info["next"], "job_retry": info["retry"], "is_media": is_media,
+                         "job_next": info["next"], "job_retry": info["retry"], "job_poll": info["poll"], "is_media": is_media,
                          "copy_of": {"id": orig["id"], "title": orig["title"]} if orig else None,
                          "lecture_link": (clean_event_title(ev_titles[m["event_id"]]["title"])
                                           if m.get("event_id") in ev_titles else "")})
         return rows
+
+    @app.get("/materials/{material_id}/status", response_class=HTMLResponse)
+    def material_status(request: Request, material_id: int):
+        """The little status block of one recording or photo. The Materials tab asks for it every few seconds while
+        the job is waiting or running, so the page updates without a reload."""
+        m = store.material(material_id)
+        if not m:
+            raise _NotFound("That material was not found.")
+        row = next((r for r in material_rows(m["course_id"]) if r["id"] == material_id), None)
+        return templates.TemplateResponse(request, "_job_status.html", {"m": row, "course": store.course(m["course_id"])})
 
     def graded_panel(cid: int) -> dict[str, Any]:
         """The graded items the app protects, so the student can check what was detected."""
@@ -551,6 +574,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             ctx["has_materials"] = bool(store.materials(cid))
             ctx["next_exam"] = next_exam(cid)
             ctx["due_cards"] = len(store.flashcards(cid, due_only=True))
+            ctx["graded_count"] = len(store.graded_items(cid)) + len([m for m in store.materials(cid) if m.get("graded")])
             ctx["all_cards"] = len(store.flashcards(cid))
             opts = getattr(_safe_mod("study"), "study_form_options", None)
             if callable(opts):
@@ -1363,10 +1387,15 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         return f"/flashcards/{course_id}" + ("?" + "&".join(q) if q else "")
 
     def card_topic(c: dict[str, Any]) -> str:
-        """The material (or deck) a card belongs to, for the weak-topic list."""
+        """What to restudy, for the weak-topic list: the source section heading when it has one (with the material in
+        brackets), otherwise the material or deck."""
         ch = store.chunk(c["chunk_id"]) if c.get("chunk_id") else None
         if ch:
-            return ch["material_title"]
+            head = re.sub(r"[#*_`]+", "", ch.get("heading") or "").strip()
+            title = ch["material_title"]
+            if head and head.lower() != title.lower():
+                return f"{head} ({title})"
+            return title
         return (c.get("deck") or "").strip() or "Typed or other cards"
 
     def card_source_href(c: dict[str, Any]) -> str:
@@ -1495,8 +1524,11 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
     @app.get("/flashcards/card/{card_id}/delete", response_class=HTMLResponse)
     def card_delete_confirm(request: Request, card_id: int):
         c = card_or_404(card_id)
-        return page(request, "confirm.html", title="Delete this flashcard?",
-                    message=f"The card \"{c['front'][:120]}\" will be deleted for good. Your materials are not touched.",
+        front = c["front"][:120]
+        if front.count("$") % 2:  # never cut a formula in half: drop the unfinished one
+            front = front[:front.rfind("$")].rstrip()
+        return page(request, "confirm.html", title="Delete this flashcard?", math=True,
+                    message=f"The card \"{front}\" will be deleted for good. Your materials are not touched.",
                     action=f"/flashcards/card/{card_id}/delete", button="Delete card",
                     back=f"/flashcards/{c['course_id']}", page_title="Delete flashcard")
 

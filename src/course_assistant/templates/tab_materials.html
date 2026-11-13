@@ -8,7 +8,7 @@
   <label>Files <input type="file" name="files" multiple required {{ fa('upload', 'files', 'fmts') }}></label>{{ fe('upload', 'files') }}
   <p id="fmts" class="muted small">Supported: {{ supported }}</p>
   <div class="two"><label>What are they? <select name="kind"><option value="">Let the app guess</option>{% for k, l in material_kinds.items() %}<option value="{{ k }}">{{ l }}</option>{% endfor %}</select></label>
-  <div><label>Which lecture is it for? <select name="event_id" aria-describedby="up-lec-help" {{ fa('upload', 'event_id', 'up-lec-help') }}><option value="">No particular lecture</option>{% for e in lectures or [] %}<option value="{{ e.id }}">{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>{{ fe('upload', 'event_id') }}</div></div>
+  <div><label>Which lecture is it for? <select name="event_id" {{ fa('upload', 'event_id', 'up-lec-help') }}><option value="">No particular lecture</option>{% for e in lectures or [] %}<option value="{{ e.id }}">{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>{{ fe('upload', 'event_id') }}</div></div>
   <div class="two"><div><label>Lecture date (optional) <input type="date" name="lecture_date" {{ fa('upload', 'lecture_date') }}></label>{{ fe('upload', 'lecture_date') }}</div>
   <p id="up-lec-help" class="muted small">Picking a lecture links the files to it, so "What did I miss" and the primers find them. It also fills in the date if you leave it empty.</p></div>
   <button class="btn" type="submit">Add files</button>
@@ -42,8 +42,7 @@
   {% if m.copy_of %}<br><span class="status-note"><strong>Copy of <a href="/read/{{ m.copy_of.id }}">{{ m.copy_of.title }}</a>.</strong> Answers use that one only: this copy is not searched or cited. {% if m.original_name and m.original_name.lower().endswith('.pdf') %}This copy is a PDF, so it has page numbers for citations. {% endif %}Keep this copy instead to search it (the other one is then skipped), press Not a copy to search both, or delete one.</span>
   <form method="post" action="/materials/{{ m.id }}/keep-copy" hx-post="/materials/{{ m.id }}/keep-copy" hx-target="#course-body" hx-swap="outerHTML" class="inline"><button class="btn small ghost" type="submit">Keep this copy<span class="visually-hidden"> {{ m.title }}</span></button></form>
   <form method="post" action="/materials/{{ m.id }}/not-copy" hx-post="/materials/{{ m.id }}/not-copy" hx-target="#course-body" hx-swap="outerHTML" class="inline"><button class="btn small ghost" type="submit">Not a copy<span class="visually-hidden"> {{ m.title }}</span></button></form>{% endif %}
-  {% if m.status == 'error' and not m.job_text %}<br><span class="status-note bad-t">Problem: {{ m.status_note or 'could not be read' }}</span>
-  {% elif m.job_text %}<br><span class="status-note">{{ m.job_text }}</span>{% if m.job_next %}<br><span class="muted small">{{ m.job_next }}</span>{% endif %}{% if m.status_note and m.status == 'needs_transcription' %}<br><span class="muted small">{{ m.status_note }}</span>{% endif %}{% endif %}</div>
+  {% include "_job_status.html" %}</div>
   <div class="actions">
     {% if m.job_retry %}<form method="post" action="/materials/{{ m.id }}/process" hx-post="/materials/{{ m.id }}/process" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" data-busy="Working on {{ m.title }}. A long recording can take several minutes."><button class="btn small" type="submit">{{ 'Try again' if m.job_text.endswith('finish') or 'did not finish' in m.job_text else 'Start now' }}<span class="visually-hidden"> {{ m.title }}</span></button></form>{% endif %}
     <a class="btn small ghost" href="/materials/{{ m.id }}/edit">Edit<span class="visually-hidden"> {{ m.title }}</span></a>

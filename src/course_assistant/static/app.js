@@ -90,7 +90,12 @@
     var el = requestElt(e);
     return (el && el.getAttribute && (el.getAttribute("hx-post") || el.getAttribute("hx-get"))) || "";
   }
+  // Background status polls (a photo or recording that is still being read) change one small block and must not
+  // lock forms, show the busy toast, move focus or change the page title.
+  var pollId = "";
+  function isPoll(e) { var el = requestElt(e); return !!(el && el.hasAttribute && el.hasAttribute("data-poll")); }
   document.body.addEventListener("htmx:beforeRequest", function (e) {
+    if (isPoll(e)) { pollId = requestElt(e).id || ""; return; }
     var elt = requestElt(e);
     var form = formOf(elt);
     if (form && form.getAttribute("data-inflight")) { e.preventDefault(); return; } // never send two AI calls
@@ -113,18 +118,22 @@
   });
   function failed(text) { announced = true; say(text, true); }
   document.body.addEventListener("htmx:responseError", function (e) {
+    if (isPoll(e)) { return; }
     var xhr = e.detail.xhr;
     if (xhr && xhr.responseText && xhr.responseText.indexOf('id="course-body"') !== -1) { return; }
     failed("Something went wrong (error " + (xhr ? xhr.status : "unknown") + "). Nothing was changed. Try again.");
   });
-  document.body.addEventListener("htmx:sendError", function () {
+  document.body.addEventListener("htmx:sendError", function (e) {
+    if (isPoll(e)) { return; }
     failed("Could not reach Course Assistant. Check that the app is still running. Nothing was saved.");
   });
-  document.body.addEventListener("htmx:timeout", function () {
+  document.body.addEventListener("htmx:timeout", function (e) {
+    if (isPoll(e)) { return; }
     failed("This is taking too long and was stopped. Try again.");
   });
   // Nothing is announced here. The result (or the error) is announced once, from afterSettle or from failed().
   document.body.addEventListener("htmx:afterRequest", function (e) {
+    if (isPoll(e)) { return; }
     var form = formOf(requestElt(e));
     lock(form, false);
     // lock() disabled the button the person pressed. If nothing was swapped in (network error, timeout, 5xx), focus
@@ -146,11 +155,22 @@
     var quotes = leadingNumber(scope.querySelector("[data-unverified-quotes]"));
     if (removed) { parts.push(plural(removed, "citation", "citations") + " removed"); }
     if (quotes) { parts.push(plural(quotes, "quote", "quotes") + " not found"); }
-    return lead + " " + parts.join(", ") + ".";
+    var partly = scope.querySelector("[data-partly-covered]") ? " Part of your question is not covered." : "";
+    return lead + " " + parts.join(", ") + "." + partly;
   }
   // After the course area is replaced: title, one announcement, and focus on what is new.
   // One rule for GET tab links: announce "<Tab> page" and focus the tab heading. Everything else: focus the result.
   document.body.addEventListener("htmx:afterSettle", function (e) {
+    if (pollId) {
+      // A status poll finished: say so once, when the job is no longer waiting.
+      var done = document.getElementById(pollId);
+      pollId = "";
+      if (done && !done.hasAttribute("data-poll")) {
+        var line = done.querySelector(".status-note");
+        say(line ? "Update: " + line.textContent.replace(/\s+/g, " ").trim() : "A recording or photo finished.");
+      }
+      return;
+    }
     var body = document.getElementById("course-body");
     if (!body || !body.hasAttribute("data-title")) { return; }
     var title = body.getAttribute("data-title");
@@ -196,6 +216,17 @@
     var msg = f.getAttribute("data-busy");
     if (msg) { showToast(msg); say(msg); }
     window.setTimeout(function () { lock(f, true); }, 0);
+  });
+
+  // Flashcards end states (round finished, no cards): the page is a fresh load, so put focus on the heading and say it.
+  window.addEventListener("load", function () {
+    var end = document.querySelector("[data-end-state]");
+    if (!end || location.hash || document.querySelector("main [aria-invalid='true'], main .flash")) { return; }
+    var h = end.querySelector("h2");
+    if (!h) { return; }
+    var next = h.parentNode.querySelector("p");
+    say((h.textContent + ". " + (next ? next.textContent : "")).replace(/\s+/g, " ").trim());
+    focusEl(h);
   });
 
   // ---- Flashcards ------------------------------------------------------------------------------------------

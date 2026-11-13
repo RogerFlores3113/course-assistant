@@ -26,13 +26,13 @@
 <p class="muted">Leave all unticked to use what you saved for the lectures since the last exam. If nothing you saved is linked to those lectures, the guide uses all your saved materials and says so.</p></fieldset>{% endif %}{% endcall %}
 {% call tool_form('map', 'Concept map', 'How the ideas connect.', 'Building your concept map.') %}
 <label>Topic (optional) <input name="topic" placeholder="All of the course"></label>{% endcall %}
-{% call tool_form('explain', 'Explain a topic', 'Re-explained at the depth you pick.', 'Writing the explanation.') %}
+{% call tool_form('explain', 'Explain a topic', 'Re-explained at the depth you pick.', 'Checking this against your graded work... Writing the explanation.') %}
 <label>Topic <input name="topic" required></label>
 <label>Depth <select name="depth">{% for v, l in depths %}<option value="{{ v }}" {% if v == 'standard' %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>{% endcall %}
-{% call tool_form('practice', 'Practice questions', 'Questions on a topic with worked answers. Graded topics get a twin problem.', 'Writing practice questions.') %}
+{% call tool_form('practice', 'Practice questions', 'Questions on a topic with worked answers. Graded topics get a twin problem.', 'Checking this against your graded work... Writing practice questions.') %}
 <label>Topic <input name="topic" required></label>
 <label>How many <input type="number" name="count" min="1" max="15" value="5"></label>{% endcall %}
-{% call tool_form('flashcards', 'Flashcards', 'Make cards from your materials. ' ~ due_cards ~ ' due now, ' ~ all_cards ~ ' in total.', 'Making flashcards.') %}
+{% call tool_form('flashcards', 'Flashcards', 'Make cards from your materials. ' ~ due_cards ~ ' due now, ' ~ all_cards ~ ' in total.', 'Checking this against your graded work... Making flashcards.') %}
 {% if study_opts is defined and study_opts and study_opts.materials %}<label>From this material <select name="material_id"><option value="">Search by topic instead</option>{% for m in study_opts.materials %}<option value="{{ m.id }}">{{ m.title }}</option>{% endfor %}</select></label>{% endif %}
 <label>Topic (optional) <input name="topic"></label>
 <label>How many <input type="number" name="count" min="1" max="40" value="12"></label>{% endcall %}
