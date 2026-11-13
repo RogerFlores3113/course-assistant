@@ -175,6 +175,7 @@ def test_connect_all_in_fake_home(home, monkeypatch, tmp_path):
     claude = connect.claude_config_path()
     claude.parent.mkdir(parents=True)
     (home / ".codex").mkdir()
+    (home / ".claude").mkdir()  # Claude Code installed in the fake home, so the test doesn't depend on PATH
     monkeypatch.setattr(connect, "skills_source_dir", lambda: make_skills(tmp_path / "skills"))
     results = connect.connect("all")
     assert [r["app"] for r in results] == ["Claude Desktop", "Codex", "Skills"]
