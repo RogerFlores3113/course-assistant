@@ -597,6 +597,10 @@ def _short_topic(it: dict[str, Any]) -> set[str]:
     return (_ct(it.get("body") or "") - ESSAY_GENERIC) - _SA_STOP
 
 
+_DEFINITION = re.compile(r"^(?:an?\s+|the\s+)?[\w'-]+(?:\s+[\w'-]+){0,3}\s+(?:is|are|means|refers\s+to|is\s+defined\s+as|"
+                         r"is\s+called|equals)\s+", re.I)
+
+
 def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = None) -> tuple[int, str]:
     """(shared topic words, sentence) when text reads as a finished or prescribed answer to a short-answer item, even
     when reworded: a sentence about the item that says what the answer says, or a short passage of declarative
@@ -617,6 +621,8 @@ def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = 
                 continue
             if sources is not None and _cite_numbers(sent) and cited_restatement(sent, sources) and not _PRESCRIBE.search(body):
                 continue
+            if _DEFINITION.match(body) and not _SA_ANSWER.search(body) and not _PRESCRIBE.search(body):
+                continue  # a plain definition ('Molarity is moles of solute per liter of solution') answers nothing
             keep.append((body, _ct(body) & topic))
     best = (0, "")
     for body, sh in keep:

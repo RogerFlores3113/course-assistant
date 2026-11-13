@@ -677,7 +677,7 @@ def score_text(q: _Text, b: _Text) -> float:
         return 0.0
     g = len(b.sig)
     matched = [n for n in b.sig if b.fm.get(n, {n}) & q.forms]
-    m = len(matched)
+    m = min(len(matched), len({qn for n in matched for qn, qf in q.fm.items() if qf & b.fm.get(n, {n})}))
     # distinct numbers of the QUESTION that match: 0.10 M matching both 0.100 M and 100.0 mL is one number, not two
     dm = len({qn for n in matched if _distinctive(n) for qn, qf in q.fm.items() if qf & b.fm.get(n, {n})})
     shared = len(q.tok & b.tok)
@@ -1001,7 +1001,10 @@ def _leaks_problem(r: _Text, b: _Text, reply: str, question_matches: bool = Fals
     if g == 0:
         return False
     matched = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
-    m, dm = len(matched), sum(1 for n in matched if _distinctive(n))
+    # one number of the reply that matches two forms of the same quantity ('100 g' vs 100.0 mL and 0.100 L) counts once
+    m = min(len(matched), len({rn for n in matched for rn, rf in r.fm.items() if rf & b.fm.get(n, {n})}))
+    dm = min(sum(1 for n in matched if _distinctive(n)),
+             len({rn for n in matched if _distinctive(n) for rn, rf in r.fm.items() if rf & b.fm.get(n, {n})}))
     if dm >= 2:
         return True
     if g >= 3 and m >= max(2, math.ceil(0.6 * g)) and dm >= 1:
@@ -1977,6 +1980,8 @@ def key_leak(reply, item=None, ctx=None):
             continue
         if any(num_eq(a, e.val) for a in asked):
             continue  # the student's own number, echoed back, is not a leaked value
+        if c.get("guide") and re.fullmatch(r"-?\d{1,2}", e.val):
+            continue  # a saved guide or card: a lone two-digit whole number ('Lectures 10 and 11') needs its name to count
         if _entry_in(h, e):
             seen.append(e.val)
     if len(seen) >= 2 or (seen and (named or sticky or c.get("lone"))):
@@ -2882,7 +2887,7 @@ def _text_key_item(items: list[dict[str, Any]], whole: str, text: str) -> dict[s
     for it in items:
         if not item_key(it):
             continue
-        n = len(key_leak(text, it, {"named": True, "small": touches(whole, it) or len(text.split()) <= 15}))
+        n = len(key_leak(text, it, {"named": True, "guide": True, "small": touches(whole, it) or len(text.split()) <= 15}))
         if n > top:
             best, top = it, n
     return best
@@ -2947,9 +2952,16 @@ def check_card(store, course_id: int, front: str, back: str) -> dict | None:
     """The graded item a flashcard gives away: one of its answer-key values, or its own numbers in the card (worked or
     not). Cards are short, so unlike check_guide this does not treat a brief back as an answer fragment."""
     text = f"{front}\n{back}"
-    k = _text_key_item(graded_view(store, course_id), text, text)
+    items = graded_view(store, course_id)
+    k = _text_key_item(items, text, text) or _text_key_item(items, text, f"{front} = {back}")
     if k:
         return _hit(k, "key")
+    for it in items:  # 'x3 -> 2', 'l21 -> 2', 'd for problem 1 -> ten': the front names an unknown, the back is its value
+        if item_key(it) and len(back.split()) <= 6:
+            named = question_names(it, front)
+            if named and (any(re.fullmatch(r"[a-z]\d{1,3}", n) for n in named) or touches(text, it)) \
+                    and component_leak(it, back, front):
+                return _hit(it, "key")
     hit = check_reply(store, course_id, front, text)
     if hit:
         return hit
