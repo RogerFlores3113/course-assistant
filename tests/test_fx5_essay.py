@@ -215,11 +215,10 @@ def test_flashcards_from_a_graded_essay_are_concept_only():
 CONCLUSION_TEXT = "In conclusion, the Founders' hope for a republic free of faction was undone by the party conflict of the 1790s."
 
 
-def test_flashcards_from_a_graded_problem_set_are_still_refused():
+def test_flashcards_from_a_graded_problem_set_are_concepts_only():  # cycle 6: no longer refused whole
     s, c = build()
     mid = next(m["id"] for m in s.materials(c) if "Problem Set 2" in m["title"] or "problem-set-2" in m["title"].lower())
-    with pytest.raises(ValueError):
-        study.make_flashcards(s, c, FakeProvider("[]"), material_id=mid)
+    assert len(study.make_flashcards(s, c, FakeProvider("[]"), material_id=mid)) == 0
 
 
 def test_mcp_flashcards_refuse_thesis_cards_but_take_concepts(mcp):

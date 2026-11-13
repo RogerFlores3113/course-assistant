@@ -566,12 +566,14 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         key_state = getattr(integ, "key_state", lambda i, connected: "on" if has_key(i) else ("failed" if connected else "off"))
         connected = provider() is not None
         states = [key_state(i, connected) for i in items]
-        on, failed = states.count("on"), states.count("failed")
+        final = states.count("final")
+        on, failed = states.count("on") + final, states.count("failed")  # "final values only" is on
         n = lambda k: f"{k} graded item{'' if k == 1 else 's'}"
+        on_text = f"on for {n(on)}" + (f" ({final} with final values only)" if final else "")
         if on == len(items):
-            return {"text": f"Answer check: on for {n(on)}", "tone": "ok-c"}
+            return {"text": f"Answer check: {on_text}", "tone": "ok-c"}
         if on:
-            return {"text": f"Answer check: on for {n(on)}, couldn't be made for {n(len(items) - on)} (Try again on the Materials tab)",
+            return {"text": f"Answer check: {on_text}, couldn't be made for {n(len(items) - on)} (Try again on the Materials tab)",
                     "tone": "warn-c"}
         if failed:
             return {"text": f"Answer check: couldn't be made for {n(failed)} (Try again on the Materials tab)", "tone": "warn-c"}
@@ -629,7 +631,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             if callable(opts):
                 ctx["study_opts"] = opts(store, cid)
         elif tab == "guides":
-            guides = store.guides(cid)
+            # a turn that was left out or failed leaves nothing worth keeping in the list (its Ask page still shows it)
+            guides = [g for g in store.guides(cid) if not (g.get("data") or {}).get("left_out")]
             ctx["guides"] = guides
             ctx["guide_groups"] = group_guides(guides)
         elif tab == "ask":
@@ -898,6 +901,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         it = graded_or_404(item_id)
         integ = _safe_mod("integrity")
         state = getattr(integ, "key_state", lambda i, connected: "off")(it, provider() is not None)
+        if (it.get("kind") or "problem") != "problem":
+            state = "none"  # proofs and essays have no numeric key
         return page(request, "graded_form.html", item={k: v for k, v in it.items() if k != "answer_key"},
                     course=require_course(it["course_id"]), page_title="Edit graded item", answer_check=state)
 

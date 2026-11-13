@@ -597,6 +597,10 @@ def _short_topic(it: dict[str, Any]) -> set[str]:
     return (_ct(it.get("body") or "") - ESSAY_GENERIC) - _SA_STOP
 
 
+_DEFINITION = re.compile(r"^(?:an?\s+|the\s+)?[\w'-]+(?:\s+[\w'-]+){0,3}\s+(?:is|are|means|refers\s+to|is\s+defined\s+as|"
+                         r"is\s+called|equals)\s+", re.I)
+
+
 def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = None) -> tuple[int, str]:
     """(shared topic words, sentence) when text reads as a finished or prescribed answer to a short-answer item, even
     when reworded: a sentence about the item that says what the answer says, or a short passage of declarative
@@ -617,6 +621,8 @@ def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = 
                 continue
             if sources is not None and _cite_numbers(sent) and cited_restatement(sent, sources) and not _PRESCRIBE.search(body):
                 continue
+            if _DEFINITION.match(body) and not _SA_ANSWER.search(body) and not _PRESCRIBE.search(body):
+                continue  # a plain definition ('Molarity is moles of solute per liter of solution') answers nothing
             keep.append((body, _ct(body) & topic))
     best = (0, "")
     for body, sh in keep:
@@ -783,6 +789,24 @@ def draft_request(question: str) -> str | None:
     return best or None
 
 
+_OWN_PROSE = re.compile(r"\b(i|my|me|i'm|i've|we|our|in this essay|this essay|this paper|in my|because|since|therefore|hence|"
+                        r"thus|which means|it follows)\b", re.I)
+_STATEMENT_OPEN = re.compile(r"^\W*(?:(?:\(?[a-z0-9]\)|\d+[.)])\s*)?(?:find|compute|calculate|solve|factor|use|determine|report|"
+                             r"evaluate|write down|apply|reduce|invert|diagonalize|record)\b", re.I)
+
+
+def problem_statement(text: str) -> bool:
+    """The text reads as a homework problem statement (imperative opener, or several matrix rows or equations) and not as
+    the student's own prose (first person, 'because', an argument)."""
+    t = (text or "").strip()
+    if not t or _OWN_PROSE.search(t):
+        return False
+    if _STATEMENT_OPEN.match(t):
+        return True
+    from . import integrity
+    return len(integrity.matrix_rows(t)) >= 2 or len(integrity.equation_rows(t)) >= 2
+
+
 def draft_item(question: str, candidates: list[dict[str, Any]], items: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The essay or proof item a pasted draft belongs to: the one the message names ('Problem 3'), else the one sharing
     the most topic words. A message that names a numeric item is not a draft of anything else."""
@@ -801,6 +825,8 @@ def draft_item(question: str, candidates: list[dict[str, Any]], items: list[dict
                     named = [cnd]
     pool = named or candidates
     if any(quote_ratio(draft, c.get("body") or "") >= 0.5 for c in pool):  # a pasted assignment, not a draft
+        return None
+    if problem_statement(draft):  # a pasted homework problem, never the student's own prose
         return None
     if not named:
         words = draft.split()

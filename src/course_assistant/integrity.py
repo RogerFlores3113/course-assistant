@@ -630,14 +630,56 @@ _POSSESSIVE = re.compile(r"\b(?:my|our|this|that)\s+(?:\w+\s+){0,3}(?:homework|p
                          r"hw|exercise|task|lab|quiz)\b", re.I)
 
 
+_SIZE = re.compile(r"\b(\d{1,2})\s*(?:by|x|\u00d7)\s*(\d{1,2})\b", re.I)
+_ROWS_PHRASE = re.compile(r"\brows?\s+((?:-?\d[\d./]*)(?:[\s,]+(?:and\s+)?-?\d[\d./]*)*)", re.I)
+
+
+def _stated_rows(text: str) -> list[list[str]]:
+    """The rows a sentence lists in words ('the matrix with rows 4 1 and 2 3' gives [[4, 1], [2, 3]])."""
+    t = _words_to_digits(text or "")
+    out: list[list[str]] = []
+    for m in _ROWS_PHRASE.finditer(t):
+        for seg in re.split(r"\s*(?:,|\band\b)\s*", m.group(1).strip()):
+            row = [_canon(x) for x in re.findall(r"-?\d[\d./]*", seg)]
+            if row:
+                out.append(row)
+    # rows listed with no commas ('4 1 and 2 3') are split on 'and'; keep the ones that make a rectangle
+    return out if out and len({len(r) for r in out}) == 1 and len(out) >= 2 else []
+
+
+def _stated_size(text: str) -> tuple[int, int] | None:
+    m = _SIZE.search(text or "")
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    rows = _stated_rows(text)
+    if not rows:
+        rows = [r for r in matrix_rows(text) if all(re.fullmatch(_NUM.pattern, x) for x in r)]
+        if len({len(r) for r in rows}) != 1:
+            return None
+    return (len(rows), len(rows[0])) if len(rows) >= 2 else None
+
+
+def _rows_conflict(q: str, b: str) -> bool:
+    """Both texts state a matrix (by its size or by listing its rows) and the two differ in size, or list rows that
+    share none: 'the matrix with rows 4 1 and 2 3' is not 'the 3 by 3 matrix with rows 2 1 1, 4 -6 0 and -2 7 2'."""
+    qs, bs = _stated_size(q), _stated_size(b)
+    if not qs or not bs:
+        return False
+    if qs != bs:
+        return True
+    qr, br = _stated_rows(q), _stated_rows(b)
+    return bool(qr and br and not any(r in br for r in qr))
+
+
 def score_text(q: _Text, b: _Text) -> float:
     """How strongly question text q is (a paraphrase, step or notation change of) graded text b. 0 = not related."""
     if not b.raw.strip():
         return 0.0
     g = len(b.sig)
     matched = [n for n in b.sig if b.fm.get(n, {n}) & q.forms]
-    m = len(matched)
-    dm = sum(1 for n in matched if _distinctive(n))
+    m = min(len(matched), len({qn for n in matched for qn, qf in q.fm.items() if qf & b.fm.get(n, {n})}))
+    # distinct numbers of the QUESTION that match: 0.10 M matching both 0.100 M and 100.0 mL is one number, not two
+    dm = len({qn for n in matched if _distinctive(n) for qn, qf in q.fm.items() if qf & b.fm.get(n, {n})})
     shared = len(q.tok & b.tok)
     score = 0.0
     if g >= 3 and m >= 3 and m / g >= 0.5:
@@ -657,7 +699,8 @@ def score_text(q: _Text, b: _Text) -> float:
             score = max(score, 0.9)
     if _POSSESSIVE.search(q.raw) and shared >= 3 and not (len(q.sig) >= 2 and m == 0):
         score = max(score, 0.55)
-    return max(score, _overlap_score(q.raw, b.raw))
+    ov = 0.0 if _rows_conflict(q.raw, b.raw) else _overlap_score(q.raw, b.raw)
+    return max(score, ov)
 
 
 def _doc_refs(text: str) -> set[tuple[str, str]]:
@@ -788,7 +831,16 @@ def names_item(text: str, item: dict[str, Any]) -> bool:
         return True
     if _row_hits(q, b) >= 1 and (b.mrows or b.erows):
         return True
-    return len(q.tok & b.tok) >= 3
+    shared = q.tok & b.tok
+    return len(shared) >= 3 and len(shared - METHOD_WORDS) >= 2  # method words alone never name an item
+
+
+# words that name a METHOD or a topic of the course, shared by many problems: a request that only repeats them
+# ('LU factorization with forward and back substitution') is a topic, not this item
+METHOD_WORDS = frozenset(_stem(w) for w in """factor factorization factorisation decomposition forward backward back substitution
+elimination gaussian jordan triangular lower upper matrix matrices system equation row column vector pivot permutation
+inverse determinant eigenvalue eigenvector solution solve molarity molar dilution concentration mass volume mole percent
+composition empirical molecular formula stoichiometry reagent yield limiting acid base""".split())
 
 
 def _own_ref(question: str, item: dict[str, Any]) -> bool:
@@ -879,7 +931,9 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
             scored.append((sc, it))
     essays = [i for i in items if i["kind"] == "essay" and (i.get("body") or "").strip()]
     written = [i for i in items if i["kind"] in ("essay", "proof") and (i.get("body") or "").strip()]
-    fb = essay.draft_item(question, written, items)  # a pasted draft of an essay, short answer or proof
+    numeric_hit = any(it["kind"] not in ("essay", "proof") and (it.get("body") or "").strip()
+                      and score_text(q, texts.get(it["id"]) or _Text(it.get("body") or "")) >= 0.6 for it in items)
+    fb = None if numeric_hit else essay.draft_item(question, written, items)  # a pasted draft of an essay or proof
     if fb:
         return dict(fb, source="material" if fb.get("material_id") else "item", score=0.95, intent="feedback")
     em = _essay_match(question, essays)
@@ -956,7 +1010,10 @@ def _leaks_problem(r: _Text, b: _Text, reply: str, question_matches: bool = Fals
     if g == 0:
         return False
     matched = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
-    m, dm = len(matched), sum(1 for n in matched if _distinctive(n))
+    # one number of the reply that matches two forms of the same quantity ('100 g' vs 100.0 mL and 0.100 L) counts once
+    m = min(len(matched), len({rn for n in matched for rn, rf in r.fm.items() if rf & b.fm.get(n, {n})}))
+    dm = min(sum(1 for n in matched if _distinctive(n)),
+             len({rn for n in matched if _distinctive(n) for rn, rf in r.fm.items() if rf & b.fm.get(n, {n})}))
     if dm >= 2:
         return True
     if g >= 3 and m >= max(2, math.ceil(0.6 * g)) and dm >= 1:
@@ -1153,13 +1210,13 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_T
         msgs = store.chat_messages(course_id, max(turns * 4 + 4, 80))
     except Exception:
         return None
-    item, since = None, 0
+    item, since, last = None, 0, None
     for m in msgs:
         if m.get("role") == "user":
             text = m.get("content") or ""
             found = match_graded(store, course_id, text)
             if found and found.get("id"):
-                item, since = found, 0
+                item, since, last = found, 0, found
             elif item is not None:
                 if names_item(text, item) or question_names(item, text):
                     since = 0
@@ -1170,7 +1227,10 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_T
         elif m.get("role") == "assistant":
             caught = _guide_item(store, course_id, m.get("guide_id"))
             if caught:
-                item, since = caught, 0
+                item, since, last = caught, 0, caught
+    if item is None and last is not None and last.get("kind") != "essay" and question \
+            and any(re.fullmatch(r"[a-z]\d{1,3}", n) or len(n) >= 4 for n in question_names(last, question)):
+        item = last  # a question that names one of its key entries ('l31', 'x3', 'ratio') touches the item again
     if item is None:
         return None
     if item.get("kind") == "essay" and _READING_REF.search(question or "") and not writing_request(question or ""):
@@ -1200,7 +1260,11 @@ def parse_key(raw: str | list | None) -> list[str]:
             vals = _json.loads(raw or "[]")
         except (TypeError, ValueError):
             return []
-    return [str(v).strip() for v in vals if isinstance(v, (str, int, float)) and str(v).strip()] if isinstance(vals, list) else []
+    if not isinstance(vals, list):
+        return []
+    # a key entry must hold a value: a lone word or letter ("x", "linear = yes") cannot be checked against anything
+    return [str(v).strip() for v in vals if isinstance(v, (str, int, float)) and str(v).strip()
+            and (re.search(r"\d", str(v)) or numbers(str(v)))]
 
 
 def item_key(item: dict[str, Any] | None) -> list[str]:
@@ -1317,6 +1381,28 @@ class _KeyVal:
 _COMMA_DEC = re.compile(r"(?<![\d,.(\[])(\d{1,3}),(\d{2,3})(?![\d,])(?!\s*[,;)\]]\s*-?\d)")
 
 
+def _solve_triangular(rows: list[list[str]]) -> list[list[str]]:
+    """The solution columns of a triangular system written as an augmented matrix [A | B] (A square, nonzero diagonal),
+    as canonical numbers. [] when it is not that."""
+    n, w = len(rows), len(rows[0])
+    vals = [[_val(x) for x in r] for r in rows]
+    if any(v is None for r in vals for v in r) or w <= n:
+        return []
+    upper = all(vals[i][j] == 0 for i in range(n) for j in range(min(i, n)))
+    lower = all(vals[i][j] == 0 for i in range(n) for j in range(i + 1, n))
+    if not (upper or lower) or any(vals[i][i] == 0 for i in range(n)):
+        return []
+    out = []
+    for k in range(n, w):
+        x: list[Fraction] = [Fraction(0)] * n
+        order = range(n - 1, -1, -1) if upper else range(n)
+        for i in order:
+            acc = vals[i][k] - sum(vals[i][j] * x[j] for j in range(n) if j != i and x[j] is not None)
+            x[i] = acc / vals[i][i]
+        out.append([_canon(str(f.numerator) if f.denominator == 1 else f"{f.numerator}/{f.denominator}") for f in x])
+    return out
+
+
 class _Hay:
     """Everything key matching needs from one piece of text."""
 
@@ -1347,6 +1433,7 @@ class _Hay:
                         singles = [(st, en, c[0])]
                     if len(singles) >= 2:
                         self.seqs.append((singles[0][0], [x[2] for x in singles]))
+        self._matrices(groups)
         for m in re.finditer(r"([A-Za-z]+\d*\s*=\s*-?[\d./]+(?:\s*(?:,|;|\band\b)\s*[A-Za-z]+\d*\s*=\s*-?[\d./]+)+)", self.t):
             vals = re.findall(r"=\s*(-?[\d./]+)", m.group(1))
             self.seqs.append((m.start(), [_canon(v) for v in vals]))
@@ -1356,6 +1443,53 @@ class _Hay:
             self.seqs.append((m.start(1), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(1))]))
         for m in re.finditer(r"(?<![\w.])-?\d[\d./]*(?:\s*(?:[,;:]|\band\b)\s*-?\d[\d./]*){2,}", self.t):  # 3 : 4 : 3, 2, -8 and 1
             self.seqs.append((m.start(), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(0))]))
+        # a flat run of entries with spaces or commas between them ("1 0 0 2 1 0 -1 -1 1 and 2 1 1 0 -8 -2 0 0 1")
+        for m in re.finditer(r"(?<![\w.])-?\d[\d./]*(?:(?:\s*(?:[,;:]|\band\b)\s*|\s+)-?\d[\d./]*){3,}", self.t):
+            self.seqs.append((m.start(), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(0))]))
+
+    def _matrices(self, groups: list[tuple[int, int, str]]) -> None:
+        """Whole matrices written as adjacent row groups (or 'a b; c d'): every column, the right block of an augmented
+        matrix and, for a triangular system written as [A | b], its solution become sequences too, so a key vector
+        is found whether it is written as a row, a column of a matrix, the right block of [I | X] or a solved system."""
+        mats: list[tuple[int, list[list[str]]]] = []
+        cur: list[list[str]] = []
+        first, last_end = 0, 0
+
+        def flush():
+            nonlocal cur
+            if len(cur) >= 2 and len({len(r) for r in cur}) == 1:
+                mats.append((first, cur))
+            cur = []
+        for st, en, g in groups:
+            g2 = g.replace("|", " ")
+            parts = g2.split(";") if ";" in g2 else [g2]
+            rows = [[_canon(x) for x in _toks(p)] for p in parts if _toks(p) and all(_NUM_FULL.match(x) for x in _toks(p))]
+            if len(rows) != len(parts):
+                flush()
+                continue
+            if len(parts) > 1:
+                flush()
+                cur, first = rows, st
+                flush()
+                continue
+            if cur and not re.sub(r"[\s,\\\[\]()]", "", self.t[last_end:st]):
+                cur.append(rows[0])
+            else:
+                flush()
+                cur, first = [rows[0]], st
+            last_end = en
+        flush()
+        for pos, rows in mats:
+            n, w = len(rows), len(rows[0])
+            for col in zip(*rows):
+                self.seqs.append((pos, list(col)))
+            if w > n:
+                for r in rows:
+                    self.seqs.append((pos, r[w - n:] if w - n >= 1 else r))
+                    self.seqs.append((pos, r[:n]))
+            sol = _solve_triangular(rows) if n >= 3 and w > n else []
+            for v in sol:
+                self.seqs.append((pos, v))
 
     def named(self, name: str, k: str) -> bool:
         pat = r"(?<![a-z0-9_])" + re.escape(name) + r"\s*" + _CONNECT + r"\s*(?:about\s+|approximately\s+|roughly\s+)?(-?\d[\d./]*)"
@@ -1701,7 +1835,15 @@ _QREF = re.compile(
     r"row|column|one|unknown|solution|pivot|multiplier|diagonal|element|value|number|answer)\b|\bwhich\b|"
     r"\bin\s+(?:milli|kilo|micro)?(?:gram|mole|liter|litre)s?\b|\bin\s+(?:mg|g|kg|mol|mmol|ml|l)\b|"
     r"\bhow\s+many\s+(?:\w+\s+)?(?:atoms?|carbons?|hydrogens?|oxygens?|nitrogens?|sulfurs?|moles?|grams?)\b|"
-    r"\bdiagonal\b|\bthe\s+(?:first|second|third|last)\b", re.I)
+    r"\bdiagonal\b|\bthe\s+(?:first|second|third|last)\b|"
+    r"\b(?:row|rows|column|col|entry|component|pivot|multiplier|step|equation)\s*#?\d+|\bmultipl(?:y|ied|ier|iers)\b|"
+    r"\bratio\b|\bhow\s+(?:much|many)\b[^.?!]{0,20}\b(?:times?|by)\b", re.I)
+# a bare ordinal ('third?', 'the last one'), 'and row 3?' or 'and <name>?': an elliptical follow-up
+_BARE_Q = re.compile(r"^\W*(?:(?:and|so|ok|okay|then|what\s+about|how\s+about)\s+)?(?:the\s+)?"
+                     r"(?:(?:first|second|third|fourth|fifth|last|next|middle|previous|one\s+(?:above|below))(?:\s+\w+)?|"
+                     r"(?:row|column|col|entry|component|pivot|step|part)\s*#?\d+|"
+                     r"[a-z]\d{0,3}|(?:the\s+)?(?:one|ones)\s+(?:above|below|after|before))\W*$", re.I)
+_AND_Q = re.compile(r"^\W*(?:and|so|then|what\s+about|how\s+about)\s+(?:the\s+)?[\w']+(?:\s+[\w']+){0,2}\W*$", re.I)
 _PRONOUN_Q = re.compile(r"^\W*(?:and\s+|so\s+|ok\s+|okay\s+)?(?:what(?:'s|\s+is|\s+are)\s+)?(?:it|that|this|them|those)\b", re.I)
 
 
@@ -1713,7 +1855,7 @@ def question_refs(item: dict[str, Any] | None, question: str) -> bool:
         return False
     if item is not None and question_names(item, q):
         return True
-    if _QREF.search(q):
+    if _QREF.search(q) or (len(q.split()) <= 6 and (_BARE_Q.search(q) or _AND_Q.search(q))):
         return True
     return len(q.split()) <= 12 and bool(_PRONOUN_Q.search(q))
 
@@ -1797,6 +1939,25 @@ def _bound_small(h: "_Hay", ix: _Index, reply: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def _entry_in(h: "_Hay", e: _Entry) -> bool:
+    """The reply holds the entry's value. An entry with a unit is unit-aware: '100 g' is not 100.0 mL and '0.10 M' is not
+    0.1000 L; a bare number matches it only when it is a precise decimal or bound to the entry's own name."""
+    for st, c, en in h.nums:
+        if not num_eq(c, e.val):
+            continue
+        if not e.unit or e.unit == "atom":
+            return True
+        m = re.match(r"\s*([A-Za-z]+)", h.t[en:])
+        unit = _UNIT_ALIASES.get(m.group(1).lower()) if m else None
+        if unit:
+            if unit == e.unit:
+                return True
+            continue
+        if "." in e.val and _sig(e.val) >= 3 or (e.name and h.named(e.name, e.val)):
+            return True
+    return False
+
+
 def key_leak(reply, item=None, ctx=None):
     """Does the reply give away the item's answer? Returns what matched (a list of names; [] when it is fine).
     ctx: named (the question pastes or names the item, or the text is a saved guide or card), sticky (the chat
@@ -1821,11 +1982,16 @@ def key_leak(reply, item=None, ctx=None):
             return [comp.name or "value"]
     named, sticky = bool(c.get("named")), bool(c.get("sticky"))
     nums = [n for _, n, _ in h.nums]
+    asked = c.get("asked") or ()
     seen: list[str] = []
     for e in ix.entries:
         if e.unit == "atom" or not _distinct_val(e.val) or e.val in ix.given or e.val in seen:
             continue
-        if any(num_eq(n, e.val) for n in nums):
+        if any(num_eq(a, e.val) for a in asked):
+            continue  # the student's own number, echoed back, is not a leaked value
+        if c.get("guide") and re.fullmatch(r"-?\d{1,2}", e.val):
+            continue  # a saved guide or card: a lone two-digit whole number ('Lectures 10 and 11') needs its name to count
+        if _entry_in(h, e):
             seen.append(e.val)
     if len(seen) >= 2 or (seen and (named or sticky or c.get("lone"))):
         return seen
@@ -1899,8 +2065,11 @@ def reply_ctx(item: dict[str, Any], question: str, reply: str, force_item: dict 
     forced = bool(force_item and force_item.get("id") == item.get("id"))
     sticky = forced and force_item.get("reason") == "sticky"
     named = names_item(question or "", item) or (forced and not sticky)
-    return {"named": bool(named), "sticky": bool(forced), "short": len(_CITE_STRIP.sub("", reply or "").split()) < 80,
-            "question_refs": question_refs(item, question or "")}
+    ctx = {"named": bool(named), "sticky": bool(forced), "short": len(_CITE_STRIP.sub("", reply or "").split()) < 80,
+           "question_refs": question_refs(item, question or "")}
+    if question and not claims_check(question, item):
+        ctx["asked"] = tuple(_reply_numbers(question))  # numbers the student typed are not leaked values
+    return ctx
 
 
 def avoid_names(item: dict[str, Any] | None) -> list[str]:
@@ -1913,8 +2082,9 @@ KEY_STRICT = ("Your last list had no named parts. Reply with ONLY a JSON list in
               "[\"x = (1, 1, 2)\", \"x1 = 1\", \"x2 = 1\", \"x3 = 2\", \"l21 = 3\", \"u22 = 2\", \"carbon = 3\"]. List every entry, "
               "name each one, no steps, no words outside the list.")
 KEY_SYSTEM = ("You are a careful solver for a study app. Solve the problem. Reply with ONLY a JSON list of every value "
-              "the problem asks for, the final ones and every intermediate one (each entry of a matrix, vector or "
-              "table, each multiplier, ratio and count), each NAMED and with units, such as [\"d = 4\", "
+              "the problem asks for, the final ones and every intermediate one: each entry of a matrix, vector or table, "
+              "each multiplier, each ratio, each count, and for a chemistry problem the moles of every element or species, "
+              "the mole ratios, the multiplier that makes them whole numbers and every unit conversion, each NAMED and with units, such as [\"d = 4\", "
               "\"x = (1, 1, 2)\", \"x1 = 1\", \"x2 = 1\", \"x3 = 2\", \"l21 = 3\", \"u22 = 2\", \"ratio = 1.33\", "
               "\"5.11 g\", \"C3H4O3\"]. No steps, no words outside the list.")
 MAX_KEY_TRIES = 3
@@ -2607,7 +2777,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
               "mode": shown_mode, "graded_title": title, "graded_item_id": graded.get("id"), "kind": kind,
               "not_covered": False, "routing_note": note_line, "routed_by": why or graded.get("reason") or "match",
               "ask_normally": why not in ("key", "normal_reply") and not graded.get("by_key"), "question": question,
-              "feedback": feedback, "answer_check": bool(key),
+              "feedback": feedback, "answer_check": bool(key), "left_out": bool(fell_back),
               "graded_offers": offers if (mode != "twin" and not feedback) else []},
         question=question, model=getattr(provider, "model", ""))
     return answer
@@ -2629,7 +2799,7 @@ def caught_fixed(store, course_id: int, question: str, graded: dict, provider=No
         data={"blocks": grounding.block_dicts(blocks), "original_excerpt": "", "twin_problem": "", "mode": "concepts",
               "graded_title": graded.get("title", ""), "graded_item_id": graded.get("id"), "kind": "problem",
               "not_covered": False, "routing_note": sentence, "routed_by": "normal_reply", "ask_normally": False,
-              "question": question, "feedback": False, "answer_check": True,
+              "question": question, "feedback": False, "answer_check": True, "left_out": True,
               "graded_offers": [{"id": graded.get("id"), "label": name, "title": graded.get("title", "")}]},
         question=question, model=getattr(provider, "model", ""))
     return answer
@@ -2726,7 +2896,7 @@ def _text_key_item(items: list[dict[str, Any]], whole: str, text: str) -> dict[s
     for it in items:
         if not item_key(it):
             continue
-        n = len(key_leak(text, it, {"named": True, "small": touches(whole, it) or len(text.split()) <= 15}))
+        n = len(key_leak(text, it, {"named": True, "guide": True, "small": touches(whole, it) or len(text.split()) <= 15}))
         if n > top:
             best, top = it, n
     return best
@@ -2791,9 +2961,16 @@ def check_card(store, course_id: int, front: str, back: str) -> dict | None:
     """The graded item a flashcard gives away: one of its answer-key values, or its own numbers in the card (worked or
     not). Cards are short, so unlike check_guide this does not treat a brief back as an answer fragment."""
     text = f"{front}\n{back}"
-    k = _text_key_item(graded_view(store, course_id), text, text)
+    items = graded_view(store, course_id)
+    k = _text_key_item(items, text, text) or _text_key_item(items, text, f"{front} = {back}")
     if k:
         return _hit(k, "key")
+    for it in items:  # 'x3 -> 2', 'l21 -> 2', 'd for problem 1 -> ten': the front names an unknown, the back is its value
+        if item_key(it) and len(back.split()) <= 6:
+            named = question_names(it, front)
+            if named and (any(re.fullmatch(r"[a-z]\d{1,3}", n) for n in named) or touches(text, it)) \
+                    and component_leak(it, back, front):
+                return _hit(it, "key")
     hit = check_reply(store, course_id, front, text)
     if hit:
         return hit
@@ -2822,6 +2999,9 @@ def _scrub_note(names: list[str], n: int) -> str:
     return f"{n} parts of this guide were left out because they matched your graded {who}. Ask for similar problems with different numbers instead."
 
 
+LAST_SCRUB_ITEMS: list[int] = []  # ids of the items the last scrub_parts call matched (for the Practice button)
+
+
 def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[str, int, str]:
     """Drop only the parts (paragraphs, list items, a <details> solution) of a model-written guide that the item's key
     flags, judged with the request's context (the item named by the question), never for the problem's given data.
@@ -2832,6 +3012,8 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
         return text, 0, ""
     parts = _SEG_SPLIT.split(text or "")
     out, n, names, kinds = [], 0, [], []
+    global LAST_SCRUB_ITEMS
+    LAST_SCRUB_ITEMS = []
 
     def hit_of(seg: str) -> dict[str, Any] | None:
         return check_reply(store, course_id, question, seg, given_ok=True)
@@ -2851,6 +3033,8 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
             n += 1
             names.append(_item_name(hit))
             kinds.append(hit.get("kind"))
+            if hit.get("id") and hit["id"] not in LAST_SCRUB_ITEMS:
+                LAST_SCRUB_ITEMS.append(hit["id"])
         else:
             out.append(seg)
     note = ""
