@@ -469,7 +469,7 @@ def is_filler_chunk(text: str, heading: str = "") -> bool:
     return _is_intro_chunk(r) or _is_exercise_chunk(r)
 
 
-_SCAFFOLD_HEAD = re.compile(r"^\W*(glossary|key terms|key takeaways|section summary|chapter summary|summary|critical thinking"
+_SCAFFOLD_HEAD = re.compile(r"^\W*(glossary|key terms|key takeaways|key concepts( and summary)?|section summary|chapter summary|summary|critical thinking"
                             r"( questions)?|review questions|references|further reading|bibliography|footnotes|"
                             r"acknowledg\w+|index)\W*$", re.I)
 
@@ -959,19 +959,20 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
     if len(named_ids) >= 2 and want_ids:
         ranked = _fair_share(ranked, named_ids, limit)
     if len(qnums) >= 3 and ranked:
-        # the passage that carries the question's numbers (the matrix as the lecturer wrote it) is followed by the
-        # one that solves it; the best number match among the leading results, not only the first one
-        pos = max(range(min(len(ranked), 8)), key=lambda i: (_number_score(qnums, ranked[i][1]["text"]), -i))
-        if _number_score(qnums, ranked[pos][1]["text"]) >= 3.0:
+        # a passage that carries the question's numbers (the matrix as the lecturer wrote it) is followed by the one
+        # that solves it; checked for each such passage among the leading results, not only the first one
+        hits = [i for i in range(min(len(ranked), 8)) if _number_score(qnums, ranked[i][1]["text"]) >= 3.0][:3]
+        for pos in reversed(hits):
             nxt = store._row("SELECT id FROM chunks WHERE material_id = ? AND ord = (SELECT ord + 1 FROM chunks WHERE id = ?)",
                              (ranked[pos][1]["material_id"], ranked[pos][1]["id"]))
-            if nxt and nxt["id"] not in {r["id"] for _, r in ranked[:pos + 2]}:
-                row = store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE c.id = ?"
-                                  f"{extra}", [nxt["id"], *fparams])
-                if row:  # the line after a matching worked example is where it is solved
-                    at = min(pos + 1, max(0, limit - 1))
-                    rest = [x for x in ranked if x[1]["id"] != nxt["id"]]
-                    ranked = rest[:at] + [(ranked[pos][0] - 0.01, row[0])] + rest[at:]
+            if not nxt or nxt["id"] in {r["id"] for _, r in ranked[:pos + 2]}:
+                continue
+            row = store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE c.id = ?"
+                              f"{extra}", [nxt["id"], *fparams])
+            if row:  # the line after a matching worked example is where it is solved
+                at = min(pos + 1, max(0, limit - 1))
+                rest = [x for x in ranked if x[1]["id"] != nxt["id"]]
+                ranked = rest[:at] + [(ranked[pos][0] - 0.01, row[0])] + rest[at:]
     return [_source(r, sc) for sc, r in ranked[:limit]]
 
 

@@ -509,12 +509,22 @@ def _words_match(a: str, b: str) -> bool:
     if a == b:
         return True
     short, long = sorted((a, b), key=len)
-    return len(short) >= 4 and long.startswith(short[:max(4, len(short) - 1)]) and len(long) - len(short) <= 6
+    return len(short) >= 5 and long.startswith(short) and len(long) - len(short) <= 8
 
 
-def _title_score(m: dict[str, Any], ev: dict[str, Any]) -> int:
+def _common_tokens(mats: list[dict[str, Any]]) -> frozenset[str]:
+    """Words most of the course's files share (the course code, 'chem', 'lab'): they say nothing about one lecture."""
+    n = len(mats)
+    counts: dict[str, int] = {}
+    for m in mats:
+        for w in _name_tokens(m.get("title", "")) | _name_tokens(str(m.get("original_name") or "")):
+            counts[w] = counts.get(w, 0) + 1
+    return frozenset(w for w, c in counts.items() if n >= 4 and c >= max(3, 0.3 * n))
+
+
+def _title_score(m: dict[str, Any], ev: dict[str, Any], common: frozenset[str] = frozenset()) -> int:
     """How many words of the lecture's title and topics the material's title or file name carries."""
-    mat = _name_tokens(f"{m.get('title', '')}") | _name_tokens(str(m.get("original_name") or ""))
+    mat = (_name_tokens(f"{m.get('title', '')}") | _name_tokens(str(m.get("original_name") or ""))) - common
     lec = {w for w in re.findall(r"[a-z0-9]{2,}", f"{clean_title(ev)} {ev.get('topics') or ''}".lower())
            if w not in _GENERIC and not w.isdigit() and w not in _FILLER_WORDS and w not in {"strang", "lecture"}}
     return sum(1 for w in mat if any(_words_match(w, x) for x in lec))
@@ -528,10 +538,11 @@ def link_suggestions(store: Store, course_id: int, events: list[dict[str, Any]] 
     [{material, event, score, why}]. A material is suggested for its best lecture only, and not when two tie."""
     evs = events if events is not None else [e for e in store.events(course_id, kinds=["lecture"]) if not is_junk_event(e)]
     out = []
+    common = _common_tokens([m for m in store.materials(course_id) if _usable(m)])
     for m in store.materials(course_id):
         if not _usable(m) or m["kind"] not in _NOTE_KINDS or m.get("event_id") or m.get("lecture_date"):
             continue
-        ranked = sorted(((_title_score(m, e), e) for e in evs), key=lambda x: -x[0])
+        ranked = sorted(((_title_score(m, e, common), e) for e in evs), key=lambda x: -x[0])
         if not ranked or ranked[0][0] < 1 or (len(ranked) > 1 and ranked[1][0] == ranked[0][0]):
             continue
         score, e = ranked[0]
@@ -551,6 +562,7 @@ def lecture_materials(store: Store, course_id: int, ev: dict[str, Any]) -> list[
     Order: linked to the event, then dated the same day, then matched by lecture number, title or topic. A recording
     or captions file that matches is always included."""
     mats = [m for m in store.materials(course_id) if _usable(m)]
+    common = _common_tokens(mats)
     out: list[tuple[dict[str, Any], str]] = []
     seen: set[int] = set()
 
@@ -578,7 +590,7 @@ def lecture_materials(store: Store, course_id: int, ev: dict[str, Any]) -> list[
                        if w not in _GENERIC}
         if num is None or not re.search(r"(?:lecture|lec|week)[\s_\-#.]*\d+", m["title"].lower()):
             if len(words & title_words) >= 2 or (len(words) == 1 and words <= title_words and len(next(iter(words))) >= 6) \
-                    or _title_score(m, ev) >= 2:
+                    or _title_score(m, ev, common) >= 2:
                 add(m, "matched by title")
     return out
 
@@ -591,8 +603,9 @@ def _syllabus_rows(store: Store, course_id: int, ev: dict[str, Any], query: str,
         if _rfn("is_header_chunk", x["text"], x["material_title"]) or _rfn("is_title_only", x["text"], x.get("heading", "")):
             continue
         text = x["text"].lower()
+        schedule = bool(re.search(r"schedule|reading|topics|calendar|outline", x.get("heading", ""), re.I))
         about = (num is not None and re.search(rf"(?:lecture|lec|week)[\s_\-#.]*0*{num}\b", text)) or \
-                ev["date"] in text or len(words & set(re.findall(r"[a-z]{4,}", text))) >= 2
+                ev["date"] in text or (schedule and len(words & set(re.findall(r"[a-z]{4,}", text))) >= 2)
         if about:
             out.append(x)
     return out[:n]
@@ -608,7 +621,9 @@ def _lecture_sources(store: Store, course_id: int, ev: dict[str, Any], cap: int 
     query = " ".join(x for x in (clean_title(ev), ev.get("topics", "")) if x)
     if primer:  # a primer is built before the lecture: the schedule's row and reading, then notes about the same topic
         syl = _syllabus_rows(store, course_id, ev, query)
-        related = [x for x in _search(store, course_id, query, 14, exclude_graded=True)
+        topic_q = " ".join(x for x in (re.sub(r"^\s*(?:lecture|lec\.?|week|class|session)\s*#?\d+\s*[:.\-]*\s*", "", clean_title(ev), flags=re.I),
+                                       re.sub(r"\b[A-Z][a-z]+ \d+(?:\.\d+)?(?:[-,]\s*\d+(?:\.\d+)?)*", "", ev.get("topics", ""))) if x) or query
+        related = [x for x in _search(store, course_id, topic_q, 14, exclude_graded=True)
                    if x["material_kind"] not in ("past_offering", "assignment", "syllabus")
                    and not _rfn("is_scaffold_chunk", x["text"], x.get("heading", ""))]
         sources = _merge(own, syl, related, cap=cap)
@@ -672,7 +687,7 @@ def _usable_chunks(store: Store, m: dict[str, Any]) -> list[dict[str, Any]]:
             and not _rfn("is_scaffold_chunk", c["text"], c.get("heading", ""))
             and not _rfn("is_title_only", c["text"], c.get("heading", ""))
             and not _rfn("is_header_chunk", c["text"], m.get("title", ""))
-            and not _is_logistics(c)]
+            and not _is_logistics(c) and not re.match(r"\s*\*\*Problem\.?\*\*", c["text"])]
 
 
 def _stem_set(text: str) -> set[str]:
@@ -683,12 +698,16 @@ def _best_in_section(group: list[dict[str, Any]], heading: str) -> dict[str, Any
     """The passage that opens a topic: prefers one that defines (bold term, 'is', 'defined') over a figure, a table
     or a worked solution."""
     hw = _stem_set(heading)
+    if re.match(r"\s*key equations\s*$", heading, re.I):
+        return dict(group[0], _defn=0.5)  # what follows a Key Equations table is often the exercises that come next
 
     def score(c: dict[str, Any]) -> float:
         t = c["text"]
         sc = 0.0
         sc += 2.0 if "**" in t[:600] else 0.0
         sc += 1.0 if re.search(r"\b(?:is|are) (?:defined|called|the|a|an)\b|\bdefin(?:ed|ition)\b|\brefers? to\b", t[:500], re.I) else 0.0
+        low = t.lower()
+        sc += min(2.0, sum(low.count(w) for w in re.findall(r"[a-z]{5,}", heading.lower())) / 3)  # a passage about its heading
         sc += 0.5 * len(hw & _stem_set(t[:500]))
         sc -= 3.0 if _LEAD_WEAK.match(t) else 0.0
         return sc
@@ -696,14 +715,16 @@ def _best_in_section(group: list[dict[str, Any]], heading: str) -> dict[str, Any
     for c in group[1:4]:  # the opening few passages of the section only
         if score(c) > score(best) + 0.4:
             best = c
+    best = dict(best)
+    best["_defn"] = score(best)
     return best
 
 
-def _topic_passages(store: Store, mats: list[dict[str, Any]], topic_text: str, cap: int) -> list[dict[str, Any]]:
+def _topic_passages(store: Store, mats: list[dict[str, Any]], topic_text: str, cap: int, course_topics: str = "") -> list[dict[str, Any]]:
     """One passage per topic heading of each material, in reading order. Headings that the exam's lectures name come
     first when there are more headings than slots. Lead-in stubs, chapter intros, end-of-chapter exercises, glossaries
     and summaries are left out."""
-    want = _stem_set(topic_text)
+    want, want2 = _stem_set(topic_text), _stem_set(course_topics)
     per_mat: list[tuple[dict[str, Any], list[tuple[int, dict[str, Any]]]]] = []
     plain: list[dict[str, Any]] = []
     for m in mats:
@@ -716,22 +737,23 @@ def _topic_passages(store: Store, mats: list[dict[str, Any]], topic_text: str, c
             continue
         picks = []
         for i, (h, g) in enumerate(groups.items()):
-            if sum(len(c["text"]) for c in g) < 600 and not (_stem_set(h) & want):
+            if re.match(r"\s*key equations\s*$", h, re.I) and not g[0]["text"].lstrip().startswith("|"):
+                continue
+            hs = _stem_set(h)
+            if sum(len(c["text"]) for c in g) < 600 and not (hs & want):
                 continue  # a lead-in stub that only introduces the subsections below it
-            hit = len(_stem_set(h) & want)
-            picks.append((i, hit, _best_in_section(g, h), m))
+            hit = 3 * len(hs & want) + 2 * len(hs & want2)  # this exam's lectures first, then the course's topic list
+            picks.append((i, hit, _best_in_section(g, h), m, sum(len(c["text"]) for c in g)))
         per_mat.append((m, picks))
-    n = max(1, len(per_mat) + len(plain))
-    share = max(2, cap // n)
+    total = sum(len(p) for _, p in per_mat) + len(plain) * 3
     lists = []
     for m, picks in per_mat:
-        if len(picks) > share:
-            keep = [p for p in picks if p[1] > 0]
-            keep = keep[:share]
-            rest = [p for p in picks if p not in keep]
-            keep += _spread_pick(rest, share - len(keep))
+        room = max(2, round(cap * len(picks) / max(1, total))) if total > cap else len(picks)
+        if len(picks) > room:  # more topics than slots: the exam's own topics first, then the meatiest sections
+            keep = sorted(picks, key=lambda p: (-p[1], -p[2].get("_defn", 0), -p[4]))[:room]
             picks = sorted(keep, key=lambda p: p[0])
-        lists.append([_source_from_chunk(c, m["title"], m["kind"]) for _, _, c, m in picks])
+        lists.append([_source_from_chunk(c, m["title"], m["kind"]) for _, _, c, m, _n in picks])
+    share = max(3, (cap - sum(len(x) for x in lists)) // max(1, len(plain))) if plain else 0
     for m in plain:
         chunks = _usable_chunks(store, m)
         lists.append([_source_from_chunk(c, m["title"], m["kind"]) for c in _spread_pick(chunks, share)])
@@ -748,11 +770,11 @@ def _relevant_materials(store: Store, mats: list[dict[str, Any]], topic_text: st
     for m in mats:
         words = _stem_set(m["title"]) | _stem_set(" ".join(c.get("heading", "") for c in store.chunks_of(m["id"])))
         scored.append((len(words & want), m))
-    hit = [m for n, m in scored if n > 0]
-    if hit:
-        return hit
-    rest = [m for m in mats if _rfn("title_doc_id", m["title"]) != ("chapter", 1)]
-    return rest or mats
+    best = max((n for n, _ in scored), default=0)
+    hit = [m for n, m in scored if n >= max(2, 0.5 * best)]  # one shared word ('chemical') is not a match
+    rest = [m for m in mats if _rfn("title_doc_id", m["title"]) != ("chapter", 1)]  # the opening chapter is filler here
+    hit = [m for m in hit if m in rest]
+    return hit or rest or mats
 
 
 def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None = None,
@@ -805,8 +827,9 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         mats = _relevant_materials(store, [m for m in store.materials(course_id) if _usable(m)], " ".join(topics_text))
         scope_note = "No material is linked to the lectures before this exam, so this covers all your saved materials."
     syllabus_rows = [f"{e['date']}: {event_label(e)}" for e in lectures if e.get("topics")]
+    course_topics = " ".join(f"{clean_title(e)} {e.get('topics', '')}" for e in store.events(course_id, kinds=["lecture"]))
     mids = [m["id"] for m in mats]
-    sections = _topic_passages(store, mats, " ".join(topics_text), MAX_SOURCES - 6) if mats else []
+    sections = _topic_passages(store, mats, " ".join(topics_text), MAX_SOURCES - 2, course_topics) if mats else []
     per_topic = [[x for x in _search(store, course_id, t, 5, exclude_graded=True, **({"material_ids": mids} if mids else {}))
                   if not _rfn("is_scaffold_chunk", x["text"], x.get("heading", "")) and not _is_logistics(x)][:3]
                  for t in [*topics_text, *[m["title"] for m in mats]]]
@@ -814,11 +837,13 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
     # student limited the guide to chosen materials
     syl = []
     if not chosen:
-        words = _stem_set(ev["title"])
+        toks = re.findall(r"[a-z0-9]+", ev["title"].lower())
         syl = [x for x in _search(store, course_id, " ".join([ev["title"], *topics_text[:6]]), 4, kinds=["syllabus"])
-               if words and words <= _stem_set(x["text"] + " " + x.get("heading", "")) and not _rfn("is_header_chunk", x["text"], x["material_title"])
+               if toks and all(re.search(rf"\b{re.escape(t)}\b", (x["text"] + " " + x.get("heading", "")).lower()) for t in toks) and not _rfn("is_header_chunk", x["text"], x["material_title"])
                and not re.match(r"^\W*(grading|catalog|course description|academic integrity)", x.get("heading", ""), re.I)][:2]
-    sources = _merge(_interleave([sections, *per_topic], cap=MAX_SOURCES - 2), syl)
+    have = {(x["material_id"], x.get("heading", "")) for x in sections if x.get("heading")}
+    fill = [x for lst in per_topic for x in lst if (x["material_id"], x.get("heading", "")) not in have]
+    sources = _merge(sections, _interleave([fill[i::1] for i in range(1)], cap=MAX_SOURCES - 2), syl, cap=MAX_SOURCES)
     today = _today()
     past = False
     try:
