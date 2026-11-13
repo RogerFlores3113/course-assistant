@@ -609,7 +609,8 @@ def _overlap_score(q: str, b: str, paste_only: bool = False) -> float:
     jaccard = len(inter) / len(qt | bt)
     of_graded = len(inter) / len(bt)    # how much of the graded text the question contains
     of_question = len(inter) / len(qt)  # how much of the question is inside the graded text
-    qn, bn = significant_numbers(q), significant_numbers(b)
+    qn = significant_numbers(q) - given_constants(q)
+    bn = significant_numbers(b) - given_constants(b)
     nums_inside = bool(qn) and qn <= bn
     score = 0.0
     if jaccard >= 0.5:
@@ -884,6 +885,11 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     best = max(scored, key=lambda x: (round(x[0], 2), _own_ref(question, x[1]),
                                       round(_closeness(q, x[1], texts.get(x[1]["id"]) or _Text("")), 3), -x[1]["id"]))
     score, item = best
+    if score >= 1.0 and len(refs) > 1:
+        # several items share the number the question names, but its own text pastes exactly one of them
+        strong = [r for r in refs if score_text(q, texts.get(r["id"]) or _Text("")) >= 0.6]
+        if len(strong) == 1:
+            item, refs = strong[0], strong
     if score >= 1.0 and len(refs) > 1 and not _prob_refs(question):
         out = _combined(store, refs)
         out.update(score=1.0)
@@ -1123,7 +1129,7 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = 5) -> di
     shares nothing. It never routes a question: the REPLY is checked against the item (its answer key, or its
     distinctive numbers when it has no key)."""
     try:
-        msgs = store.chat_messages(course_id, turns * 2 + 2)
+        msgs = store.chat_messages(course_id, max(turns * 2 + 2, 60))
     except Exception:
         return None
     item, since = None, 0
@@ -1136,8 +1142,10 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = 5) -> di
             item, since = found, 0
         elif item is not None:
             since += 1
-            if since > turns or not shares_with(text, item):
+            if not shares_with(text, item) or (since > turns and not question_names(item, text)):
                 item = None
+            elif since > turns:
+                since = 0
     if item is None or not shares_with(question or "", item):
         return None
     if item.get("kind") == "essay" and _READING_REF.search(question or "") and not writing_request(question or ""):
