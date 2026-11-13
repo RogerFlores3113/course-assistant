@@ -751,6 +751,10 @@ _ROLE_LABEL = re.compile(r"^\W*(?:tutor|teacher|professor|prof|ta|coach|assistan
 _VERDICT_ONLY = re.compile(r"^\W*(?:yes|no|partly|partially|mostly|largely|half|right|wrong|correct|incorrect|mistaken)\b[\w\s,'’-]{0,24}\W*$", re.I)
 
 
+_LOGISTICS_LINE = re.compile(r"\b(?:due|deadline|pages?|words?|worth|points?|percent|double-spaced|format|length|submit\w*|footnotes?|"
+                            r"chicago|mla|apa|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}:\d\d|[ap]\.?m\.?)\b|%", re.I)
+
+
 def labelled_core(sentence: str) -> str:
     """The clause after a thesis label ('Thesis idea:', 'Thesis:', 'Your claim:', 'Essay 2 thesis:', 'Your main argument:')
     or after a bare tutor-role label ('Tutor: X'); '' when the sentence has none. 'Argument', 'position' and 'stance' count
@@ -770,7 +774,9 @@ def labelled_core(sentence: str) -> str:
     m = _ROLE_LABEL.match(s)
     if m:
         rest = m.group("rest").strip()
-        return rest if len(rest.split()) >= 4 else ""  # 'A: Friday, in class.' answers a logistics question
+        if len(rest.split()) < 4 or (_LOGISTICS_LINE.search(rest) and not (_POS_EVAL.search(rest) or ARGUE.search(rest))):
+            return ""  # 'A: Friday, in class.', 'Tutor: It is due Friday at 11:59 pm.' answer a logistics question
+        return rest
     m = _TL_BE.match(s)
     if m:
         return m.group("rest").strip()
@@ -799,7 +805,8 @@ def thesis_after_hit(line: str, topic: set[str], ents: set[str] | None, own: str
         prev = sents[i - 1].strip()
         if _WH_OPEN.match(prev):
             continue
-        if _labelled_position(prev.rstrip("?!. ") + ".", topic, ents, own):
+        core = prev.rstrip("?!. ") + "."
+        if _labelled_position(core, topic | _ct(core), ents, own):  # the cue itself says it is a thesis: any non-coaching claim
             return prev
     return ""
 
@@ -820,6 +827,18 @@ def _talks_about_writing(c: str, topic: set[str], ents: set[str] | None) -> bool
     if _ARTIFACT_TALK.match(c):
         return True
     return bool(re.match(r"^(?:it|this|that|which|they|one)\b", c, re.I)) and not _named_idea(c, topic, ents)
+
+
+def _short_claim(c: str, topic: set[str], ents: set[str] | None) -> bool:
+    """A clause of two or three words after a thesis cue is the claim when it names the essay's subject, judges it, or has a
+    content word of its own; a short clause that is about the writing itself ('evidence matters', 'a thesis needs ...') is not."""
+    first = " ".join(c.split()[:2])
+    if _META.search(first):
+        return False
+    if _named_idea(c, topic, ents) or _POS_EVAL.search(c) or ARGUE.search(c):
+        return True
+    return any(len(w) > 3 and w.lower() not in _ENG and not _META.search(w) and w.lower() not in _NAMED_STOP
+               for w in re.findall(r"[A-Za-z'’-]+", c))
 
 
 def _named_idea(c: str, topic: set[str], ents: set[str] | None) -> bool:
@@ -844,7 +863,7 @@ def _labelled_position(rest: str, topic: set[str], ents: set[str] | None, own: s
     c = c.strip("\"“”'*_ ").rstrip("?!. ").strip()
     if len(c.split()) < 2 or honest_question(rest) or re.search(r"^whether\b|\bwhether\s+or\s+not\b|\bright\s+or\s+wrong\b", c, re.I):
         return False
-    if len(c.split()) < 4 and not (short_ok and _named_idea(c, topic, ents)):
+    if len(c.split()) < 4 and not (short_ok and _short_claim(c, topic, ents)):
         return False
     if _talks_about_writing(c, topic, ents):
         return False  # a short clause after a thesis cue is a position only when it names the essay's own subject (fx11)
@@ -859,6 +878,8 @@ def _labelled_position(rest: str, topic: set[str], ents: set[str] | None, own: s
     if re.match(r"^\W*(?:must|should|needs?|has\s+to|have\s+to|ought|take|cite|state|include|name|make|use|give|support|be)\b", c, re.I):
         return False  # a requirement or an instruction ('Must take a side and cite two passages'), not a claim about the subject
     verdict = bool(_POS_EVAL.search(c) or ARGUE.search(c))
+    if len(c.split()) < 4:
+        return True  # _short_claim passed above: a cue and a short claim of its own
     return bool(_ct(c) & (topic | (ents or set()))) or verdict
 
 
@@ -1000,6 +1021,24 @@ def _role_note(sent: str, sources: list[Any] | None) -> bool:
     return bool(_ROLE_LABEL.match(raw)) and sources is not None and cited_restatement(sent, sources)
 
 
+# 'The prompt asks how far Madison was right about faction.', 'Essay 2 wants to know whether the remedy worked': the sentence says
+# what the assignment asks, as an indirect question; it takes no side (fx11). A second clause that does ('..., and I think he was')
+# is judged on its own.
+_RESTATE_TASK = re.compile(
+    r"^\W*(?:the\s+|this\s+|your\s+)?(?:prompt|assignment|question|task|essay(?:\s+(?:prompt|question))?|(?:essay|paper)\s*#?\d+|"
+    r"rubric|instructions?)\s+(?:is\s+)?(?:asks?|asking|wants?|requires?|expects?|is\s+about|(?:is\s+)?(?:whether|how)|"
+    r"wants\s+(?:you\s+)?to\s+(?:know|decide|judge|assess|weigh|say)|asks\s+you\s+to\s+(?:judge|decide|assess|weigh|say|"
+    r"consider))\s+(?:you\s+to\s+(?:judge|decide|assess|weigh|say|consider)\s+)?(?:how\s+far|how|whether|to\s+what\s+extent|"
+    r"which|what|why|if|where|when|who)\b(?P<rest>.*)$", re.I)
+_RESTATE_SECOND = re.compile(r"[,;]\s*(?:and|but|so|yet)\s+(?:i|he|she|it|they|this|that|madison|the\s+\w+)\b", re.I)
+
+
+def restates_task(sentence: str) -> bool:
+    c = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
+    m = _RESTATE_TASK.match(c)
+    return bool(m) and not _RESTATE_SECOND.search(m.group("rest"))
+
+
 def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, sources: list[Any] | None,
               loose: bool = False, ents: set[str] | None = None, foreign: bool = True, own: str = "") -> tuple[int, str]:
     """(level, reason) of one sentence or span. span: 'quoted' | 'colon' | 'label' | 'plain'. ents: the assignment's own
@@ -1009,7 +1048,7 @@ def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, s
     cited = bool(_cite_numbers(sent))
     s0 = trim_tail(_CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ "))
     s, framed = strip_frames(s0)  # a coaching frame in front never exempts what follows it
-    if not_covered(s):  # "The materials I searched do not show this term's style"
+    if not_covered(s) or restates_task(s):  # "The materials I searched do not show this term's style"; "The prompt asks how far ..."
         return 0, ""
     if ents is not None and span == "plain":
         lab = labelled_core(trim_tail(_CITE_STRIP.sub("", sent).strip()))
@@ -1156,7 +1195,8 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
                 continue
             xs = trim_tail(_CITE_STRIP.sub("", x).strip())
             core, _ = strip_frames(xs)
-            if _COACHING_PARA.search(core) or not_covered(core) or imperative_coaching(core, topic, ents) or attributed(core):
+            if _COACHING_PARA.search(core) or not_covered(core) or imperative_coaching(core, topic, ents) or attributed(core) \
+                    or restates_task(core):
                 continue
             kept.append(_CITE_STRIP.sub("", x).strip())
         bare = " ".join(kept)
@@ -1165,20 +1205,28 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
         if not any(_takes_side(x) for x in kept):
             continue  # uncited framing around cited reading ('X was an uprising ...', 'That is why it mattered'): no side taken
         shared = len(_ct(bare) & topic)
+        # the sentences that triggered it, never the harmless background around them (a refusal names what to change)
+        trig = " ".join(x for x in kept if _takes_side(x) or THESIS_CUE.search(x)) or bare
         if THESIS_CUE.search(bare) and shared >= 1:
-            return 2, "thesis", bare[:200]
+            return 2, "thesis", trig[:200]
         if shared >= 3 and EVAL.search(bare) and best[0] < 1:
-            best = (1, "body paragraph", bare[:200])
+            best = (1, "body paragraph", trig[:200])
         elif asked and shared >= 2 and best[0] < 1 and not is_short_answer(it):  # short answers: short_answer_hit
-            best = (1, "body paragraph", bare[:200])
+            best = (1, "body paragraph", trig[:200])
     return best
+
+
+# 'because' alone is history, not a verdict ('It was put down by a militia because the state had no money'); the other connectives
+# ('therefore', 'although', 'despite' ...) still count as taking a side
+_ARGUE_NB = re.compile(rf"\b(?:{_EVAL_INFL}|{_ATTRIB_INFL}|{_OUTCOME}|{_BARE}|(?:although|whereas|despite|therefore|thus|hence|"
+                       r"consequently))\b", re.I)
 
 
 def _takes_side(sentence: str) -> bool:
     """One sentence judges something (right, wrong, showed, failed, because, therefore ...) or states a thesis cue, as
     opposed to background and framing ('X was an uprising of indebted farmers', 'That is why it mattered to the debate')."""
     c = _CITE_STRIP.sub("", sentence or "")
-    return bool(ARGUE.search(c) or EVAL.search(c) or _POS_EVAL.search(c) or _VERDICT_WORDS.search(c) or THESIS_CUE.search(c)
+    return bool(_ARGUE_NB.search(c) or EVAL.search(c) or _POS_EVAL.search(c) or _VERDICT_WORDS.search(c) or THESIS_CUE.search(c)
                 or labelled_core(c))
 
 
@@ -1566,7 +1614,7 @@ def _cue_draft(q: str) -> tuple[str, str]:
     best = ("", "")
     for paste, rest in cands:
         paste = paste.strip()
-        if len(paste.split()) < 12 or not _DRAFT_CUE.search(rest) or not _FB_CUE.search(rest) or _SOURCE_HEAD.search(rest):
+        if len(paste.split()) < 10 or not _DRAFT_CUE.search(rest) or not _FB_CUE.search(rest) or _SOURCE_HEAD.search(rest):
             continue
         if problem_statement(paste):
             continue
@@ -1580,6 +1628,8 @@ def paste_heading(question: str) -> str:
     itself. '' when the message has no such paste."""
     q = (question or "").strip()
     paste, rest = _cue_draft(q)
+    if not paste and (m := _PASTE_HEADER.match(q)) and _header_paste(q):
+        return q[:m.end()].strip(" :\n,;-")[:80].rstrip(" ,;:-") or "Your pasted draft"
     if not paste and len(q.split()) >= 25:
         m = re.search(r"[:\n]", q)
         if m and len(q[:m.start()].split()) <= 16 and len(q[m.end():].split()) >= 12 and _DRAFT_CUE.search(q[:m.start()]):
@@ -1592,13 +1642,39 @@ def paste_heading(question: str) -> str:
     return "Your pasted draft"
 
 
+# fx11: a message that is only a header and a pasted block ('Here's what I have so far: <paste>', 'Here is my thesis: <paste>',
+# 'My intro for Essay 2: <paste>') is a draft with no question. The header names the paste as the student's own work.
+_PASTE_HEADER = re.compile(
+    r"^\W*(?:(?:here(?:'s|\s+is|\s+are)|this\s+is|below\s+is|attached\s+is|okay,?|ok,?|so)\s+)?"
+    r"(?:what\s+i(?:'ve|\s+have)(?:\s+got|\s+written|\s+done)?(?:\s+so\s+far)?|"
+    r"(?:my|our|the)\s+(?:\w+\s+){0,3}(?:draft|thesis|intro\w*|essay|paper|paragraphs?|attempt|writing|conclusion|answer|work)|"
+    r"(?:a|the)\s+(?:rough\s+|first\s+)?(?:draft|attempt)|(?:essay|paper)\s*#?\d+(?:\s+\w+){0,3})"
+    r"(?:\s+so\s+far)?(?:\s+(?:for|on|of)\s+[^:\n?]{0,50})?\s*(?::|\n)\s*", re.I)
+
+
+def _header_paste(q: str) -> str:
+    """The pasted block of a message that is a header naming the student's own draft and the block, with no question: 8 words or
+    more, not a pasted assignment or homework problem, and not itself a question. '' otherwise."""
+    m = _PASTE_HEADER.match(q or "")
+    if not m:
+        return ""
+    head, tail = q[:m.end()], q[m.end():].strip()
+    if _SOURCE_HEAD.search(head) or len(tail.split()) < 8 or problem_statement(tail):
+        return ""
+    sents = _sentences(tail)
+    if sents and all("?" in x for x in sents):
+        return ""  # a list of questions is a question, not a draft
+    return tail
+
+
 def draft_request(question: str) -> str | None:
     """The student's pasted draft when the message asks for feedback on it: after a colon or line break, in double or
     single quotes, or with no marker at all ('check it against the rubric' plus a pasted paragraph, or just a long
     pasted paragraph). None otherwise."""
     q = (question or "").strip()
+    hp = _header_paste(q)
     if len(q.split()) < 10:
-        return None
+        return hp or None
     cands: list[tuple[str, str, bool]] = []  # (draft, rest of the message, quoted)
     for rx in _QUOTED_SPAN:
         for m in rx.finditer(q):
@@ -1648,7 +1724,7 @@ def draft_request(question: str) -> str | None:
         cue_paste, _ = _cue_draft(q)
         if cue_paste:
             return cue_paste
-    return best or None
+    return best or hp or None
 
 
 _OWN_PROSE = re.compile(r"\b(i|my|me|i'm|i've|we|our|in this essay|this essay|this paper|in my|because|since|therefore|hence|"
@@ -1796,9 +1872,13 @@ def feedback_leaks(draft: str, assignment: Any, reply: str, sources: list[Any] |
             if span in ("quoted", "colon") and not STRICT_COACH.search(s):
                 if span == "colon" and _describes_draft(s, line, sent):
                     continue  # 'Honest answer against the rubric [1]: the paragraph makes a claim but is thin on evidence.'
+                if span == "colon" and _talks_about_writing(s, topic, ents):
+                    continue  # 'A good claim: it takes a side and cites two readings': coaching about the claim
                 if span == "quoted" or len(_ct(s) & topic) >= 2:
                     return True
-            elif span == "plain" and not _VOICE.search(s) and len(_ct(s) & topic) >= 2 and not _restates(s, atext):
+            elif span == "plain" and not _VOICE.search(s) and len(_ct(s) & topic) >= 2 and not _restates(s, atext) \
+                    and not _ARTIFACT_TALK.match(s) and not restates_task(s) \
+                    and not ((lc2 := lead_core(s)) and _talks_about_writing(lc2, topic, ents)):
                 return True
     return False
 
