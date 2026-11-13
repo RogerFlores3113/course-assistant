@@ -188,3 +188,10 @@ section + section, .course-head + #course-body { margin-top: 8px; }
 .row-item .actions { align-self: center; }
 .chat .msg.ai { border-left: 4px solid var(--accent-c, var(--accent)); }
 @media (forced-colors: active) { .inline-filter select, .btn.small { border: 1px solid ButtonText; } }
+
+/* cycle 3: exam line, catch-up, cram round end, card tools */
+.exam-line { margin: 4px 0 8px; }
+.catch-up { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin: 0 0 8px; }
+.round-end .big { font-size: 1.15rem; font-weight: 600; }
+.round-end ul { text-align: left; display: inline-block; margin: 0 0 12px; padding-left: 1.2em; list-style: disc; }
+.card-tools { margin-top: 10px; }

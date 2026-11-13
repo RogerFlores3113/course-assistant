@@ -1,6 +1,8 @@
 {% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}Connect an AI - Course Assistant{% endblock %}
 {% block body %}<section class="narrow"><h1>Connect an AI</h1>
 {% if first %}<p class="muted">One last step. You can skip it and come back any time from "Connect an AI" at the top of the page.</p>{% endif %}
+<form method="post" action="/setup/skip" class="row"><button class="btn ghost" type="submit">{{ 'Skip for now' if first else 'Not now' }}</button>
+<span class="muted small">You can still add materials and read them without an AI.</span></form>
 <p>Course Assistant finds the right passages in your own materials. It needs an AI to turn them into answers and study guides. Pick one of the ways below. They do not unlock the same things:</p>
 <ul><li><strong>Claude Desktop or Codex:</strong> you ask in Claude Desktop or Codex. The Study and Ask buttons in this app stay off.</li>
 <li><strong>API key or local model:</strong> the Study and Ask buttons in this app work.</li>
@@ -12,7 +14,7 @@
 <p class="muted small">The button changes that app's own settings files, which are outside this app's folder. The next page lists the exact files before you press the button that writes them. Only apps that are installed are touched.</p>
 <div class="row">
 <a class="btn" href="/connect">See what connecting Claude Desktop or Codex changes{% if status.claude or status.codex %}<span class="visually-hidden"> (one is already connected)</span>{% endif %}</a></div>
-<p class="muted small">{% if status.claude %}Claude Desktop is connected. {% endif %}{% if status.codex %}Codex is connected.{% endif %}</p>
+{% if status.claude or status.codex %}<p class="muted small">{% if status.claude %}Claude Desktop is connected. {% endif %}{% if status.codex %}Codex is connected.{% endif %}</p>{% endif %}
 <p>Afterwards, quit the app completely and open it again. Then start a chat and ask it about your course, for example "Use Course Assistant to make me a primer for my next lecture" or "Ask Course Assistant what Midterm 1 covers". The answers it writes are saved on the course's Guides tab here.</p></section>
 
 <section class="card" aria-labelledby="opt-b"><h2 id="opt-b">Option 2: An Anthropic API key</h2>
@@ -48,6 +50,4 @@
 <li><strong>No account at all:</strong> a local model (option 3) is free per question but needs a recent computer and gives simpler answers.</li>
 <li><strong>Not ready to decide:</strong> skip this step. You can add materials now and connect an AI later.</li></ul></section>
 
-<form method="post" action="/setup/skip" class="row"><button class="btn ghost" type="submit">{{ 'Skip for now' if first else 'Not now' }}</button>
-<span class="muted small">You can still add materials and read them without an AI.</span></form>
 </section>{% endblock %}
