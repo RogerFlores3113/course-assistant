@@ -684,3 +684,16 @@ def test_study_tab_template_renders_pickers():
         "exams": [], "materials": [{"id": 7, "title": "Chapter 3", "kind": "textbook"}]})
     assert 'name="material_id"' in html and 'name="material_ids"' in html and "Lecture 20: Diagonalization" in html
     assert "?cram=1" in html
+
+
+def test_bare_graded_marker_routes_to_twin(world, monkeypatch):
+    s, cid, _ = world
+    s.add_graded_item(cid, "HW 4", "Solve 3x = 12")
+    monkeypatch.setattr(integ(), "read_marker", lambda raw: (0, raw.replace("<graded/>", "")), raising=False)
+    p = Prov("<graded/>x = 4 [1]", "Twin text [1]")
+    gid = study.explain(s, cid, p, "equations")
+    assert p.calls[1][0] == "twin" and "x = 4" not in s.guide(gid)["body_md"]
+
+
+def test_old_one_line_integrity_rule_is_gone_from_base_prompt():
+    assert "never solve a problem the student says is graded" not in study.SYSTEM

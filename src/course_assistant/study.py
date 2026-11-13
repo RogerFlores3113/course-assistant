@@ -217,15 +217,19 @@ SYSTEM = """You are Course Assistant, a patient study helper for a college stude
 - A source marked "from a past offering" comes from an earlier term. Say so when you use it ("in Fall 2018, ...") and never present it as this term's policy, dates or exam format.
 - Use plain, friendly language a student can read quickly. Define jargon the first time you use it.
 - This is often STEM material: keep units and steps explicit.
-- Use Markdown with short headings, bullets and numbered lists.
-- Academic integrity: never solve a problem the student says is graded. Work an example with different numbers instead."""
+- Use Markdown with short headings, bullets and numbered lists."""
+
+FALLBACK_INTEGRITY = ("Academic integrity: never solve a problem the student says is graded. Work an example with "
+                      "different numbers instead.")
 
 
 def _system(store: Store, course_id: int) -> str:
     """The study system prompt: base rules, the shared format rules, and the course's integrity block."""
     parts = [SYSTEM, getattr(_mod("grounding"), "FORMAT_RULES", FALLBACK_FORMAT_RULES)]
     block = getattr(_mod("integrity"), "prompt_block", None)
-    if block:
+    if not block:
+        parts.append(FALLBACK_INTEGRITY)
+    else:
         try:
             text = block(store, course_id)
         except Exception:
@@ -248,6 +252,8 @@ def _guard(store: Store, course_id: int, provider, raw: str, question: str) -> t
             graded = store.graded_item(int(item_id))
         except (TypeError, ValueError):
             graded = None
+    if graded is None and item_id == 0:  # a bare <graded/> marker: the model says graded but named no item
+        graded = integ.match_graded(store, course_id, question) or next(iter(store.graded_items(course_id)), None)
     if graded is None:
         check = getattr(integ, "check_reply", None)
         if check:
