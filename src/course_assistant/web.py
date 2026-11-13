@@ -980,8 +980,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             raise _NotFound("That material was not found.")
         return page(request, "confirm.html", title=f"Delete {m['title']}?", back=course_url(m["course_id"]),
                     action=f"/materials/{material_id}/delete", button="Delete it",
-                    message="This removes the material, its searchable text and the saved original file from this "
-                            "computer. Guides and answers you already made stay, but their links to this material "
+                    message="This removes the material, its searchable text, the calendar dates it added and the saved "
+                            "original file from this computer. Guides and answers you already made stay, but their links to this material "
                             "will show \"source deleted\" instead of opening it. It cannot be undone.")
 
     @app.post("/materials/{material_id}/delete")
@@ -990,10 +990,16 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         if not m:
             raise _NotFound("That material was not found.")
         f = file_of(m)
-        store.delete_material(material_id)
+        cascade = getattr(_mod("importers"), "delete_material", None)  # its calendar dates go with it
+        if cascade:
+            n_events = cascade(store, material_id)
+        else:
+            n_events = 0
+            store.delete_material(material_id)
         if f and not store._row("SELECT id FROM materials WHERE filename = ?", (m["filename"],)):
             f.unlink(missing_ok=True)
-        return redirect(course_url(m["course_id"]), notice=f"Deleted {m['title']}.")
+        extra = f" Its {n_events} calendar date{'s' if n_events != 1 else ''} {'were' if n_events != 1 else 'was'} removed too." if n_events else ""
+        return redirect(course_url(m["course_id"]), notice=f"Deleted {m['title']}.{extra}")
 
     # ------------------------------------------------------------------ calendar
     def event_fields(kind: str, title: str, day: str, time_: str, topics: str) -> tuple[dict[str, str], str, str]:
@@ -1112,7 +1118,8 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         if action == "practice" and not topic:
             return after(request, course_id, "study", error="Type the topic you want practice questions on.", field=(action, "topic"))
 
-        if action in ("missed", "primer") and (ev is not None or (action == "missed" and day.strip())):
+        # a primer is for a lecture that has not happened: with nothing linked it is built from the syllabus reading
+        if action == "missed" and (ev is not None or day.strip()):
             note = nothing_saved(course_id, ev, day.strip())
             if note:
                 return after(request, course_id, "study", error=note, field=(action, "event_id"))

@@ -329,6 +329,11 @@ _WANTS_HEADER = re.compile(r"\b(who wrote|author|authors|written by|published|pu
 
 _PAST_RX = re.compile(r"\b(past|previous|previously|earlier|prior|old|last\s+(?:year|term|semester|time)|"
                       r"offerings?|(?:in|from)\s+20\d\d)\b", re.I)
+_THIS_TERM = re.compile(r"\b(?:this|the\s+current|current|our)\s+(?:term|semester|quarter|year|offering|course)\b|"
+                       r"\bthis\s+(?:fall|autumn|spring|summer|winter)\b|\bright\s+now\b", re.I)
+_PAST_REF = re.compile(r"\b(?:last|previous|prior|past|earlier|old)\s+(?:year'?s?|term'?s?|semester'?s?|quarter|"
+                       r"offerings?|exams?|midterms?|finals?|quizz?es|version|time)\b|\bpreviously\b|\bin\s+(?:past|earlier)\s+"
+                       r"(?:years|terms|semesters)\b", re.I)
 _TERM_RX = re.compile(r"\b(fall|autumn|spring|summer|winter)[\s\-_']*((?:20)?\d{2})\b", re.I)
 _SEASONS_WORDS = frozenset("fall autumn spring summer winter".split())
 
@@ -390,6 +395,8 @@ def query_intent(query: str, nq: dict[str, Any] | None = None) -> dict[str, Any]
         "main_arg": bool(_MAIN_ARG.search(query or "")),
         "wants_header": bool(_WANTS_HEADER.search(query or "")),
         "past": bool(_PAST_RX.search(query or "")) or bool(_TERM_RX.search(query or "")),
+        "past_ref": bool(_PAST_REF.search(query or "")),
+        "this_term": bool(_THIS_TERM.search(query or "")),
     }
 
 
@@ -460,6 +467,17 @@ def is_filler_chunk(text: str, heading: str = "") -> bool:
     should not be built from, though a question about them (or a Practice request) can still find them."""
     r = {"text": text or "", "heading": heading or ""}
     return _is_intro_chunk(r) or _is_exercise_chunk(r)
+
+
+_SCAFFOLD_HEAD = re.compile(r"^\W*(glossary|key terms|key takeaways|key concepts( and summary)?|section summary|chapter summary|summary|critical thinking"
+                            r"( questions)?|review questions|references|further reading|bibliography|footnotes|"
+                            r"acknowledg\w+|index)\W*$", re.I)
+
+
+def is_scaffold_chunk(text: str, heading: str = "") -> bool:
+    """Filler plus a textbook's own scaffolding (glossary, section summary, critical thinking questions): not what a
+    concept map or an exam guide is built from."""
+    return is_filler_chunk(text, heading) or bool(_SCAFFOLD_HEAD.match(heading or ""))
 
 
 def _definition_score(terms: list[str], r: dict[str, Any]) -> float:
@@ -914,6 +932,8 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
         if r["material_kind"] == "past_offering" and r["material_id"] not in offerings:
             if not intent["past"]:
                 score -= 4.0  # an earlier term's lecture, exam or policy is not this term's, unless it was asked for
+            elif intent["past_ref"] and not offerings:
+                score += 2.0  # 'last year', 'the previous exam': a saved past offering is what was meant
             else:
                 score -= 0.3 if titles.get(r["material_id"]) else 1.0
         if present == 0 and not titles.get(r["material_id"]):
@@ -938,14 +958,21 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
     named_ids = [m for m in dict.fromkeys(r["material_id"] for _, r in ranked) if m in named and titles.get(m, 0) >= 0.6]
     if len(named_ids) >= 2 and want_ids:
         ranked = _fair_share(ranked, named_ids, limit)
-    if len(qnums) >= 3 and ranked and _number_score(qnums, ranked[0][1]["text"]) >= 3.0:
-        nxt = store._row("SELECT id FROM chunks WHERE material_id = ? AND ord = (SELECT ord + 1 FROM chunks WHERE id = ?)",
-                         (ranked[0][1]["material_id"], ranked[0][1]["id"]))
-        if nxt and nxt["id"] not in {r["id"] for _, r in ranked[:2]}:
+    if len(qnums) >= 3 and ranked:
+        # a passage that carries the question's numbers (the matrix as the lecturer wrote it) is followed by the one
+        # that solves it; checked for each such passage among the leading results, not only the first one
+        hits = [i for i in range(min(len(ranked), 8)) if _number_score(qnums, ranked[i][1]["text"]) >= 3.0][:3]
+        for pos in reversed(hits):
+            nxt = store._row("SELECT id FROM chunks WHERE material_id = ? AND ord = (SELECT ord + 1 FROM chunks WHERE id = ?)",
+                             (ranked[pos][1]["material_id"], ranked[pos][1]["id"]))
+            if not nxt or nxt["id"] in {r["id"] for _, r in ranked[:pos + 2]}:
+                continue
             row = store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE c.id = ?"
                               f"{extra}", [nxt["id"], *fparams])
             if row:  # the line after a matching worked example is where it is solved
-                ranked = [ranked[0], (ranked[0][0] - 0.01, row[0])] + [x for x in ranked[1:] if x[1]["id"] != nxt["id"]]
+                at = min(pos + 1, max(0, limit - 1))
+                rest = [x for x in ranked if x[1]["id"] != nxt["id"]]
+                ranked = rest[:at] + [(ranked[pos][0] - 0.01, row[0])] + rest[at:]
     return [_source(r, sc) for sc, r in ranked[:limit]]
 
 
@@ -1006,6 +1033,33 @@ def _round_robin(lanes: list[list[Source]], limit: int, skip: list[set[str]]) ->
             if len(out) >= limit:
                 break
     return out
+
+
+def _with_syllabus(store, course_id: int, query: str, merged: list[Source], limit: int, exclude_graded: bool) -> list[Source]:
+    """'... from this term': the current syllabus is what 'this term' means, and no word of it links to the question,
+    so its best matching passages (the exam row, the essay row) are searched for apart from the rest."""
+    stripped = _THIS_TERM.sub(" ", _TERM_RX.sub(" ", query))
+    stripped = re.sub(r"\b(differ\w*|compar\w*|vs|versus|same|change\w*|offering|since|whether)\b", " ", stripped, flags=re.I)
+    nq = normalize_query(stripped)
+    if not nq["core"]:
+        return merged
+    extra, fparams = _filters(course_id, ["syllabus"], None, exclude_graded)
+    have = {s["chunk_id"] for s in merged}
+    try:
+        syl = _search_lane(store, course_id, stripped, query_intent(stripped), extra, fparams, 4)
+    except Exception:
+        return merged
+    syl = [x for x in syl if not is_title_only(x["text"], x["heading"]) and not is_header_chunk(x["text"], x["material_title"])][:2]
+    if not syl or all(x["chunk_id"] in have for x in syl):
+        return merged  # the syllabus passages that answer it are already there
+    syl = [x for x in syl if x["chunk_id"] not in have][:1 + (not any(m["material_kind"] == "syllabus" for m in merged))]
+    out = list(merged)
+    room = max(limit, 1) - len(out)
+    for _ in range(max(0, len(syl) - room)):  # make room from the tail, sparing the past offering the question names
+        drop = next((i for i in range(len(out) - 1, 0, -1) if out[i]["material_kind"] != "past_offering"), len(out) - 1)
+        out.pop(drop)
+    at = 1 if out else 0
+    return out[:at] + syl + out[at:]
 
 
 _ABBREVIATIONS = {"det": "determinant", "eig": "eigenvalue", "diag": "diagonal", "inv": "inverse", "dim": "dimension"}
@@ -1073,6 +1127,8 @@ def search(store, course_id: int, query: str, *, limit: int = 8, kinds: list[str
         cap = limit if not topic else max(1, -(-limit * 3 // 4))
         lead = _lecture_pool(store, course_id, query, evs, cap, extra, fparams, nq)
     clauses = split_clauses(query)
+    if len(clauses) >= 2 and set().union(*(query_doc_ids(c) for c in clauses)) != query_doc_ids(query):
+        clauses = [query]  # 'Federalist No. 10 and 51': the list of named documents is one part, not two
     if todo:
         clauses = [" ".join(todo)]
     if lead:
@@ -1094,6 +1150,8 @@ def search(store, course_id: int, query: str, *, limit: int = 8, kinds: list[str
     else:
         lanes.append(_search_lane(store, course_id, query, intent, extra, fparams, limit))
     merged = _round_robin(lanes, limit, [])
+    if intent["this_term"] and (not kinds or "syllabus" in kinds) and not material_ids:
+        merged = _with_syllabus(store, course_id, query, merged, limit, exclude_graded)
     if not lead:
         return merged
     kept = [_shingles(s["text"]) for s in lead]
@@ -1150,7 +1208,7 @@ def around(store, chunk_id: int, before: int = 1, after: int = 1) -> list[dict]:
 # ---------------------------------------------------------------- searching the materials list
 def _snippet(text: str, terms: list[str], width: int = 110) -> str:
     """A short stretch of the passage around the first word of the search that appears in it."""
-    flat = re.sub(r"\s+", " ", re.sub(r"[`*#>$]", "", text or "")).strip()
+    flat = re.sub(r"\s+", " ", re.sub(r"(?<=[A-Za-z0-9])\*(?=[A-Za-z0-9])", "\u00d7", re.sub(r"[`#>$]|(?<![A-Za-z0-9])\*+|\*+(?![A-Za-z0-9])", "", text or ""))).strip()
     low = flat.lower()
     at = min((i for i in (low.find(t) for t in terms) if i >= 0), default=0)
     start = max(0, at - width // 3)

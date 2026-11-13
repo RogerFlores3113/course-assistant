@@ -90,6 +90,9 @@ def detect_kind(filename: str, text_sample: str = "", term: str = "") -> str:
         return "past_offering"
     if has("past offering", "previous offering", "past offerings", "old exams", "past exams"):
         return "past_offering"
+    readme = tokens == ["readme"] or (tokens[-1:] == ["readme"] and not has("syllabus"))
+    if readme:  # a README describes a folder; its dates and policy words do not make it a syllabus
+        return "notes"
     if has("handout", "handouts"):
         return "handout"
     if hw_name():
@@ -341,6 +344,8 @@ def pair_copies(store: Store, material_id: int) -> None:
     if pdf["title"] != txt["title"] and _plain_key(pdf["title"]) in {
             _plain_key(_pretty_title(pdf.get("original_name") or "")), _plain_key(Path(pdf.get("original_name") or "").stem)}:
         store.update_material(pdf["id"], title=txt["title"])  # a file name turned into a title: the copy's is better
+    if pdf["kind"] == "notes" and txt["kind"] == lecture_notes_kind() and txt["kind"] != "notes":
+        store.update_material(pdf["id"], kind=txt["kind"])  # a PDF of instructor notes is guessed as My notes; its twin knows
     searched = pdf if not pdf.get("duplicate_of") else txt
     pages = [c for c in store.chunks_of(pdf["id"]) if c["loc_kind"] == "page"]
     sections = [c for c in store.chunks_of(txt["id"]) if c["loc_kind"] == "section"]
@@ -473,6 +478,23 @@ def link_to_lecture(store: Store, material_id: int) -> int | None:
         values["lecture_date"] = event["date"]
     store.update_material(material_id, **values)
     return int(event["id"])
+
+
+def delete_material(store: Store, material_id: int) -> int:
+    """Delete a material and the calendar events its syllabus import created (events carry source_material_id and
+    added_by = 'syllabus'; events the student added or edited by hand stay). Lectures linked to those events are
+    unlinked first. Returns how many events went with it."""
+    m = store.material(material_id)
+    if not m:
+        return 0
+    gone = [e["id"] for e in store.events(m["course_id"]) if e["source_material_id"] == material_id
+            and e["added_by"] == "syllabus"]
+    for other in store.materials(m["course_id"]):
+        if other.get("event_id") in gone:
+            store.update_material(other["id"], event_id=None)
+    store.clear_syllabus_events(material_id)
+    store.delete_material(material_id)
+    return len(gone)
 
 
 def _link_all(store: Store, course_id: int) -> int:
