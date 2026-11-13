@@ -56,10 +56,37 @@ ESSAY_GENERIC = frozenset("""essay thesis write driven answer answers question e
 pages due word words footnote footnotes chicago prompt rubric students student paper text show describe""".split())
 
 
+# "what should my thesis be", "what position should I take", "which idea should I pick": asking the app for the position
+_POSITION_ASK = re.compile(
+    r"(\bwhat\s+should\s+(?:my|the|our)\s+(?:\w+\s+){0,2}(?:thesis|claim|argument|position|intro\w*|conclusion)\s+"
+    r"(?:be|say|claim|argue)\b|"
+    r"\bwhat\s+should\s+i\s+(?:argue|claim|conclude|defend)\b|"
+    r"\bwhat\s+should\s+i\s+(?:say|write|put)\b[^?.]{0,40}\b(?:essay|paper|thesis|intro\w*|conclusion|opening|paragraph)\b|"
+    r"\bwhat\s+(?:position|side|stance|claim|argument|thesis)\s+(?:should|do|would)\s+i\b|"
+    r"\bwhich\s+(?:idea|topic|side|position|argument|claim|thesis|concept)\s+should\s+i\s+"
+    r"(?:pick|choose|argue|take|go\s+with|defend|use|write\s+about)\b|"
+    r"\btell\s+me\s+what\s+to\s+(?:argue|say|claim|write|conclude)\b|"
+    r"\bwhat\s+(?:do|would)\s+you\s+(?:argue|claim|conclude)\b)", re.I)
+# a method question about essays in general ("How do I write a good thesis statement in general?") asks for no prose
+_GENERAL_METHOD = re.compile(
+    r"(\bin\s+general\b|\bgenerally\b|\bfor\s+any\s+(?:essay|paper)\b|"
+    r"\bhow\s+(?:do|does|can|should|would|to)\s+(?:i\s+|you\s+|one\s+|people\s+|students?\s+|we\s+)?(?:\w+\s+){0,2}?"
+    r"(?:write|craft|build|structure|organi[sz]e|develop|make|improve|strengthen)\s+(?:a|an|the)\s+(?:\w+\s+){0,3}?"
+    r"(?:thesis|introduction|intro|essay|paragraph|conclusion|outline)\b|"
+    r"\bwhat\s+makes\s+(?:a|an)\s+(?:\w+\s+){0,2}(?:thesis|introduction|essay|paragraph|conclusion)\b)", re.I)
+_METHOD_Q = re.compile(r"^\W*(?:how|what|why|when|explain|can\s+you\s+explain|could\s+you\s+explain|tell\s+me\s+how)\b", re.I)
+_OWN_ESSAY = re.compile(r"\b(?:my|our|this|that|the)\s+(?:[\w']+\s+){0,3}(?:essay|paper|assignment|prompt)\b|\bessay\s*#?\s*\d+\b|"
+                        r"\b(?:for|on|about)\s+(?:essay|paper)\b", re.I)
+
+
 def writing_request(text: str) -> bool:
-    """A request to write, draft or word prose (thesis, intro, outline with topic sentences, an essay on ...)."""
+    """A request to write, draft or word prose (thesis, intro, outline with topic sentences, an essay on ...), or to be
+    told what position to take. A method question about essays in general is not one."""
     t = text or ""
-    return bool((_WRITE_VERB.search(t) and _PROSE_NOUN.search(t)) or _WRITE_PHRASE.search(t) or _MODEL_PHRASE.search(t))
+    if _METHOD_Q.search(t) and _GENERAL_METHOD.search(t) and not _OWN_ESSAY.search(t) and not _POSITION_ASK.search(t):
+        return False
+    return bool((_WRITE_VERB.search(t) and _PROSE_NOUN.search(t)) or _WRITE_PHRASE.search(t) or _MODEL_PHRASE.search(t)
+                or _POSITION_ASK.search(t))
 
 
 def topic_tokens(it: dict[str, Any]) -> set[str]:
@@ -180,14 +207,24 @@ _YEAR = re.compile(r"\b1[0-9]{3}s?\b|\b20[0-9]{2}s?\b")
 _WRAP = re.compile(
     r"(?:\b(?:would|could|might|can|may|will|should|to|you\s+(?:could|might|can))\s+(?:also\s+)?"
     r"(?:say|argue|claim|state|contend|maintain|propose|suggest|conclude|assert|show|write|put\s+it|be)\s*(?:that|:|,)\s+|"
+    r"\bi(?:'d|\s+would)\s+(?:argue|say|claim|contend|go\s+with)\s*(?:that|:|,)?\s+|"
+    r"\b(?:what|how)\s+(?:if|about)\s+(?:you\s+)?(?:argued|argue|arguing|claimed|claiming|said|saying|say|took|taking)\s+(?:that\s+)?|"
+    r"\b(?:why\s+not|how\s+about|have\s+you\s+(?:considered|thought\s+about))\s+(?:argu\w+|say\w*|claim\w*)\s+(?:that\s+)?|"
+    r"\b(?:could|would|can)\s+you\s+(?:argue|say|claim)\s+(?:that\s+)?|"
+    r"\bwhat\s+if\s+(?:your|the)\s+(?:thesis|claim|argument)\s+(?:were|was|is)\s+(?:that\s+)?|"
     r"\b(?:by|for\s+example\s+by|e\.g\.\s+by)\s+(?:arguing|claiming|saying|showing|stating|noting|concluding)\s+(?:that\s+)?|"
     r"\b(?:arguing|claiming|saying|stating|concluding)\s+that\s+|"
     r"\b(?:a|your|the|one|possible|sample|example|stronger|better|working|rough)\s+(?:\w+\s+){0,2}thesis"
     r"(?:\s+(?:in\s+this\s+direction|along\s+these\s+lines|might\s+be|could\s+be|would\s+be|will\s+be|is|could\s+read|"
-    r"might\s+read|would\s+read))?\s*[:,]\s+|"
+    r"might\s+read|would\s+read|(?:could|might|would|can)\s+be\s+(?:built|based|framed|organi[sz]ed|centered)\s+"
+    r"(?:around|on)\s+(?:this|that|the\s+following)\s+(?:idea|claim|point|argument)))?\s*[:,]\s+|"
     r"\bsomething\s+like\s*[:,]?\s+|\bfor\s+(?:example|instance)\s*[:,]\s+|\byou\s+(?:could|might|can)\s+say\s*[:,]?\s+|"
-    r"\b(?:one|a)\s+(?:possible\s+)?(?:position|claim|argument|take)\s+(?:is|would\s+be|could\s+be)\s*[:,]?\s*(?:that\s+)?)",
+    r"\b(?:one|a|an|your|the)\s+(?:\w+\s+){0,2}(?:position|claim|argument|take|stance|angle)\s+"
+    r"(?:is|would\s+be|could\s+be|might\s+be)\s*[:,]?\s*(?:that\s+)?)",
     re.I)
+_META = re.compile(r"\b(?:thesis|paragraphs?|evidence|essay|claims?|arguments?|reader|rubric|sentences?|position|conclusion|"
+                   r"introduction|counter-?arguments?|citations?|sources?|draft|writing|writer|question|prompt|assignment|"
+                   r"footnotes?|requirements?|grade|points?)\b", re.I)
 
 
 def entities(it: dict[str, Any]) -> set[str]:
@@ -207,10 +244,17 @@ def entities(it: dict[str, Any]) -> set[str]:
                                   "length", "grading", "prompt", "requirements", "criterion", "points", "thesis"}
 
 
+_SELF_SUBJECT = re.compile(
+    r"^\W*(?:(?:in|according\s+to)\s+[^,]{3,50},\s*)?(?:(?:this|the\s+present|my|our)\s+(?:\w+\s+)?(?:essay|paper|thesis|paragraph|piece|"
+    r"introduction|intro|chapter)\b|(?:i|we)\b)|\b(?:in\s+this\s+(?:essay|paper)),?\s+(?:i|we)\b", re.I)
+
+
 def attributed(sentence: str) -> bool:
     """The sentence reports what a source author or document says ('Madison argues that ...', 'Federalist No. 10
     says ...', 'The textbook describes ...') and does not itself pass judgement on whether it was right."""
     s = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
+    if _SELF_SUBJECT.search(s[:90]):  # "This essay argues ...", "I argue ...": the writer's own claim, never a source's
+        return False
     m = _ATTRIBUTED.match(s) or _ATTRIBUTED_DOC.match(s)
     return bool(m) and not _JUDGE.search(s[m.end():])
 
@@ -222,7 +266,7 @@ def unwrap(sentence: str) -> tuple[str, bool]:
     m = _WRAP.search(s)
     if not m:
         return s, False
-    core = s[m.end():].strip().strip("\"“”'*_ ")
+    core = s[m.end():].strip().strip("\"“”'*_ ").rstrip("?").strip()
     return (core, True) if core else (s, False)
 
 
@@ -243,6 +287,108 @@ def is_position(core: str, topic: set[str], ents: set[str] | None = None, years:
     return bool(shared & ents) or (years and bool(_YEAR.search(c)) and len(shared) >= 2 and bool(ents))
 
 
+_ENG = frozenset("the of and to in is that was were it for with as by on are this be which but not from at an or his their had has "
+                 "have they he she we you will would could".split())
+_FOREIGN = frozenset("el la los las del que en pero con por para es son una un se su sus como más al lo le les des du et est dans "
+                     "pour avec pas sur une der die das und ist nicht mit ein eine zu von den dem auf für os um uma não di il "
+                     "che per sono não porque pero sobre entre sin también aunque razón".split())
+
+
+def non_english(text: str) -> bool:
+    """A sentence of six words or more written in Spanish, French, German, Portuguese or Italian (function words, no
+    English ones). Judged only to catch essay claims in another language."""
+    words = re.findall(r"[^\W\d_]{2,}", (text or "").lower())
+    if len(words) < 6:
+        return False
+    foreign = sum(1 for w in words if w in _FOREIGN)
+    eng = sum(1 for w in words if w in _ENG)
+    return foreign >= 2 and eng <= 1 or (foreign >= 1 and eng == 0 and bool(re.search(r"[àâäçéèêëîïôöùûüñãõ¿¡ß]", text.lower())))
+
+
+_NOT_COVERED = re.compile(
+    r"\b(?:materials?|passages?|sources?|notes?|files?|readings?|documents?|excerpts?|syllabus|searched|saved)\b[^.!?]{0,70}?"
+    r"\b(?:do(?:es)?\s*n[o']t|did\s*n[o']t|does\s+not|do\s+not|not|never)\s+(?:\w+\s+){0,2}"
+    r"(?:show|cover|say|include|contain|mention|state|specify|give|address|appear|have|list|name|describe|explain)\b|"
+    r"\bI\s+(?:could\s*n[o']t|can(?:'|no)t|did\s*n[o']t|was\s+unable\s+to|am\s+unable\s+to)\s+(?:find|see|locate)\b|"
+    r"\b(?:not|nothing)\s+(?:covered|shown|mentioned|included|stated)\s+(?:in|by)\b|\bno\s+(?:mention|information)\s+(?:of|about|on)\b",
+    re.I)
+_TAIL = re.compile(
+    r"(?:,|;|\s[-\u2013\u2014]+\s|\(|\s)\s*(?:which|that|and|as|so|something)?\s*(?:a|the|every|any|each)?\s*"
+    r"(?:students?|readers?|you|your\s+\w+|anyone)\s+(?:\w+\s+){0,2}?(?:should|must|could|can|might|need|needs|ought|will|would|want|may)\b[^.!?]*\)?\s*[.!?]*\s*$",
+    re.I)
+
+
+def trim_tail(s: str) -> str:
+    """The sentence without a trailing coaching clause ('..., which a student should note'): appending one never turns
+    finished prose into coaching."""
+    out = _TAIL.sub("", s or "").strip()
+    return out if len(out.split()) >= 4 else (s or "")
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Sentences cut at . ! ? followed by space, but never after an abbreviation or an initial ('Nos.', 'Gov.', 'St.',
+    'pp.', 'U.S.'): the same list the renderer uses."""
+    try:
+        from . import grounding
+        abbrev = grounding._ABBREV
+    except Exception:  # noqa: BLE001
+        abbrev = {"no", "nos", "gov", "gen", "sen", "st", "pp", "vol", "mr", "mrs", "dr", "u.s", "e.g", "i.e", "etc"}
+    out: list[str] = []
+    for part in re.split(r"(?<=[.!?])\s+", text or ""):
+        if out and out[-1].endswith("."):
+            last = out[-1].split()[-1].lower().rstrip(".").strip("\"'“”([")
+            if last in abbrev or re.fullmatch(r"[a-z]", last):
+                out[-1] = out[-1] + " " + part
+                continue
+        out.append(part)
+    return out
+
+
+def _wrapped_position(core: str, topic: set[str], ents: set[str] | None, source: str = "") -> bool:
+    """A position the writer was invited to take ('A strong essay would say that X', 'You could argue that X', 'Your thesis:
+    X', 'What if you argued that X?'): the claim X itself. On an open prompt (no proper names) any claim of eight words or
+    more counts; a claim about the essay itself ('a thesis needs evidence') is coaching, not a position."""
+    c = _CITE_STRIP.sub("", core or "").strip().strip("\"“”'*_ ").rstrip("?!. ").strip()
+    words = len(c.split())
+    if words < 4 or re.search(r"^whether\b|\bon\s+whether\b|\bwhether\s+or\s+not\b|\bright\s+or\s+wrong\b|\bwrong\s+or\s+right\b|"
+                              r"\bfor\s+or\s+against\b", c, re.I):
+        return False
+    if STRICT_COACH.search(c) or (source and quote_ratio(c, source) >= 0.5):
+        return False
+    if is_position(c + ".", topic, ents):
+        return True
+    shared = _ct(c) & (topic | (ents or set()))
+    if words >= 8 and (not _META.search(c) or len(shared) >= 2):
+        return True
+    return bool(shared) and bool(_POS_EVAL.search(c) or ARGUE.search(c))
+
+
+def _foreign_claim(s: str, topic: set[str], ents: set[str] | None, source: str = "") -> bool:
+    """A non-English sentence that makes a claim about the essay's subject (decision: judged as essay prose unless it is a
+    quote of the materials or of the student's own message)."""
+    if not non_english(s) or (source and quote_ratio(s, source) >= 0.5):
+        return False
+    c = _CITE_STRIP.sub("", s).strip()
+    shared = _ct(c) & (topic | (ents or set()))
+    words = len(c.split())
+    if "?" in c:
+        return bool(shared) or bool(_YEAR.search(c))
+    return words >= 10 or bool(shared) or bool(_YEAR.search(c))
+
+
+def _position_level(s: str, topic: set[str], ents: set[str] | None, source: str = "", foreign: bool = True) -> tuple[int, str]:
+    """Level and reason of one sentence that takes a position on the essay's own question, in any wrapper, language or
+    sentence form; (0, "") when it does not."""
+    core, wrapped = unwrap(s)
+    if wrapped and _wrapped_position(core, topic, ents, source):
+        return 2, "position"
+    if not wrapped and not attributed(s) and not STRICT_COACH.search(s) and is_position(s, topic, ents):
+        return 1, "position"
+    if foreign and _foreign_claim(s, topic, ents, source):
+        return 2, "non-English essay prose"
+    return 0, ""
+
+
 def _claims_before_modal(s: str) -> bool:
     """False for coaching ('a thesis should show ...'), true for a claim ('showed that ... could not ...')."""
     m = MODAL.search(s)
@@ -252,33 +398,36 @@ def _claims_before_modal(s: str) -> bool:
 
 
 def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, sources: list[Any] | None,
-              loose: bool = False, ents: set[str] | None = None) -> tuple[int, str]:
+              loose: bool = False, ents: set[str] | None = None, foreign: bool = True) -> tuple[int, str]:
     """(level, reason) of one sentence or span. span: 'quoted' | 'colon' | 'label' | 'plain'. ents: the assignment's own
-    names; given for essays, it turns on the one-sentence position check."""
+    names; given for essays, it turns on the one-sentence position check. Each sentence is judged alone: a coaching word
+    in another sentence never exempts it, and a trailing coaching clause never exempts this one."""
+    soft = (0, "")
     cited = bool(_cite_numbers(sent))
-    s = _CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ ")
+    s = trim_tail(_CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ "))
+    if _NOT_COVERED.search(s):  # "The materials I searched do not show this term's style"
+        return 0, ""
     if cited and attributed(s):  # "Madison argues ..." with a cite: fine when the cited passage says it
         if sources is None or cited_restatement(sent, sources):
             return 0, ""
     elif cited and sources is not None and cited_restatement(sent, sources):
         return 0, ""
     if ents is not None and span == "plain":
-        core, wrapped = unwrap(s)
-        if wrapped and is_position(core, topic, ents):
-            return 2, "position"
-        if not wrapped and not attributed(s) and not STRICT_COACH.search(s) and is_position(s, topic, ents):
-            return 1, "position"  # a cite does not back a judgement the cited passage was not checked to make
+        lvl, why = _position_level(s, topic, ents, source, foreign)
+        if lvl == 2:
+            return lvl, why  # a cite does not back a judgement the cited passage was not checked to make
+        soft = (lvl, why)
     if cited and sources is None:
-        return 0, ""
+        return soft
     if len(s.split()) < 8 or "?" in s or STRICT_COACH.search(s):
-        return 0, ""
+        return soft
     if source and quote_ratio(s, source) >= 0.5:  # quoting the assignment's own requirement
-        return 0, ""
+        return soft
     plain = span == "plain"
     if plain and not _claims_before_modal(s):
-        return 0, ""
+        return soft
     if plain and ents is not None and not cited and attributed(s):  # reporting what a source says, with no verdict on it
-        return 0, ""
+        return soft
     shared = len(_ct(s) & topic)
     cue = THESIS_CUE.search(s)
     if cue and shared >= 1:
@@ -292,7 +441,7 @@ def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, s
         return 1, "argument"
     if plain and loose and shared >= 3:
         return 1, "answer"
-    return 0, ""
+    return soft
 
 
 def _spans(line: str) -> list[tuple[str, str]]:
@@ -306,7 +455,7 @@ def _spans(line: str) -> list[tuple[str, str]]:
     lab = _LABEL.match(line)
     if lab:
         out.append((lab.group(2), "label"))
-    for sent in re.split(r"(?<=[.!?])\s+", line):
+    for sent in _split_sentences(line):
         out.append((sent, "plain"))
     return out
 
@@ -318,17 +467,18 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
     cue is needed; cited restatements of a source are fine."""
     asked = force_asked or writing_request(question)
     topic = topic_tokens(it)
-    source = f"{it.get('body', '')} {it.get('title', '')}"
+    source = f"{it.get('body', '')} {it.get('title', '')} {question or ''}"  # quoting the assignment or the student is fine
     loose = is_short_answer(it) and force_asked if loose is None else loose
     best = (0, "", "")
     ents = entities(it) if not is_short_answer(it) and it.get("kind", "essay") == "essay" else None
+    foreign = not non_english(it.get("body") or "")  # an essay set in another language is judged as essay prose anyway
     reply = _CITE_SPLIT.sub(r" \2\1", text or "")
     for line in re.split(r"\n+", reply):
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip() if not _LABEL.match(line) else line.strip()
         if not line:
             continue
         for sent, span in _spans(line):
-            lvl, why = _classify(sent, span, topic, source, asked, sources, loose, ents)
+            lvl, why = _classify(sent, span, topic, source, asked, sources, loose, ents, foreign)
             if lvl > best[0]:
                 best = (lvl, why, _CITE_STRIP.sub("", sent).strip())
         if best[0] == 2:
@@ -340,8 +490,11 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
             continue
         if not re.search(r"[.!?](?:\s|$)", p):
             continue
-        bare = _CITE_STRIP.sub("", p)
-        if _COACHING_PARA.search(bare) or quote_ratio(bare, source) >= 0.5:
+        # judged sentence by sentence: a coaching sentence leaves the paragraph, it never exempts the others
+        kept = [x for x in _split_sentences(_CITE_STRIP.sub("", p))
+                if not _COACHING_PARA.search(trim_tail(x)) and not _NOT_COVERED.search(x)]
+        bare = " ".join(kept)
+        if len(bare.split()) < 25 or quote_ratio(bare, source) >= 0.5:
             continue
         shared = len(_ct(bare) & topic)
         if _CITE_NUMS.search(p) and cited_restatement(p, sources):
@@ -458,7 +611,7 @@ def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = 
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip()
         if not line or line.startswith("#"):
             continue
-        for sent in re.split(r"(?<=[.!?])\s+", line):
+        for sent in _split_sentences(line):
             body = _CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ ")
             if len(body.split()) < 5 or "?" in body:
                 continue
@@ -506,6 +659,23 @@ def guide_hit(store, course_id: int, title: str, body: str, sources: list[Any] |
     return max(hits, key=lambda h: h[0])[1] if hits else None
 
 
+def _card_claim(it: dict[str, Any], back: str, source_text: str = "") -> str:
+    """A sentence on a card's back that argues the essay's own question (two of the prompt's topic words and an argument
+    word) and that neither the assignment nor the card's source says. Concept cards never match."""
+    topic = topic_tokens(it)
+    own = f"{it.get('body', '')} {it.get('title', '')}"
+    for line in re.split(r"\n+", back or ""):
+        for sent in _split_sentences(line):
+            s = trim_tail(_CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ "))
+            if len(s.split()) < 8 or "?" in s or STRICT_COACH.search(s) or attributed(s) or _NOT_COVERED.search(s):
+                continue
+            if quote_ratio(s, own) >= 0.5 or (source_text and (quote_ratio(s, source_text) >= 0.5 or supported(s, source_text))):
+                continue
+            if len(_ct(s) & topic) >= 2 and ARGUE.search(s):
+                return s
+    return ""
+
+
 def card_hit(store, course_id: int, front: str, back: str, source_text: str = "") -> dict | None:
     """The graded essay or short-answer item a flashcard gives away (an essay thesis, position or conclusion, or a
     finished answer, reworded or not). Cards about concepts are fine."""
@@ -521,6 +691,11 @@ def card_hit(store, course_id: int, front: str, back: str, source_text: str = ""
             if lvl > 0:
                 hits.append((len(_ct(sent) & topic_tokens(it)) + 1, dict(integrity._hit(it, "card"), sentence=sent)))
                 break
+            if not short:
+                sent = _card_claim(it, back, source_text)
+                if sent:  # a position on an open prompt ('Which idea matters most? X, because ...')
+                    hits.append((len(_ct(sent) & topic_tokens(it)) + 1, dict(integrity._hit(it, "card"), sentence=sent)))
+                    break
             if short:
                 n, sent = short_answer_hit(it, text, srcs)
                 if n:
@@ -543,12 +718,14 @@ _ASK_OPEN = re.compile(r"^\W*(?:please|can|could|would|will|check|give|review|re
 _DRAFT_REF = re.compile(r"\b(?:my|this|that|it|here(?:'s|\s+is)|below|following|attached|the)\b", re.I)
 _DRAFT_HEADER = re.compile(r"^\W*(?:here(?:'s|\s+is|\s+are)|this\s+is|below\s+is|attached\s+is)\s+(?:my|our|the)\s+(?:\w+\s+){0,3}"
                            r"(?:draft|essay|paper|paragraphs?|thesis|intro\w*|conclusion|attempt|writing|work)\b", re.I)
+_DRAFT_HEAD = re.compile(r"\b(?:my|our|the|this|here(?:'s|\s+is))\s+(?:\w+\s+){0,3}(?:draft|essay|paper|paragraphs?|thesis|intro\w*|"
+                         r"conclusion|attempt|writing|work|answer)\b(?:\s+(?:for|on|of)\s+[^:?]{0,50})?\s*$", re.I)
 _QUOTED_SPAN = (re.compile(r"[\"“]([^\"”]{30,})[\"”]", re.S),
                 re.compile(r"(?<!\w)['‘](.{30,}?)['’](?!\w)", re.S))
 
 
 def _sentences(text: str) -> list[str]:
-    return [x for x in re.split(r"(?<=[.!?])\s+|\n+", text or "") if x.strip()]
+    return [y for x in re.split(r"\n+", text or "") for y in _split_sentences(x) if y.strip()]
 
 
 def draft_request(question: str) -> str | None:
@@ -566,11 +743,26 @@ def draft_request(question: str) -> str | None:
         if sep in q:
             head, tail = q.split(sep, 1)
             cands.append((tail, head, False))
-    sents = _sentences(q)
-    lo, hi = 0, len(sents)
     def askish(x: str) -> bool:
         return len(x.split()) <= 25 and ("?" in x or bool(_FEEDBACK.search(x) and _ASK_OPEN.match(x))
                                          or bool(_DRAFT_HEADER.match(x)))
+
+    def strip_asks(text: str, lead: bool = True) -> str:
+        ss = _sentences(text)
+        lo, hi = 0, len(ss)
+        while lead and lo < hi - 1 and askish(ss[lo]):
+            lo += 1
+        while hi - 1 > lo and askish(ss[hi - 1]):
+            hi -= 1
+        return " ".join(ss[lo:hi])
+
+    fb = _FEEDBACK.search(q)
+    if ":" in q and fb:  # "Here is my draft for Essay 1: <short draft> Feedback please": a feedback word anywhere is enough
+        head, tail = q.split(":", 1)
+        if _DRAFT_HEAD.search(head) and "?" not in head:
+            cands.append((strip_asks(tail, lead=False), f"{head} {fb.group(0)}", True))
+    sents = _sentences(q)
+    lo, hi = 0, len(sents)
     while lo < hi - 1 and askish(sents[lo]):
         lo += 1
     while hi - 1 > lo and askish(sents[hi - 1]):
@@ -602,6 +794,11 @@ def draft_item(question: str, candidates: list[dict[str, Any]], items: list[dict
     named = [i for i in candidates if any(i.get("id") == n.get("id") for n in named_all)]
     if named_all and not named:
         return None
+    if not named:  # "my draft for Essay 1": the item's label or its title's prefix names it
+        for cnd in candidates:
+            for lab in {(cnd.get("label") or "").strip(), (cnd.get("title") or "").split(":")[0].strip()}:
+                if lab and (re.search(r"\d", lab) or len(lab.split()) >= 2) and re.search(rf"\b{re.escape(lab)}\b", question, re.I):
+                    named = [cnd]
     pool = named or candidates
     if any(quote_ratio(draft, c.get("body") or "") >= 0.5 for c in pool):  # a pasted assignment, not a draft
         return None
@@ -627,7 +824,8 @@ _REWRITE = re.compile(
     r"(?:revised|rewritten|improved|stronger|better|alternative|suggested)\s+(?:thesis|version|wording|sentence|"
     r"opening|draft|paragraph)\s*(?:is|:|would)|here(?:'s|\s+is)\s+(?:a|an|one|the)\s+(?:revised|improved|stronger|better|"
     r"possible)|(?:rewrite|rephrase|reword)\s+(?:it|this|that)\s+(?:as|to)\b|instead,?\s+(?:write|say|try)\b|"
-    r"use\s+that\s+as\s+your)", re.I)
+    r"use\s+that\s+as\s+your|your\s+thesis\s+(?:could|might|would)\s+be\s+(?:built|based|framed)\s+around|"
+    r"one\s+possible\s+thesis\s*[:,])", re.I)
 _VOICE = re.compile(r"\b(you|your|yours|you're|draft|rubric|assignment|student|requirements?|reader|question|ask|consider|"
                     r"should|could|might|would|missing|unclear|not yet|does not|doesn't|needs?|which|what|how|why|whether|"
                     r"thesis|paragraph|sentence|counter-?argument|citations?|footnotes?|point|states?|says?|says)\b", re.I)
@@ -652,6 +850,7 @@ def feedback_leaks(draft: str, assignment: Any, reply: str, sources: list[Any] |
     if isinstance(assignment, dict):
         topic = topic_tokens(assignment)
     ents = entities(assignment) if isinstance(assignment, dict) else None
+    foreign = not non_english(atext)
     for line in re.split(r"\n+", _CITE_SPLIT.sub(r" \2\1", reply or "")):
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip()
         if not line:
@@ -659,10 +858,19 @@ def feedback_leaks(draft: str, assignment: Any, reply: str, sources: list[Any] |
         for sent, span in _spans(line):
             if cited_restatement(sent, sources) and (sources is not None or not unwrap(sent)[1]):
                 continue
-            s = _CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ ")
-            core, wrapped = unwrap(s)
-            if span == "plain" and wrapped and is_position(core, topic, ents) and quote_ratio(core, known) < 0.5:
-                return True  # 'for example by arguing that ...', 'A thesis in this direction: ...', 'Your thesis: ...'
+            s = trim_tail(_CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ "))
+            if len(s.split()) >= 4 and quote_ratio(s, known) >= 0.5 and span == "plain":
+                continue  # a quote of the student's draft, the assignment or a source
+            if span == "plain":
+                # the same position test as the ordinary reply, on every sentence that is not a quote or a rubric
+                # restatement: wrapped positions ('Your thesis: X', 'A strong essay would say that X'), plain ones, other languages
+                core, wrapped = unwrap(s)
+                if wrapped and _wrapped_position(core, topic, ents, known):
+                    return True
+                if not wrapped and not _VOICE.search(s) and not attributed(s) and is_position(s, topic, ents):
+                    return True
+                if foreign and _foreign_claim(s, topic, ents, known):
+                    return True
             if len(s.split()) < 8 or "?" in s or quote_ratio(s, known) >= 0.5:
                 continue
             if span in ("quoted", "colon") and not STRICT_COACH.search(s):
@@ -735,6 +943,9 @@ def _requirement_lines(body: str) -> list[str]:
     return out[:6]
 
 
+FEEDBACK_FAILED = "I could not write safe feedback on this draft just now."
+
+
 def rubric_questions(graded: dict[str, Any], kind: str = "essay") -> str:
     """A fallback with no model wording: questions built from the assignment's own requirements and rubric rows."""
     reqs = _requirement_lines(graded.get("body") or "")
@@ -746,7 +957,7 @@ def rubric_questions(graded: dict[str, Any], kind: str = "essay") -> str:
         qs = [f"Where in your draft does it meet this: {r}?" for r in reqs[:4]]
         qs += ["Which sentence is your claim, and could a reader disagree with it?",
                "Which passage or event backs each paragraph, and have you cited it?"][:max(0, 3 - len(qs))]
-    return ("I could not write safe feedback on this draft just now. Here are questions from the assignment's own "
+    return (FEEDBACK_FAILED + " Here are questions from the assignment's own "
             "requirements and rubric to ask of your draft. Answer them, revise, then paste it again and ask for "
             "feedback against the rubric.\n\n" + "\n".join(f"- {q}" for q in qs))
 
