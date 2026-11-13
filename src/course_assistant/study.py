@@ -347,7 +347,7 @@ def _generate(store: Store, course_id: int, provider, kind: str, title: str, tas
         return r["routed"]
     body, blocks = r["body"], list(r["blocks"])
     if extra_note:
-        body = "\n".join(f"> {ln}" if ln.strip() else ">" for ln in extra_note.splitlines()) + f"\n\n{body}"
+        body = f"> {extra_note}\n\n{body}"
         blocks.insert(0, {"kind": "text", "md": extra_note, "cites": []})
     body = f"{body}\n\n{disclaimer.FOOTER}"
     d = dict(data or {})
@@ -633,8 +633,7 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
     graded = _mod("integrity").match_graded(store, course_id, " ".join(topics_text))
     notes = [scope_note]
     if missing:
-        notes.append("No saved materials for these lectures. Add them to cover those topics:\n\n"
-                     + "\n".join(f"- {x}" for x in missing))
+        notes.append("No saved materials for: " + "; ".join(missing) + ". Add them to cover those topics.")
     if graded:
         notes.append("Practice questions below are original twins with different numbers. Questions you marked as "
                      "graded are not solved here.")
@@ -655,7 +654,7 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
                      question=ev["title"], event_id=ev["id"],
                      data={"topics": topics, "previous_exam": prev, "missing_lectures": missing,
                            "materials": [m["title"] for m in mats], "syllabus_rows": syllabus_rows},
-                     max_tokens=5000, extra_note="\n\n".join(n for n in notes if n))
+                     max_tokens=5000, extra_note=" ".join(n for n in notes if n))
 
 
 # ---------------------------------------------------------------- concept map

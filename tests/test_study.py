@@ -457,7 +457,7 @@ def test_exam_guide_uses_window_materials_and_names_missing_lectures(world):
     p = Prov(GOOD)
     g = s.guide(study.exam_guide(s, cid, p, event_id=ex))
     assert g["data"]["missing_lectures"] == ["Kinetics: rates (2026-02-12)"]
-    assert "No saved materials for these lectures" in g["body_md"] and "- Kinetics: rates (2026-02-12)" in g["body_md"]
+    assert "No saved materials for: Kinetics: rates" in g["body_md"]
     assert g["data"]["materials"] == ["Chapter 3"] and "Molarity is moles per liter." in user_msg(p)
     assert "Vector space" not in user_msg(p) and "NO saved materials" in user_msg(p)
     assert g["data"]["topics"] == ["Molarity", "Kinetics rates"] and g["data"]["previous_exam"] == "2026-02-01"
