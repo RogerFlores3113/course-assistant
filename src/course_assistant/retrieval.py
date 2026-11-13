@@ -360,6 +360,19 @@ def _stems(words) -> set[str]:
     return {_stem(w) for w in words}
 
 
+_QUESTION_WORDS = frozenset("""how why when where which who whom whose can could do does did is are was were should would
+will compute calculate find solve write give fill make list compare""".split())
+
+
+def _bare_topic(query: str, tstems: set[str]) -> bool:
+    """A short noun phrase with no question in it ('eigenvalues and eigenvectors', 'molarity'): a request to explain the
+    topic, so the passage that defines it is the one wanted."""
+    words = _words(query)
+    if not 1 <= len(words) <= 6 or "?" in query or re.search(r"\d", query):
+        return False
+    return not (set(words) & _QUESTION_WORDS)
+
+
 def query_intent(query: str, nq: dict[str, Any] | None = None) -> dict[str, Any]:
     """What a question is about, apart from its topic words: dates, definitions, overviews, practice."""
     nq = nq or normalize_query(query)
@@ -371,7 +384,7 @@ def query_intent(query: str, nq: dict[str, Any] | None = None) -> dict[str, Any]
         "admin": admin, "date": date,
         "practice": bool(toks & _PRACTICE_WORDS),
         "overview": bool(toks & _OVERVIEW_WORDS),
-        "define": bool(_DEFINE_Q.search(query or "")),
+        "define": bool(_DEFINE_Q.search(query or "")) or _bare_topic(query or "", tstems),
         "main_arg": bool(_MAIN_ARG.search(query or "")),
         "wants_header": bool(_WANTS_HEADER.search(query or "")),
         "past": bool(_PAST_RX.search(query or "")) or bool(_TERM_RX.search(query or "")),
@@ -447,7 +460,7 @@ def _definition_score(terms: list[str], r: dict[str, Any]) -> float:
     have = {_stem(w) for w in _words(r["heading"] + " " + text)}
     if sum(1 for t in terms if _stem(t) in have) * 2 < len(terms):
         return 0.0
-    best = 0.0
+    best, defined = 0.0, 0
     for t in terms:
         if len(t) < 3:
             continue
@@ -466,9 +479,11 @@ def _definition_score(terms: list[str], r: dict[str, Any]) -> float:
         elif re.search(r"\bdefinition\b", text + " " + (r["heading"] or ""), re.I) and re.search(w, text, re.I):
             sc = 1.5
         elif re.search(rf"\b{stem}\w*\s+(?:is|are)\b", text, re.I):
-            sc = 1.0
+            sc = 0.5
         best = max(best, sc)
-    return best
+        if sc >= 1.5:
+            defined += 1
+    return best + 0.75 * max(0, defined - 1)  # a passage that defines two of the terms is the one that introduces them
 
 
 _DATE_RX = re.compile(
@@ -980,6 +995,39 @@ def _round_robin(lanes: list[list[Source]], limit: int, skip: list[set[str]]) ->
     return out
 
 
+_ABBREVIATIONS = {"det": "determinant", "eig": "eigenvalue", "diag": "diagonal", "inv": "inverse", "dim": "dimension"}
+_TODO_Q = re.compile(r"\b(to-?do|fill\s+(?:in|out)|notes?|incomplete|unfinished|blank|gaps?)\b", re.I)
+
+
+def _todo_terms(store, course_id: int, query: str, evs: list[dict[str, Any]]) -> list[str]:
+    """What the student's own unfinished note is about: the heading and lines around its TODO for this lecture
+    ('Eigenvalues', 'trace and det'), as search words. [] when the question is not about notes or no note has a TODO."""
+    if not _TODO_Q.search(query or ""):
+        return []
+    dates = {(int(e["date"][5:7]), int(e["date"][8:10])) for e in evs if re.match(r"\d{4}-\d{2}-\d{2}", e.get("date", ""))}
+    best: tuple[int, list[str]] | None = None
+    for r in store._rows("SELECT c.text, c.heading FROM chunks c JOIN materials m ON m.id = c.material_id "
+                         "WHERE c.course_id = ? AND m.kind = 'notes' AND m.graded = 0 AND c.text LIKE '%TODO%'",
+                         (course_id,)):
+        lines = r["text"].splitlines()
+        for i, ln in enumerate(lines):
+            if not re.search(r"\bTODO\b", ln):
+                continue
+            md = _MONTH_DAY.search(ln)
+            hit = 2 if md and (_MONTHS[md.group(1).lower().rstrip(".")], int(md.group(2))) in dates else 1
+            near = [x for x in lines[max(0, i - 6):i + 4] if x is not ln and not re.search(r"\bTODO\b", x)]
+            if best is None or hit > best[0]:
+                best = (hit, [r["heading"], *near])
+    if not best:
+        return []
+    out: list[str] = []
+    for t in query_terms(" ".join(best[1]), max_terms=24):
+        t = _ABBREVIATIONS.get(t, t)
+        if (len(t) > 2 or t.isdigit()) and t not in _LECTURE_NOISE and t not in out:
+            out.append(t)
+    return out[:8]
+
+
 def search(store, course_id: int, query: str, *, limit: int = 8, kinds: list[str] | None = None,
            material_ids: list[int] | None = None, exclude_graded: bool = False) -> list[Source]:
     """Best chunks for a free-text question. Higher score is better.
@@ -1000,11 +1048,20 @@ def search(store, course_id: int, query: str, *, limit: int = 8, kinds: list[str
         evs = lecture_events(store, course_id, query)
     except Exception:  # a bad calendar row must not break search
         evs = []
+    todo: list[str] = []
     if evs:
         topic = [t for t in nq["strong"] if t not in _LECTURE_NOISE and not t.isdigit()]
+        if not topic:  # 'fill in my TODO from the Nov 10 lecture': the student's own note says what is missing
+            todo = _todo_terms(store, course_id, query, evs)
+            if todo:
+                nq = {**nq, "core": [*nq["core"], *todo], "strong": [*nq["strong"], *todo],
+                      "stems": {*nq["stems"], *(_stem(t) for t in todo)}}
+                topic = todo
         cap = limit if not topic else max(1, -(-limit * 3 // 4))
         lead = _lecture_pool(store, course_id, query, evs, cap, extra, fparams, nq)
     clauses = split_clauses(query)
+    if todo:
+        clauses = [" ".join(todo)]
     if lead:
         topic = [t for t in nq["strong"] if t not in _LECTURE_NOISE and not t.isdigit()]
         if not topic:  # a bare 'primer for Lecture 20': search the lecture's own title and topics
