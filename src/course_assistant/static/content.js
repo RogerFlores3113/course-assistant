@@ -31,6 +31,14 @@
     });
   }
 
+  // "Pause" buttons next to the per-passage "Play from" buttons stop the recording where it is.
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest("[data-pause]");
+    var p = document.getElementById("player");
+    if (!b || !p) { return; }
+    p.pause();
+  });
+
   window.addEventListener("load", function () { renderAll(document); });
   document.addEventListener("DOMContentLoaded", function () { renderAll(document); });
   document.addEventListener("htmx:afterSwap", function (e) { renderAll(e.target || document); });

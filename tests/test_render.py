@@ -40,8 +40,8 @@ def test_sources_show_only_cited_with_also_searched_p4(ready):
     r = page(ready, [{"kind": "text", "md": "Claim [2].", "cites": [2]}])
     sec = r.text.split('<div class="sources">')[1]
     main, also = sec.split("Also searched (not cited)")
-    assert 'value="2"' in main and 'value="1"' not in main and 'value="3"' not in main
-    assert 'value="1"' in also and 'value="3"' in also and "<details" in r.text
+    assert '>[2]</a>' in main and '>[1]</a>' not in main and '>[3]</a>' not in main
+    assert '>[1]</a>' in also and '>[3]</a>' in also and "<details" in r.text
 
 
 def test_no_also_searched_when_all_cited(ready):
@@ -51,11 +51,11 @@ def test_no_also_searched_when_all_cited(ready):
 
 def test_not_covered_note_p4(ready):
     r = page(ready, [{"kind": "outside", "md": "General knowledge only.", "cites": []}])
-    assert "Your saved materials don&#39;t cover this well. Parts below come from general knowledge." in r.text
+    assert "Your saved materials don&#39;t cover this. Parts below come from general knowledge." in r.text
     r2 = page(ready, [{"kind": "text", "md": "Fine [1].", "cites": [1]}])
-    assert "cover this well" not in r2.text
+    assert "cover this" not in r2.text
     r3 = page(ready, [{"kind": "text", "md": "Fine [1].", "cites": [1]}], data={"not_covered": True})
-    assert "cover this well" in r3.text
+    assert "cover this." in r3.text and "general knowledge" not in r3.text  # no outside content: no extra sentence
 
 
 def test_removed_citation_footnote_p3(ready):

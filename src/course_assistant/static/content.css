@@ -28,3 +28,14 @@ details[open] > summary { margin-bottom: 6px; }
 .chunk-text pre { white-space: pre; }
 .chunk header h2 { font-size: 1rem; margin: 0; display: inline; }
 .reader-note { background: var(--surface-2); border-left: 4px solid var(--warn); padding: 8px 12px; border-radius: 6px; }
+
+/* Sources list: [n] marks on every row, in number order */
+.src-list { list-style: none; margin: 0; padding-left: 0; }
+.src-list li { margin: 2px 0; }
+.src-n { display: inline-block; min-width: 2.4em; }
+/* Links inside the highlighted passage: the dark theme's accent on the highlight was 3.87:1; these reach 5.9:1 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .chunk.hit a, :root:not([data-theme="light"]) .chunk:target a { color: #c8d6ff; }
+}
+:root[data-theme="dark"] .chunk.hit a, :root[data-theme="dark"] .chunk:target a { color: #c8d6ff; }
+.src-mark { font-size: 12px; font-weight: 700; padding: 0 5px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line); text-decoration: none; margin-right: 2px; }

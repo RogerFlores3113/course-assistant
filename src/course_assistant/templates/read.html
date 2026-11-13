@@ -13,6 +13,6 @@
 <div class="chunks">
 {% for c in chunks %}<section id="c{{ c.id }}" class="chunk{% if at == c.id %} hit{% endif %}" {% if at == c.id %}aria-current="location"{% endif %} tabindex="-1">
   <header><h2 class="loc">{{ c.range_label or c.loc_label }}</h2>{% if c.heading %} <span class="muted">{{ c.heading }}</span>{% endif %}
-  {% if c.seek is not none and media %}<button type="button" class="btn small ghost" data-seek="{{ c.seek }}">Play from {{ c.loc_label }}</button>{% endif %}</header>
+  {% if c.seek is not none and media %}<button type="button" class="btn small ghost" data-seek="{{ c.seek }}">Play from {{ c.loc_label }}</button> <button type="button" class="btn small ghost" data-pause>Pause</button>{% endif %}</header>
   <div class="chunk-text">{{ c.html }}</div></section>{% endfor %}
 </div>{% endblock %}
