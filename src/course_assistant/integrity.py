@@ -2585,7 +2585,8 @@ def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, sr
 def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_text: str,
                       sources: list[Any] | None = None) -> int:
     """0 fine, 1 soft, 2 hard: check_reply, but against exactly this item even if it is not in the store (typed-in or
-    combined items). A soft essay hit is accepted: concepts mode is the end of the road, not a loop."""
+    combined items). A soft essay hit is regenerated once like a hard one; an honest coaching reply (cited restatements,
+    a not-covered sentence) is level 0 sentence by sentence, so it passes on the first try."""
     reply = _CITE_STRIP.sub("", raw or "")
     body = (graded.get("body") or "").strip()
     if item_key(graded) and key_leak(reply, graded, {"named": True, "sticky": True, "short": len(reply.split()) < 80,
