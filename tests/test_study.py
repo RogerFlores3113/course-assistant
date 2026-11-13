@@ -296,7 +296,7 @@ def test_upcoming_ordering_and_actions():
     rows = study.upcoming(s, days=14)
     assert [r["title"] for r in rows] == ["Cells 2", "Cells", "HW", "Midterm"]
     assert rows[0]["action"] == "make a primer" and rows[0]["days_until"] == 1
-    assert rows[1]["action"] == "1 flashcards due"  # primer exists, cards due
+    assert rows[1]["action"] == "1 flashcard due"  # primer exists, cards due
     assert rows[2]["action"] == "" and rows[3]["action"] == "make an exam guide"
     assert rows[3]["course_name"] == "Algebra" and rows[3]["course_color"] == "#f00"
     s.add_guide(a, "exam_guide", "g", "b", event_id=ex)

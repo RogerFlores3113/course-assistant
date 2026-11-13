@@ -99,8 +99,10 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
 
 
 def guide_view(guide: dict[str, Any]) -> dict[str, Any]:
-    return answer_view(guide.get("body_md", ""), guide.get("sources"), twin=guide.get("kind") == "twin",
-                       ai_app=guide.get("created_by") == "ai_app")
+    data = guide.get("data") if isinstance(guide.get("data"), dict) else {}
+    saved = data.get("blocks") if isinstance(data.get("blocks"), list) else None
+    return answer_view(guide.get("body_md", ""), guide.get("sources"), blocks=saved,
+                       twin=guide.get("kind") == "twin", ai_app=guide.get("created_by") == "ai_app")
 
 
 def concept_graph(data: dict[str, Any]) -> dict[str, Any]:

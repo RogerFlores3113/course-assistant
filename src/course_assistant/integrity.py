@@ -284,7 +284,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict) -> Answer
     answer.guide_id = store.add_guide(
         course_id, "twin", f"Twin problem: {title}"[:90], answer.body_md,
         sources=grounding.source_rows(sources, used),
-        data={"original_excerpt": excerpt, "twin_problem": twin_problem, "mode": mode, "graded_title": title,
+        data={"blocks": grounding.block_dicts(blocks), "original_excerpt": excerpt, "twin_problem": twin_problem, "mode": mode, "graded_title": title,
               "kind": kind},
         question=question, model=getattr(provider, "model", ""))
     return answer

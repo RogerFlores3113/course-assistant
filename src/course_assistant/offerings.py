@@ -255,3 +255,38 @@ def pick(store: Store, course_id: int, candidate_id: int, *, fetcher: Any = None
         raise
     store.update_offering_candidate(cand["id"], status="saved", material_id=mid)
     return int(mid)
+
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"')\]]+")
+
+
+def find_past_offerings(store: Store, course_id: int, query_or_urls: str = "", *, fetcher: Any = None,
+                        found_by: str = "paste") -> list[dict[str, Any]]:
+    """One entry point for the app's Past offerings tab and the AI app's tool. Returns the candidates stored by this call.
+
+    Links in the text are stored as candidates (candidates_from_urls). With no links, crawl from the course website
+    and likely archive pages under it (guess_course_urls). Raises ValueError with a plain message when there is
+    nothing to start from."""
+    course = store.course(course_id)
+    if course is None:
+        raise ValueError(f"No course with id {course_id}.")
+    urls: list[str] = []
+    for u in _URL_IN_TEXT.findall(query_or_urls or ""):
+        if u not in urls:
+            urls.append(u)
+    if urls:
+        return candidates_from_urls(store, course_id, urls, fetcher=fetcher, found_by=found_by)
+    seeds = guess_course_urls(course)
+    if not seeds:
+        raise ValueError("No links given and the course has no website saved. Paste links to older course pages, "
+                         "or add the course website in the course settings.")
+    crawl_by = "crawl" if found_by == "paste" else found_by
+    found = crawl(store, course_id, seeds[0], fetcher=fetcher, found_by=crawl_by)
+    for guess in seeds[1:4]:
+        if found:
+            break
+        try:
+            found = crawl(store, course_id, guess, max_pages=5, fetcher=fetcher, found_by=crawl_by)
+        except Exception:
+            continue
+    return found

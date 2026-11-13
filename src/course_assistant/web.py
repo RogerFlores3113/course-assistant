@@ -371,7 +371,10 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
                 item: dict[str, Any] = {"role": m["role"], "content": m["content"]}
                 if m["role"] == "assistant":
                     g = store.guide(m["guide_id"]) if m.get("guide_id") else None
-                    item["view"] = answer_view(m["content"], m.get("sources"), twin=bool(g and g["kind"] == "twin"))
+                    saved = ((g or {}).get("data") or {}).get("blocks")
+                    item["view"] = answer_view(m["content"], m.get("sources"),
+                                               blocks=saved if isinstance(saved, list) else None,
+                                               twin=bool(g and g["kind"] == "twin"))
                 history.append(item)
             ctx["history"] = history
             ctx["graded_count"] = len(store.graded_items(cid)) + len([m for m in store.materials(cid) if m.get("graded")])
@@ -657,72 +660,44 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None) -
         depth = depth if depth in {d for d, _ in DEPTHS} else "standard"
         history = [{"role": m["role"], "content": m["content"]} for m in store.chat_messages(course_id, 6)]
 
-        graded_used = [False]
-        chats_before = len(store.chat_messages(course_id, 1000))
-
-        def run():
-            graded = None
-            integrity = None
-            try:
-                integrity = _mod("integrity")
-                graded = integrity.match_graded(store, course_id, q)
-            except _Missing:
-                pass
-            if graded:
-                graded_used[0] = True
-                return integrity.twin(store, course_id, q, p, graded)
-            return _mod("grounding").ask(store, course_id, q, p, depth=depth, history=history)
-
         try:
-            ans = await work(run)
+            await work(lambda: _mod("grounding").ask(store, course_id, q, p, depth=depth, history=history))
         except Exception as e:
             if _is_no_provider(e):
                 return after(request, course_id, "ask", error="Connect an AI first. See the panel below.", draft=q)
             return after(request, course_id, "ask", error=f"The answer did not work: {_friendly(e)}", draft=q)
-        if graded_used[0] and len(store.chat_messages(course_id, 1000)) == chats_before:  # ask() saves chat itself; twin() may not
-            store.add_chat_message(course_id, "user", q)
-            store.add_chat_message(course_id, "assistant", getattr(ans, "body_md", "") or "",
-                                   list(getattr(ans, "sources", None) or []), getattr(ans, "guide_id", None))
         return after(request, course_id, "ask")
 
     # ------------------------------------------------------------------ past offerings
     @app.post("/courses/{course_id}/offerings/paste")
-    def offerings_paste(request: Request, course_id: int, links: str = Form(""), term_label: str = Form("")):
+    async def offerings_paste(request: Request, course_id: int, links: str = Form(""), term_label: str = Form("")):
         require_course(course_id)
-        urls = [u for u in re.split(r"\s+", links.strip()) if u]
-        good = [u for u in urls if re.match(r"^https?://[^\s]+$", u)]
-        if not good:
+        if not re.search(r"https?://\S+", links):
             return after(request, course_id, "offerings", error="Paste one or more web addresses that start with http:// or https://.")
-        for u in good:
-            store.add_offering_candidate(course_id, u, term_label=term_label.strip(), found_by="paste")
-        skipped = len(urls) - len(good)
-        note = f"Added {len(good)} link{'s' if len(good) != 1 else ''} to the list below. Tick the ones to save."
-        if skipped:
-            note += f" Skipped {skipped} that were not web addresses."
-        return after(request, course_id, "offerings", notice=note)
+        try:
+            found = await work(lambda: _mod("offerings").find_past_offerings(store, course_id, links))
+        except Exception as e:
+            return after(request, course_id, "offerings", error=f"Those links did not work: {_friendly(e)}")
+        label = term_label.strip()
+        if label:
+            for c in found:
+                if not c.get("term_label"):
+                    store.update_offering_candidate(c["id"], term_label=label)
+        n = len(found)
+        return after(request, course_id, "offerings",
+                     notice=f"Added {n} link{'s' if n != 1 else ''} to the list below. Tick the ones to save.")
 
     @app.post("/courses/{course_id}/offerings/search")
     async def offerings_search(request: Request, course_id: int):
         course = require_course(course_id)
-        before = {c["id"] for c in store.offering_candidates(course_id)}
-
-        def run():
-            mod = _mod("offerings")
-            for fn_name in ("find_past_offerings", "find_candidates", "search"):
-                fn = getattr(mod, fn_name, None)
-                if fn:
-                    return fn(store, course_id)
-            raise RuntimeError("The search is not available in this version.")
-
         try:
-            await work(run)
+            found = await work(lambda: _mod("offerings").find_past_offerings(store, course_id, "", found_by="crawl"))
         except Exception as e:
             return after(request, course_id, "offerings", error=f"The search did not work: {_friendly(e)}")
-        new = [c for c in store.offering_candidates(course_id) if c["id"] not in before]
-        if not new:
+        if not found:
             return after(request, course_id, "offerings",
                          notice=f"Nothing new turned up for {course['name']}. You can paste links you know of instead.")
-        return after(request, course_id, "offerings", notice=f"Found {len(new)} possible page{'s' if len(new) != 1 else ''}. Tick the ones to save.")
+        return after(request, course_id, "offerings", notice=f"Found {len(found)} possible page{'s' if len(found) != 1 else ''}. Tick the ones to save.")
 
     @app.post("/courses/{course_id}/offerings/save")
     async def offerings_save(request: Request, course_id: int):

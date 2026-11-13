@@ -24,7 +24,7 @@ from . import disclaimer, retrieval
 Source = dict[str, Any]
 
 DEPTHS = ("quick", "standard", "from scratch")
-OUTSIDE_LABEL = "Not from your materials."
+OUTSIDE_LABEL = "Not from your materials"
 MAX_SOURCE_CHARS = 2500
 
 
@@ -185,6 +185,36 @@ def _makes_no_claim(p: str) -> bool:
     return False
 
 
+_LIST_ITEM = re.compile(r"^\s{0,3}(?:[-*+]|\d+[.)])\s+")
+
+
+def _split_mixed_list(cleaned: str, found: list[int]) -> list[Block]:
+    """A cited paragraph. If it is a list where only some items cite a source, cut it into one block per item so the
+    uncited items are labelled on their own."""
+    lines = cleaned.splitlines()
+    if len(lines) < 2 or not all(_LIST_ITEM.match(ln) or ln.startswith((" ", "\t")) for ln in lines) \
+            or not _LIST_ITEM.match(lines[0]):
+        return [Block("text", cleaned, sorted(set(found)))]
+    items: list[list[str]] = []
+    for ln in lines:
+        if _LIST_ITEM.match(ln):
+            items.append([ln])
+        else:
+            items[-1].append(ln)
+    cites = [sorted(set(_cites_in("\n".join(i)))) for i in items]
+    if all(cites):
+        return [Block("text", cleaned, sorted(set(found)))]
+    out: list[Block] = []
+    for item, c in zip(items, cites):
+        text = "\n".join(item)
+        out.append(Block("text", text, c) if c else Block("outside", _LIST_ITEM.sub("", text, count=1).strip(), []))
+    return out
+
+
+def _cites_in(text: str) -> list[int]:
+    return [k for m in _CITE.finditer(text) for k in _expand(m.group(1))]
+
+
 def parse_blocks(raw: str, n_sources: int) -> tuple[list[Block], list[int]]:
     """Split a reply into blocks. Returns (blocks, used) where used is the sorted unique cited numbers."""
     raw = (raw or "").strip()
@@ -209,7 +239,7 @@ def parse_blocks(raw: str, n_sources: int) -> tuple[list[Block], list[int]]:
             elif not cleaned:
                 continue
             elif found:
-                blocks.append(Block("text", cleaned, sorted(set(found))))
+                blocks.extend(_split_mixed_list(cleaned, found))
             elif _makes_no_claim(cleaned) and n_sources > 0 and not _CITE.search(para):
                 # A line that tried to cite a source that doesn't exist is a claim, so it is never exempt.
                 blocks.append(Block("text", cleaned, []))
@@ -229,7 +259,7 @@ def render_body(blocks: list[Block], prefix: str = "") -> str:
         if b.kind == "outside":
             lines = b.md.splitlines() or [""]
             if not prev_outside:
-                lines[0] = f"**{OUTSIDE_LABEL}** {lines[0]}"
+                lines[0] = f"**{OUTSIDE_LABEL}:** {lines[0]}"
             out.append("\n".join(f"> {ln}" for ln in lines))
             prev_outside = True
         else:
@@ -237,6 +267,11 @@ def render_body(blocks: list[Block], prefix: str = "") -> str:
             prev_outside = False
     out.append(disclaimer.FOOTER)
     return "\n\n".join(out)
+
+
+def block_dicts(blocks: list[Block]) -> list[dict[str, Any]]:
+    """The canonical saved form of blocks: guide data["blocks"] = [{kind, md, cites}]."""
+    return [{"kind": b.kind, "md": b.md, "cites": list(b.cites)} for b in blocks]
 
 
 def make_answer(blocks: list[Block], used: list[int], sources: list[Source], *, prefix: str = "",
@@ -278,7 +313,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
         title = question if len(question) <= 80 else question[:77].rstrip() + "..."
         answer.guide_id = store.add_guide(
             course_id, "answer", title, answer.body_md, sources=source_rows(sources, answer.used),
-            data={"used": answer.used, "outside": answer.outside, "depth": normalize_depth(depth),
+            data={"blocks": block_dicts(answer.blocks), "used": answer.used, "outside": answer.outside, "depth": normalize_depth(depth),
                   "no_sources": not sources},
             question=question, model=getattr(provider, "model", ""))
     if record_chat:

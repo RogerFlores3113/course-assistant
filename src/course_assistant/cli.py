@@ -16,8 +16,10 @@ web.py and mcp_server.py are imported inside the commands that need them, so thi
 from __future__ import annotations
 
 import argparse
+import hmac
 import logging
 import os
+import secrets
 import socket
 import sys
 import threading
@@ -71,13 +73,20 @@ def _pick_port(preferred: int) -> int:
 
 
 def _answers(port: int) -> bool:
-    """Something speaks HTTP on this port. The port file only ever holds a port this app wrote, and it is removed
-    when the app stops, so a live answer there is taken to be the app."""
+    """This install's app answers on the port: /api/health returns a proof (HMAC with the app key, bound to the
+    port and a fresh nonce), so another program on the same port is never taken for the app."""
+    from .web import health_proof
+
+    nonce = secrets.token_urlsafe(24)
     try:
-        httpx.get(f"http://127.0.0.1:{port}/", timeout=0.7, follow_redirects=False)
-        return True
-    except httpx.HTTPError:
+        r = httpx.get(f"http://127.0.0.1:{port}/api/health", params={"nonce": nonce}, timeout=0.7,
+                      follow_redirects=False)
+        body = r.json()
+    except (httpx.HTTPError, ValueError):
         return False
+    proof = body.get("proof") if isinstance(body, dict) else None
+    return (r.status_code == 200 and isinstance(proof, str)
+            and hmac.compare_digest(proof, health_proof(paths.app_key(), nonce, port)))
 
 
 def find_running() -> int | None:

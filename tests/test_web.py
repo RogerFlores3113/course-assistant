@@ -392,20 +392,23 @@ def test_flashcard_review(ready, monkeypatch):
 def test_offerings_paste_search_save(ready, monkeypatch):
     cid = mkcourse(ready.store)
     c = ready.client
+    def find(store, course_id, text="", **kw):
+        if "http" in text:
+            return [store.offering_candidate(store.add_offering_candidate(course_id, "https://example.edu/math2210/f24", found_by="paste"))]
+        store.add_offering_candidate(course_id, "https://example.edu/other", title="Spring 2023", found_by="search")
+        return [{"id": 0}]
+
+    monkeypatch.setitem(sys.modules, "course_assistant.offerings", types.SimpleNamespace(find_past_offerings=find))
     c.post(f"/courses/{cid}/offerings/paste", data={"links": "https://example.edu/math2210/f24\njavascript:x", "term_label": "Fall 2024"})
     cand = ready.store.offering_candidates(cid)
-    assert len(cand) == 1 and cand[0]["found_by"] == "paste"
+    assert len(cand) == 1 and cand[0]["found_by"] == "paste" and cand[0]["term_label"] == "Fall 2024"
     page = c.get(f"/courses/{cid}/offerings")
     assert "robots.txt" in page.text and 'name="pick"' in page.text
 
     def import_url(store, course_id, url, *, kind="website", **kw):
         return store.add_material(course_id, kind, "Old course page", source_url=url)
 
-    def find(store, course_id):
-        store.add_offering_candidate(course_id, "https://example.edu/other", title="Spring 2023", found_by="search")
-
     monkeypatch.setitem(sys.modules, "course_assistant.importers", types.SimpleNamespace(import_url=import_url))
-    monkeypatch.setitem(sys.modules, "course_assistant.offerings", types.SimpleNamespace(find_past_offerings=find))
     assert "Found 1 possible page" in c.post(f"/courses/{cid}/offerings/search", follow_redirects=True).text
     r = c.post(f"/courses/{cid}/offerings/save", data={"pick": [str(x["id"]) for x in ready.store.offering_candidates(cid)]}, follow_redirects=True)
     assert "Saved 2 pages" in r.text

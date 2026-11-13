@@ -111,8 +111,9 @@ def test_save_guide_validates_labels_and_footer(env):
     assert "characteristic equation [1]." in b
     assert "[2]" in b and "[7]" not in b and "[9]" not in b
     assert "**Not from your materials:** Fun fact about Euler" in b
-    assert "- **Not from your materials:** Bullet uncited" in b and "- Bullet cited [1]" in b
-    assert "**Not from your materials:** Background from elsewhere." in b
+    assert [x["kind"] for x in g["data"]["blocks"]].count("outside") == 3
+    assert "> **Not from your materials:** Bullet uncited" in b and "- Bullet cited [1]" in b
+    assert "> Background from elsewhere." in b  # same run as the block before it, one label
     assert "<outside>" not in b
     assert "# Eigenvalues" in b and not b.count("Not from your materials:** # ")
     assert disclaimer.FOOTER in b
@@ -202,7 +203,7 @@ def test_find_and_save_past_offerings(env, monkeypatch):
     monkeypatch.setattr(offerings, "_SHARED", F())
     monkeypatch.setitem(sys.modules, "course_assistant.fetcher", types.SimpleNamespace(PoliteFetcher=F))
     out = m.find_past_offerings(cid, "https://math.example.edu/la/")
-    assert "Fall 2020" in out and "candidate" in out
+    assert "candidate" in out and "math.example.edu/la/" in out
     out2 = m.find_past_offerings(cid, ["https://math.example.edu/la/fall2021/"])
     assert "Fall 2021" in out2
     with pytest.raises(ToolError):

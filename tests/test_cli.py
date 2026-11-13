@@ -1,6 +1,7 @@
 import sys
 import types
 
+import httpx
 import pytest
 
 from course_assistant import __version__, cli, paths
@@ -165,3 +166,25 @@ def test_import_ambiguous_and_errors(data, monkeypatch, capsys):
     assert run("import", "Calculus I", str(good), str(bad), str(data / "missing.pdf")) == 1
     err = capsys.readouterr().err
     assert "Could not import bad.pdf: unreadable" in err and "not a file" in err
+
+
+def test_find_running_verifies_health_proof(monkeypatch):
+    from course_assistant.web import health_proof
+
+    paths.port_file().write_text("8123")
+
+    def fake_get(good):
+        def get(url, params=None, **kw):
+            nonce = params["nonce"]
+            key = paths.app_key() if good else "some-other-key"
+            return httpx.Response(200, json={"ok": True, "proof": health_proof(key, nonce, 8123)})
+        return get
+
+    monkeypatch.setattr(cli.httpx, "get", fake_get(False))  # another program, or another install
+    assert cli.find_running() is None
+    paths.port_file().write_text("8123")
+    monkeypatch.setattr(cli.httpx, "get", lambda *a, **k: httpx.Response(200, text="<html>hi</html>"))
+    assert cli.find_running() is None  # any HTTP answer is not enough
+    paths.port_file().write_text("8123")
+    monkeypatch.setattr(cli.httpx, "get", fake_get(True))
+    assert cli.find_running() == 8123

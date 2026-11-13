@@ -132,13 +132,25 @@ def _generate(store: Store, course_id: int, provider, kind: str, title: str, tas
     raw = provider.complete(SYSTEM, [{"role": "user", "content": user}], max_tokens=max_tokens)
     ans = _mod("grounding").parse_answer(raw, sources)
     body = _clean_body(ans.body_md)
+    blocks = list(ans.blocks)
     if extra_note:
         body = f"> {extra_note}\n\n{body}"
+        blocks.insert(0, {"kind": "text", "md": extra_note, "cites": []})
     body = f"{body}\n\n{disclaimer.FOOTER}"
     d = dict(data or {})
     d["outside"] = bool(getattr(ans, "outside", False))
+    d["blocks"] = _block_dicts(blocks)
     return store.add_guide(course_id, kind, title, body, sources=_guide_sources(sources, list(ans.used or [])), data=d,
                            question=question, event_id=event_id, model=getattr(provider, "model", "") or "")
+
+
+def _block_dicts(blocks) -> list[dict[str, Any]]:
+    """Saved form of answer blocks (grounding.Block objects or dicts): [{kind, md, cites}]."""
+    out = []
+    for b in blocks or []:
+        get = (lambda k, d=None: b.get(k, d)) if isinstance(b, dict) else (lambda k, d=None: getattr(b, k, d))
+        out.append({"kind": get("kind", "text"), "md": get("md", ""), "cites": list(get("cites", []) or [])})
+    return out
 
 
 def _course_name(store: Store, course_id: int) -> str:
@@ -312,6 +324,7 @@ def concept_map(store: Store, course_id: int, provider, *, scope: str = "") -> i
     parsed = _mod("grounding").parse_answer("## Concepts and links\n\n" + "\n".join(lines), sources)
     used = sorted({c for n in graph["nodes"] for c in n["cites"]} | set(ans.used or []))
     body = f"{summary}\n\n{_clean_body(parsed.body_md)}\n\n{disclaimer.FOOTER}"
+    graph = dict(graph, blocks=_block_dicts(list(ans.blocks) + list(parsed.blocks)))
     return store.add_guide(course_id, "concept_map", f"Concept map: {scope}" if scope else "Concept map", body,
                            sources=_guide_sources(sources, used), data=graph, question=scope,
                            model=getattr(provider, "model", "") or "")
@@ -347,8 +360,11 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
         srcs = [{"n": i, "chunk_id": s["chunk_id"], "material_id": s["material_id"], "label": s["loc_label"],
                  "title": s["material_title"], "href": s["href"]}
                 for i, s in enumerate(ans.sources or [], 1) if i in used]
+        note = {"kind": "text", "cites": [],
+                "md": f"This topic matches graded work ({graded.get('title', 'a graded item')}). "
+                      "I wrote a twin with different numbers and left your original for you."}
         return store.add_guide(course_id, "practice", f"Practice (twin): {topic}", body, sources=srcs,
-                               data={"twin": True, "graded": graded.get("title", ""), "twin_guide_id": ans.guide_id},
+                               data={"blocks": _block_dicts([note, *ans.blocks]), "twin": True, "graded": graded.get("title", ""), "twin_guide_id": ans.guide_id},
                                question=topic, model=getattr(provider, "model", "") or "")
     sources = _search(store, course_id, topic, 10, exclude_graded=True)
     task = (f"Write {count} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to hardest, "
@@ -490,7 +506,7 @@ def upcoming(store: Store, days: int = 14) -> list[dict[str, Any]]:
         elif e["kind"] == "exam" and ("exam_guide", e["id"]) not in guides_cache[cid]:
             action = "make an exam guide"
         elif due_cache[cid]:
-            action = f"{due_cache[cid]} flashcards due"
+            action = f"{due_cache[cid]} flashcard{'' if due_cache[cid] == 1 else 's'} due"
         rows.append({"event_id": e["id"], "course_id": cid, "course_name": e["course_name"],
                      "course_code": e["course_code"], "course_color": e["course_color"], "kind": e["kind"],
                      "title": e["title"], "date": e["date"], "time": e["time"], "days_until": until,

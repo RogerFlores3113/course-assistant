@@ -447,86 +447,20 @@ def add_event(course_id: int, kind: str, title: str, date: str, time: str = "", 
 
 # ------------------------------------------------------------------ guides and flashcards
 _CITE_RE = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
-_OUTSIDE_LABEL = "**Not from your materials:**"
-_LIST_ITEM_RE = re.compile(r"(?m)^(?=\s*(?:[-*+]|\d+[.)])\s)")
-_MARKER_RE = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)")
-_ALREADY_OUTSIDE_RE = re.compile(r"^[\s>*_\-]*not from your materials", re.I)
 
 
-def validate_guide_body(body: str, valid_numbers: set[int]) -> tuple[str, set[int], list[int], int]:
-    """Check [n] citations in a guide body. Returns (new body, numbers kept, numbers dropped, outside blocks).
-    Citations that point to no given chunk are removed; a paragraph or list item left with no citation is labelled
-    "Not from your materials" (headings and rules are left alone)."""
-    kept: set[int] = set()
+def _drop_bad_cites(body: str, valid_numbers: set[int]) -> tuple[str, list[int]]:
+    """Remove [n] marks whose n is not a valid position. Returns the text and the numbers dropped."""
     dropped: list[int] = []
-    outside = 0
 
-    def fix_cites(segment: str) -> tuple[str, int]:
-        count = 0
+    def repl(m: re.Match) -> str:
+        nums = [int(x) for x in re.split(r"[,;]", m.group(1))]
+        for n in nums:
+            if n not in valid_numbers and n not in dropped:
+                dropped.append(n)
+        return "".join(f"[{n}]" for n in nums if n in valid_numbers)
 
-        def repl(m: re.Match) -> str:
-            nonlocal count
-            nums = [int(x) for x in re.split(r"[,;]", m.group(1))]
-            good = [n for n in nums if n in valid_numbers]
-            for n in nums:
-                if n in valid_numbers:
-                    kept.add(n)
-                elif n not in dropped:
-                    dropped.append(n)
-            count += len(good)
-            return f"[{', '.join(str(n) for n in good)}]" if good else ""
-
-        out = _CITE_RE.sub(repl, segment)
-        out = re.sub(r"[ \t]+([.,;:])", r"\1", out)
-        return out, count
-
-    def label(segment: str, cited: int) -> str:
-        nonlocal outside
-        s = segment.strip()
-        if cited or not s or _ALREADY_OUTSIDE_RE.match(s):
-            return segment
-        outside += 1
-        return f"{_OUTSIDE_LABEL} {s}"
-
-    blocks = re.split(r"\n\s*\n", body.strip())
-    result: list[str] = []
-    in_fence = False
-    for block in blocks:
-        b = block.strip("\n")
-        if b.count("```") % 2 == 1:
-            in_fence = not in_fence
-            result.append(b)
-            continue
-        if in_fence or not b.strip():
-            result.append(b)
-            continue
-        first = b.lstrip()
-        if first.startswith("#") or re.fullmatch(r"[-*_]{3,}", first) or first.startswith("```"):
-            result.append(b)
-            continue
-        had_outside_tag = "<outside>" in b
-        b = re.sub(r"</?outside>", "", b)
-        if _LIST_ITEM_RE.search(b) and _MARKER_RE.match(b):
-            items = [i for i in _LIST_ITEM_RE.split(b) if i.strip()]
-            fixed = []
-            for item in items:
-                text, n = fix_cites(item.rstrip("\n"))
-                m = _MARKER_RE.match(text)
-                if m:
-                    text = m.group(1) + label(text[m.end():], n)
-                fixed.append(text)
-            result.append("\n".join(fixed))
-        else:
-            text, n = fix_cites(b)
-            if had_outside_tag and not n:
-                text = text.strip()
-                if not _ALREADY_OUTSIDE_RE.match(text):
-                    outside += 1
-                    text = f"{_OUTSIDE_LABEL} {text}"
-                result.append(text)
-            else:
-                result.append(label(text, n))
-    return "\n\n".join(result), kept, sorted(dropped), outside
+    return _CITE_RE.sub(repl, body), sorted(dropped)
 
 
 @_tool(WRITE)
@@ -556,10 +490,15 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
         valid.add(n)
         sources.append({"n": n, "chunk_id": cid, "material_id": ch["material_id"], "label": ch.get("loc_label", ""),
                         "title": mat.get("title", ""), "href": f"/read/{ch['material_id']}?at={cid}#c{cid}"})
-    new_body, kept, dropped, outside = validate_guide_body(b, valid)
+    from . import grounding
+    cleaned, dropped = _drop_bad_cites(b, valid)
+    blocks, used = grounding.parse_blocks(cleaned, len(ids))
+    kept = set(used)
+    outside = sum(1 for blk in blocks if blk.kind == "outside")
     sources = [s for s in sources if s["n"] in kept] or sources
-    full = f"{new_body}\n\n---\n*{disclaimer.FOOTER}*\n*{disclaimer.AI_APP_FOOTER}*"
-    gid = st.add_guide(c["id"], kind, t, full, sources=sources, data={"cited_chunk_ids": ids},
+    full = f"{grounding.render_body(blocks)}\n\n{disclaimer.AI_APP_FOOTER}"
+    gid = st.add_guide(c["id"], kind, t, full, sources=sources,
+                       data={"blocks": grounding.block_dicts(blocks), "cited_chunk_ids": ids},
                        created_by="ai_app", model="ai_app")
     msg = [f"Saved guide {gid}: {t}", f"Open it: {_link('/guides/' + str(gid))}",
            f"{len(kept)} citation number(s) kept, {outside} paragraph(s) labelled \"Not from your materials\"."]
@@ -637,8 +576,7 @@ def _cand_lines(cands: list[dict[str, Any]]) -> list[str]:
 @_tool(WRITE_WEB)
 def find_past_offerings(course_id: int, query_or_urls: str | list[str] = "") -> str:
     """Find past offerings of this course. Pass links the student gave (a string or list), or the address of a course
-    or department page to crawl. With nothing, crawls from the course website if one is saved. Only same-site
-    links that look like terms, years or archives are followed, slowly, obeying robots.txt. Nothing is saved
+    or department page. With nothing, crawls from the course website if one is saved. Pages are read slowly, obeying robots.txt. Nothing is saved
     into the course until the student picks a candidate (save_past_offering_candidate)."""
     st = get_store()
     c = _course(course_id)
@@ -649,27 +587,8 @@ def find_past_offerings(course_id: int, query_or_urls: str | list[str] = "") -> 
         for u in _URL_RE.findall(str(item)):
             if u not in urls:
                 urls.append(u)
-    found: list[dict[str, Any]] = []
     try:
-        if len(urls) == 1:
-            found = offerings.crawl(st, c["id"], urls[0], found_by="ai_app")
-            if not found:  # a single page may itself be the offering the student wants
-                found = offerings.candidates_from_urls(st, c["id"], urls, found_by="ai_app")
-        elif urls:
-            found = offerings.candidates_from_urls(st, c["id"], urls, found_by="ai_app")
-        else:
-            seeds = offerings.guess_course_urls(c)
-            if not seeds:
-                raise _fail("No links given and the course has no website saved. Ask the student for the course website "
-                            "or a department page listing past offerings, or for links to old versions of the course.")
-            found = offerings.crawl(st, c["id"], seeds[0], found_by="ai_app")
-            for guess in seeds[1:4]:
-                if found:
-                    break
-                try:
-                    found = offerings.crawl(st, c["id"], guess, max_pages=5, found_by="ai_app")
-                except Exception:
-                    continue
+        found = offerings.find_past_offerings(st, c["id"], " ".join(urls), found_by="ai_app")
     except ValueError as exc:
         raise _fail(str(exc)) from None
     except ToolError:
