@@ -1,4 +1,5 @@
 """Cycle 2 setup and onboarding fixes (fx2-setup)."""
+import os
 import sys
 import types
 
@@ -44,7 +45,8 @@ def test_problem1_only_installed_clients_get_skills(home):
 def test_problem1_detects_binary_on_path(home, tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    exe = bindir / "claude"
+    # Windows finds programs by PATHEXT, so the fake program needs a .cmd extension there.
+    exe = bindir / ("claude.cmd" if os.name == "nt" else "claude")
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir))
