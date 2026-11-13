@@ -293,6 +293,13 @@ def _integrity():
     return _mod('integrity')
 
 
+def _key_word(item: dict) -> str:
+    ig = _integrity()
+    if not ig.item_key(item):
+        return "off, call set_answer_key"
+    return "on" if getattr(ig, "has_components", lambda i: True)(item) else "on (final values only, add named parts)"
+
+
 def _graded_list_text(st, course_id: int) -> str:
     ig = _integrity()
     items = ig.graded_view(st, course_id) if hasattr(ig, "graded_view") else []
@@ -302,7 +309,7 @@ def _graded_list_text(st, course_id: int) -> str:
     for i in items[:40]:
         ex = _integrity().plain_text(i.get("body") or "")
         lines.append(f"- item {i['id']}: {i['title']} ({i['kind']})"
-                     + (f" [answer check: {'on' if _integrity().item_key(i) else 'off, call set_answer_key'}]"
+                     + (f" [answer check: {_key_word(i)}]"
                         if i["kind"] == "problem" else "") + (f": {ex[:300]}" if ex else ""))
     return "\n".join(lines)
 

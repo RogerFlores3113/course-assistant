@@ -216,7 +216,7 @@ def test_reply_swap_blames_the_reply_not_the_question():
     a = grounding.ask(s, c, "Tell me about sodium chloride solutions and how to prepare them.",
                       FakeProvider(model(default="You need 5.11 g of NaCl.")))
     assert a.mode in ("twin", "concepts")
-    assert a.routing_note.startswith("My first answer was too close")
+    assert a.routing_note.startswith("This came too close to your graded")  # the reply is blamed, not the question
 
 
 def test_confirm_negation_guard_and_two_call_limit():
