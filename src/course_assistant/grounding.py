@@ -984,6 +984,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
     sticky = None if graded else (matched if (matched and matched.get("id")) else None) or \
         integrity.sticky_item(store, course_id, question)
     sources: list[Source] = []
+    fixed, caught, answer = False, None, None
     if not graded:
         sources = integrity.search_safe(store, course_id, question, limit=limit)
         if integrity.is_logistics(question):
@@ -1001,6 +1002,25 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
             why = (graded or {}).get("reason", "reply")
             if graded and not route:
                 why = "normal_reply"
+            if graded and why in ("key", "sticky", "reply", "normal_reply") and (graded.get("kind") or "problem") == "problem" \
+                    and graded.get("id"):
+                # a caught ordinary reply: one regeneration told which unknowns to leave out, then fixed text (never a
+                # third call, and no twin: twins are for requests that paste or name the item)
+                avoid = ", ".join(integrity.avoid_names(graded)) or "the problem's unknowns"
+                messages = messages + [{"role": "assistant", "content": raw}, {"role": "user", "content":
+                                        f"Your last reply stated or gave away values of the student's graded work (its unknowns: {avoid}). "
+                                        "Answer again without giving any value, entry, count or conversion of those unknowns, even "
+                                        "as an example; explain the method and use different numbers if you need an example.\n\n"
+                                        f"The student's question again: {question}"}]
+                raw2 = provider.complete(system, messages, max_tokens=4000)
+                _, raw2 = integrity.read_marker(raw2)
+                again = integrity.check_reply(store, course_id, question, raw2, force_item=sticky or graded, sources=sources)
+                if not again:
+                    caught, graded, raw = graded, None, raw2
+                else:
+                    answer = integrity.caught_fixed(store, course_id, question, graded, provider)
+                    graded = None
+                    fixed = True
             if graded and why == "soft_essay":
                 # one regeneration on a soft essay rule; if that still reads as essay prose, concepts mode
                 messages = messages + [{"role": "assistant", "content": raw}, {"role": "user", "content":
@@ -1015,13 +1035,15 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
         # a soft essay hit already used its regeneration: the graded page then makes no further model call
         answer = integrity.twin(store, course_id, question, provider, graded, why,
                                 **({"model_calls": 0} if why == "soft_essay" else {}))
-    else:
+    elif not fixed:
         answer = parse_answer(raw, sources)
         title = question if len(question) <= 80 else question[:77].rstrip() + "..."
+        data = {"blocks": block_dicts(answer.blocks), "used": answer.used, "outside": answer.outside, "depth": normalize_depth(depth),
+                "no_sources": not sources, "mode": "answer", "not_covered": answer.not_covered}
+        if caught and caught.get("id"):
+            data["graded_item_id"] = caught["id"]  # a caught reply keeps the chat touching the item (sticky)
         answer.guide_id = store.add_guide(
-            course_id, "answer", title, answer.body_md, sources=source_rows(sources, answer.used),
-            data={"blocks": block_dicts(answer.blocks), "used": answer.used, "outside": answer.outside, "depth": normalize_depth(depth),
-                  "no_sources": not sources, "mode": "answer", "not_covered": answer.not_covered},
+            course_id, "answer", title, answer.body_md, sources=source_rows(sources, answer.used), data=data,
             question=question, model=getattr(provider, "model", ""))
     if record_chat:
         store.add_chat_message(course_id, "user", question)

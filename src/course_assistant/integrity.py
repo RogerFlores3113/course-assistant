@@ -748,6 +748,9 @@ _CHECK_ASK = re.compile(
     r"my\s+(?:answer|solution|result|work|attempt|value))\b", re.I)
 
 
+_GENERIC_CHECK = re.compile(r"\bin general\b|\bhow\s+(?:do|can|should|would|to)\b[^.?!]{0,12}\b(?:check|verify|confirm)\b", re.I)
+
+
 def is_check_ask(text: str) -> bool:
     """'Check my answer', 'I got 5.11 g, right?', 'is x = (1,1,2) correct': a request to confirm or deny an answer."""
     t = text or ""
@@ -844,9 +847,11 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     q = _Text(question)
     wants_prose = writing_request(question)
     check = is_check_ask(question)
+    if check and _GENERIC_CHECK.search(question) and not any(has_candidate(question, i) for i in items):
+        check = False  # "how do I check an LU factorization in general" is a method question, not an answer to check
     logi = is_logistics(question)
     scored: list[tuple[float, dict[str, Any]]] = []
-    keyed = key_leak(store, course_id, question, items)  # the student's message carries a final value: a check ask
+    keyed = key_leak_any(store, course_id, question, items, {"lone": True})  # the message carries a final value: a check ask
     refs: list[dict[str, Any]] = []
     texts: dict[int, _Text] = {}
     for it in items:
@@ -1005,12 +1010,15 @@ def _leaks_forced(it: dict[str, Any], reply: str, question: str, sources: list[A
     body = (it.get("body") or "").strip()
     if kind == "problem" and body:
         b, r = _Text(body), _Text(reply)
-        if _leaks_problem(r, b, reply, True) or component_leak(it, reply, question):
+        if _leaks_problem(r, b, reply, True):
             return True
-        if not item_key(it) and _unit_result(body, reply):
+        if item_key(it):  # a key judges the reply (key_leak, with the chat's context); given data is never a key value
+            return False
+        if component_leak(it, reply, question) or _unit_result(body, reply):
             return True
-        matched = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
-        return bool(matched) and (len(matched) >= 2 or any(_distinctive(n) for n in matched)) and bool(_RESULTISH.search(reply))
+        found = {c for c in _reply_numbers(reply) if _distinct_val(c) and c not in _index(it).given | _text_numbers_given(it)
+                 and c not in set(_reply_numbers(question))}
+        return len(found) >= 2 and bool(_RESULTISH.search(reply))
     if kind == "proof" and body:
         return _leaks_proof(it, reply, question)
     if kind == "essay" and body:
@@ -1035,8 +1043,22 @@ def _unit_result(body: str, reply: str) -> bool:
     return False
 
 
+def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with_cites: str,
+                    force_item: dict | None) -> dict[str, Any] | None:
+    """The item whose key the reply gives away (most matches), judged with each item's own chat context."""
+    best, top = None, 0
+    for it in items:
+        if not item_key(it):
+            continue
+        ctx = reply_ctx(it, question, reply, force_item)
+        n = len(key_leak(reply, it, ctx) or key_leak(with_cites, it, ctx))
+        if n > top:
+            best, top = it, n
+    return best
+
+
 def check_reply(store, course_id: int, question: str, raw_reply: str, force_item: dict | None = None, *,
-                sources: list[Any] | None = None, keys_only: bool = False) -> dict | None:
+                sources: list[Any] | None = None, keys_only: bool = False, given_ok: bool = False) -> dict | None:
     """Return the graded item when the reply solves it (one of its answer-key values, its numbers in worked steps, a
     finished proof, or submittable essay prose for a graded essay), else None. Callers discard the reply and route to
     twin / concepts mode. Every item's key is checked. force_item: an item the chat is already about (see
@@ -1049,7 +1071,7 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
     items = graded_view(store, course_id)
     if not items:
         return None
-    k = key_leak(store, course_id, reply, items) or key_leak(store, course_id, with_cites, items)
+    k = _reply_key_item(items, question or "", reply, with_cites, force_item)
     if k:
         return _hit(k, "key")
     if keys_only:
@@ -1075,7 +1097,7 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         hit, soft = False, False
         if kind == "problem" and body:
             b = _Text(body)
-            hit = _leaks_problem(r, b, reply, score_text(q, b) >= 0.5)
+            hit = not (given_ok and item_key(it)) and _leaks_problem(r, b, reply, score_text(q, b) >= 0.5)
         elif kind == "proof" and body:
             hit = _leaks_proof(it, reply, question or "")
         elif kind == "essay" and body:
@@ -1107,30 +1129,49 @@ def shares_with(text: str, item: dict[str, Any]) -> bool:
     return bool(question_names(item, text))
 
 
-def sticky_item(store, course_id: int, question: str = "", turns: int = 5) -> dict[str, Any] | None:
-    """The graded item this chat touched in a recent student turn that really matched it, when the current question
-    still shares something with it. A twin or coaching answer does not refresh it, and it ends at the first turn that
-    shares nothing. It never routes a question: the REPLY is checked against the item (its answer key, or its
-    distinctive numbers when it has no key)."""
+STICKY_TURNS = 6
+
+
+def _guide_item(store, course_id: int, guide_id: int | None) -> dict[str, Any] | None:
+    """The graded item a saved answer was caught for or routed to, from its guide's data."""
+    if not guide_id:
+        return None
     try:
-        msgs = store.chat_messages(course_id, max(turns * 2 + 2, 60))
+        g = store.guide(guide_id)
+        gid = ((g or {}).get("data") or {}).get("graded_item_id")
+        it = store.graded_item(int(gid)) if gid else None
+    except Exception:
+        return None
+    return dict(it, kind=_item_kind(it)) if it and it.get("course_id") == course_id else None
+
+
+def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_TURNS) -> dict[str, Any] | None:
+    """The graded item this chat touched: it stays touched for `turns` turns after the last student turn that matched
+    or named it, or whose reply was caught, whatever words the later questions share with it. It never routes a
+    question: it only makes the REPLY be checked against the item (its answer key, with the chat's context)."""
+    try:
+        msgs = store.chat_messages(course_id, max(turns * 4 + 4, 80))
     except Exception:
         return None
     item, since = None, 0
     for m in msgs:
-        if m.get("role") != "user":
-            continue
-        text = m.get("content") or ""
-        found = match_graded(store, course_id, text)
-        if found and found.get("id"):
-            item, since = found, 0
-        elif item is not None:
-            since += 1
-            if not shares_with(text, item) or (since > turns and not question_names(item, text)):
-                item = None
-            elif since > turns:
-                since = 0
-    if item is None or not shares_with(question or "", item):
+        if m.get("role") == "user":
+            text = m.get("content") or ""
+            found = match_graded(store, course_id, text)
+            if found and found.get("id"):
+                item, since = found, 0
+            elif item is not None:
+                if names_item(text, item) or question_names(item, text):
+                    since = 0
+                else:
+                    since += 1
+                    if since >= turns:
+                        item = None
+        elif m.get("role") == "assistant":
+            caught = _guide_item(store, course_id, m.get("guide_id"))
+            if caught:
+                item, since = caught, 0
+    if item is None:
         return None
     if item.get("kind") == "essay" and _READING_REF.search(question or "") and not writing_request(question or ""):
         return None
@@ -1145,7 +1186,9 @@ _SUB_DIGITS = str.maketrans("\u2080\u2081\u2082\u2083\u2084\u2085\u2086\u2087\u2
 _UNIT_ALIASES = {"g": "g", "gram": "g", "grams": "g", "mg": "mg", "kg": "kg", "mol": "mol", "mole": "mol", "moles": "mol",
                  "mmol": "mmol", "l": "l", "liter": "l", "liters": "l", "litre": "l", "litres": "l", "ml": "ml",
                  "m": "m", "molar": "m"}
-_CONNECT = r"(?:=|:|\u2248|\bis\b|\bare\b|\bequals?\b|\bgives\b|\bmust\s+be\b|\bshould\s+be\b|\bwould\s+be\b|\bcomes\s+to\b|\bbecomes\b)"
+_CONNECT = (r"(?:=|:|\u2248|\bis\s+equal\s+to\b|\bequal\s+to\b|\bis\b|\bare\b|\bequals?\b|\bgives\b|\bmust\s+be\b|"
+            r"\bshould\s+be\b|\bwould\s+be\b|\bcomes\s+to\b|\bcomes\s+out\s+(?:to|as)\b|\bworks\s+out\s+to\b|"
+            r"\bturns\s+out\s+to\s+be\b|\bbecomes\b|\bas\b)")
 
 
 def parse_key(raw: str | list | None) -> list[str]:
@@ -1309,6 +1352,10 @@ class _Hay:
             self.seqs.append((m.start(), [_canon(v) for v in vals]))
         for m in re.finditer(_CONNECT + r"\s*((?:-?\d[\d./]*)(?:\s*(?:,|;|\band\b|\s)\s*-?\d[\d./]*)+)", self.t):
             self.seqs.append((m.start(1), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(1))]))
+        for m in re.finditer(r"\brows?\s*\d+\s*[:=]\s*((?:-?\d[\d./]*[\s,;]*)+)", self.t, re.I):  # "row 1: 1 0 0"
+            self.seqs.append((m.start(1), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(1))]))
+        for m in re.finditer(r"(?<![\w.])-?\d[\d./]*(?:\s*(?:[,;:]|\band\b)\s*-?\d[\d./]*){2,}", self.t):  # 3 : 4 : 3, 2, -8 and 1
+            self.seqs.append((m.start(), [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(0))]))
 
     def named(self, name: str, k: str) -> bool:
         pat = r"(?<![a-z0-9_])" + re.escape(name) + r"\s*" + _CONNECT + r"\s*(?:about\s+|approximately\s+|roughly\s+)?(-?\d[\d./]*)"
@@ -1370,16 +1417,6 @@ def key_hits(text: str, key: list[str] | str | None) -> list[str]:
         return []
     h = _Hay(text)
     return [v for v in vals if _hit_one(h, _KeyVal(v))]
-
-
-def key_leak(store, course_id: int, text: str, items: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
-    """The graded item (with the most key values found in text), or None. Checks every item's key."""
-    best, top = None, 0
-    for it in (items if items is not None else graded_view(store, course_id)):
-        n = len(key_hits(text, item_key(it)))
-        if n > top:
-            best, top = it, n
-    return best
 
 
 # --------------------------------------------------------------------------- the item's own unknowns (per component)
@@ -1497,6 +1534,384 @@ def component_leak(item: dict[str, Any] | None, reply: str, question: str = "") 
     return ""
 
 
+# --------------------------------------------------------------------------- cycle 5: components and the leak test
+from functools import lru_cache
+
+_TRIV = {"0", "1", "-1", "-0"}
+_ELEMENT_WORDS = {"c": "carbon", "h": "hydrogen", "o": "oxygen", "n": "nitrogen", "s": "sulfur", "p": "phosphorus",
+                  "cl": "chlorine", "na": "sodium", "k": "potassium", "ca": "calcium", "mg": "magnesium", "fe": "iron",
+                  "f": "fluorine", "br": "bromine", "i": "iodine"}
+_UNIT_CONV = {"g": (("mg", 1000), ("kg", Decimal("0.001"))), "mg": (("g", Decimal("0.001")),), "kg": (("g", 1000),),
+              "mol": (("mmol", 1000),), "mmol": (("mol", Decimal("0.001")),), "l": (("ml", 1000),),
+              "ml": (("l", Decimal("0.001")),)}
+_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "last": -1}
+
+
+class _Entry:
+    __slots__ = ("name", "val", "unit", "derived", "word")
+
+    def __init__(self, name: str, val: str, unit: str = "", derived: bool = False, word: str = ""):
+        self.name, self.val, self.unit, self.derived, self.word = name, val, unit, derived, word
+
+
+class _Comp:
+    """A whole value of the key: a vector, a matrix (rows) or a formula (its atom counts)."""
+    __slots__ = ("name", "kind", "rows", "formula")
+
+    def __init__(self, name: str, kind: str, rows: list[list[str]], formula: str = ""):
+        self.name, self.kind, self.rows, self.formula = name, kind, rows, formula
+
+
+class _Index:
+    def __init__(self):
+        self.entries: list[_Entry] = []
+        self.comps: list[_Comp] = []
+        self.given: set[str] = set()
+
+
+def _is_small(n: str) -> bool:
+    """An integer from -10 to 10: structural in almost every worked example."""
+    return bool(re.fullmatch(r"-?\d{1,2}", n)) and abs(int(n)) <= 10
+
+
+def _distinct_val(n: str) -> bool:
+    """Not an integer from -10 to 10, and not a year."""
+    return not _is_small(n) and not re.fullmatch(r"-?(?:19|20)\d\d", n)
+
+
+def _atom_counts(formula: str) -> list[tuple[str, int]]:
+    return [(el, int(n or 1)) for el, n in re.findall(r"([A-Z][a-z]?)(\d*)", formula)]
+
+
+def _conversions(val: str, unit: str) -> list[tuple[str, str]]:
+    out = []
+    v = _val(val)
+    for u2, f in _UNIT_CONV.get(unit, ()):
+        if v is None:
+            continue
+        try:
+            d = Decimal(v.numerator) / Decimal(v.denominator) * Decimal(f)
+        except InvalidOperation:
+            continue
+        out.append((_canon(format(d, "f")), u2))
+    return out
+
+
+def _build_matrix_from_entries(letter: str, cells: dict[tuple[int, int], str]) -> list[list[str]] | None:
+    n = max(max(i, j) for i, j in cells)
+    if n < 2 or n > 9:
+        return None
+    if letter == "l":
+        need = {(i, j) for i in range(2, n + 1) for j in range(1, i)}
+        if n < 3 or not need <= set(cells):
+            return None
+        return [["1" if i == j else (cells[(i, j)] if j < i else "0") for j in range(1, n + 1)] for i in range(1, n + 1)]
+    if letter == "u":
+        need = {(i, j) for i in range(1, n + 1) for j in range(i, n + 1)}
+        if n < 3 or not need <= set(cells):
+            return None
+        return [[(cells[(i, j)] if j >= i else "0") for j in range(1, n + 1)] for i in range(1, n + 1)]
+    if set(cells) >= {(i, j) for i in range(1, n + 1) for j in range(1, n + 1)}:
+        return [[cells[(i, j)] for j in range(1, n + 1)] for i in range(1, n + 1)]
+    return None
+
+
+@lru_cache(maxsize=256)
+def _build_index(raws: tuple[str, ...], body: str) -> _Index:
+    """The item's key as named entries and whole values, derived both ways: 'x = (1, 1, 2)' gives x1..x3, 'L = [[..]]'
+    gives l21, l31, l32, a formula gives its atom counts, a mass gives its mg, g and kg forms; and entries that
+    together make a vector or a triangular factor give that whole value."""
+    ix = _Index()
+    explicit: dict[str, str] = {}
+    for raw in raws:
+        kv = _KeyVal(raw)
+        nm = kv.name
+        if kv.kind == "formula":
+            atoms = _atom_counts(kv.formula)
+            ix.comps.append(_Comp(nm or "formula", "formula", [[str(n) for _, n in atoms]], kv.formula))
+            for el, n in atoms:
+                ix.entries.append(_Entry("atoms" + el.lower(), str(n), "atom", True, _ELEMENT_WORDS.get(el.lower(), el.lower())))
+        elif kv.kind == "seq":
+            ix.comps.append(_Comp(nm, "vec", [kv.nums]))
+            for i, v in enumerate(kv.nums, 1):
+                ix.entries.append(_Entry(f"{nm}{i}" if not nm[-1:].isdigit() else f"{nm}n{i}", v, "", True))
+        elif kv.kind == "mat":
+            ix.comps.append(_Comp(nm, "mat", kv.rows))
+            for i, row in enumerate(kv.rows, 1):
+                for j, v in enumerate(row, 1):
+                    if (nm == "l" and j >= i) or (nm == "u" and j < i):
+                        continue
+                    ix.entries.append(_Entry(f"{nm}{i}{j}", v, "", True))
+            if nm == "u" and len(kv.rows) >= 3 and all(len(r) == len(kv.rows) for r in kv.rows):
+                ix.comps.append(_Comp("diag", "vec", [[kv.rows[i][i] for i in range(len(kv.rows))]]))
+        elif kv.kind == "num":
+            ix.entries.append(_Entry(nm, kv.nums[0], kv.unit))
+            if nm:
+                explicit[nm] = kv.nums[0]
+            for v2, u2 in _conversions(kv.nums[0], kv.unit):
+                ix.entries.append(_Entry(nm, v2, u2, True))
+    have = {c.name for c in ix.comps}
+    cells: dict[str, dict[tuple[int, int], str]] = {}
+    vec: dict[str, dict[int, str]] = {}
+    for nm, v in explicit.items():
+        m2 = re.fullmatch(r"([a-z])(\d)(\d)", nm)
+        m1 = re.fullmatch(r"([a-z])(\d)", nm)
+        if m2:
+            cells.setdefault(m2.group(1), {})[(int(m2.group(2)), int(m2.group(3)))] = v
+        elif m1:
+            vec.setdefault(m1.group(1), {})[int(m1.group(2))] = v
+    for letter, cs in cells.items():
+        rows = _build_matrix_from_entries(letter, cs) if letter not in have else None
+        if rows:
+            ix.comps.append(_Comp(letter, "mat", rows))
+            if letter == "u":
+                ix.comps.append(_Comp("diag", "vec", [[rows[i][i] for i in range(len(rows))]]))
+    for letter, vs in vec.items():
+        n = len(vs)
+        if letter not in have and n >= 3 and set(vs) == set(range(1, n + 1)):
+            ix.comps.append(_Comp(letter, "vec", [[vs[i] for i in range(1, n + 1)]]))
+    for fm in forms_map(body).values():
+        ix.given |= fm
+    ix.given |= set(numbers(body)) | given_constants(body)
+    return ix
+
+
+def _index(item: dict[str, Any] | None) -> _Index:
+    return _build_index(tuple(item_key(item)), (item or {}).get("body") or "")
+
+
+def has_components(item: dict[str, Any] | None) -> bool:
+    """The key names something beyond a final value: named entries, or whole values the app can take apart."""
+    return any(e.name for e in _index(item).entries)
+
+
+def full_key(item: dict[str, Any] | None) -> list[str]:
+    """The item's key plus every component derived from it, as 'name = value' text (for tools and tests)."""
+    out = list(item_key(item))
+    for e in _index(item).entries:
+        if e.derived and e.name:
+            out.append(f"{e.name} = {e.val}" + (f" {e.unit}" if e.unit and e.unit != "atom" else ""))
+    return out
+
+
+_LABEL_NUM = re.compile(r"\b(?:row|rows|column|columns|col|entry|entries|component|components|problem|problems|question|"
+                        r"step|steps|part|item|equation|pivot|number|no\.|eq\.?)\s*#?\s*\d+|#\s*\d+", re.I)
+_QREF = re.compile(
+    r"\b(?:first|second|third|fourth|last|middle|next|previous|top|bottom)\b[^.?!]{0,30}\b(?:entry|entries|component|"
+    r"row|column|one|unknown|solution|pivot|multiplier|diagonal|element|value|number|answer)\b|\bwhich\b|"
+    r"\bin\s+(?:milli|kilo|micro)?(?:gram|mole|liter|litre)s?\b|\bin\s+(?:mg|g|kg|mol|mmol|ml|l)\b|"
+    r"\bhow\s+many\s+(?:\w+\s+)?(?:atoms?|carbons?|hydrogens?|oxygens?|nitrogens?|sulfurs?|moles?|grams?)\b|"
+    r"\bdiagonal\b|\bthe\s+(?:first|second|third|last)\b", re.I)
+_PRONOUN_Q = re.compile(r"^\W*(?:and\s+|so\s+|ok\s+|okay\s+)?(?:what(?:'s|\s+is|\s+are)\s+)?(?:it|that|this|them|those)\b", re.I)
+
+
+def question_refs(item: dict[str, Any] | None, question: str) -> bool:
+    """The question points at one value of the chat's item without a full name: an unknown, an ordinal entry, 'which',
+    a pronoun, a unit conversion or 'how many <atom>'."""
+    q = question or ""
+    if not q.strip():
+        return False
+    if item is not None and question_names(item, q):
+        return True
+    if _QREF.search(q):
+        return True
+    return len(q.split()) <= 12 and bool(_PRONOUN_Q.search(q))
+
+
+def _reply_numbers(text: str) -> list[str]:
+    t = _LABEL_NUM.sub(" ", _norm_hay(text))
+    return [_canon(m.group(0)) for m in _NUM.finditer(t)]
+
+
+def _vec_hit(seq: list[str], v: list[str], whole: bool) -> bool:
+    n = len(v)
+    if n < 3:
+        return False
+    for i in range(0, len(seq) - n + 1):
+        w = seq[i:i + n]
+        eq = [num_eq(a, b) for a, b in zip(w, v)]
+        c = sum(eq)
+        if c == n and (whole or any(b not in _TRIV for b in v)):
+            return True
+        if n > 3 and c >= 3 and any(b not in _TRIV for b, e in zip(v, eq) if e):
+            return True
+    return False
+
+
+def _comp_hit(h: "_Hay", comp: _Comp) -> bool:
+    seqs = [s for _, s in h.seqs]
+    if comp.kind == "formula":
+        return _hit_one(h, _KeyVal(comp.formula)) or any(_vec_hit(s, comp.rows[0], True) for s in seqs)
+    if comp.kind == "vec":
+        return any(_vec_hit(s, comp.rows[0], True) for s in seqs)
+    rows = comp.rows
+    flat = [x for r in rows for x in r]
+    cols = [list(c) for c in zip(*rows)] if rows and all(len(r) == len(rows[0]) for r in rows) else []
+    if len(flat) >= 3 and any(x not in _TRIV for x in flat) and \
+            all(any(len(s) == len(r) and all(num_eq(a, b) for a, b in zip(s, r)) for s in seqs) for r in rows):
+        return True  # the whole matrix, rows as they stand
+    if any(_vec_hit(s, flat, True) for s in seqs):
+        return True
+    return any(_vec_hit(s, v, False) for v in [*rows, *cols] for s in seqs)
+
+
+def _ordinal_pairs(text: str) -> list[tuple[int, str, str]]:
+    """'the third component of x is 2' -> (3, '2', 'x'); the name is '' when the sentence names none."""
+    out = []
+    t = _norm_hay(text).lower()
+    for m in re.finditer(r"\b(first|second|third|fourth|fifth|last)\b(?:\s+(?:entry|component|element|unknown|one|value|number))?"
+                         r"(?:\s+of\s+(?:the\s+)?(?:vector\s+)?([a-z]\d?))?[^.;\n]{0,40}?" + _CONNECT +
+                         r"\s*(?:about\s+)?(-?\d[\d./]*)", t):
+        out.append((_ORDINALS[m.group(1)], _canon(m.group(3)), m.group(2) or ""))
+    return out
+
+
+def _bound_small(h: "_Hay", ix: _Index, reply: str) -> list[str]:
+    """A small value the reply gives to one of the key's own names ('x3 = 2', 'l21 is minus one', 'two carbons',
+    'the last entry of x is 2')."""
+    t = h.low
+    found: list[str] = []
+    for e in ix.entries:
+        if not _is_small(e.val):
+            continue
+        if e.unit == "atom":
+            sym = e.name[5:]
+            w, v = re.escape(e.word), re.escape(e.val)
+            if re.search(r"(?<![a-z0-9.])" + v + r"\s*(?:atoms?\s+of\s+)?" + w + r"s?\b", t) \
+                    or re.search(r"(?<![a-z0-9])" + w + r"s?\s*" + _CONNECT + r"\s*" + v + r"(?![\d.])", t) \
+                    or re.search(r"(?<![A-Za-z0-9])" + re.escape(sym.capitalize()) + r"\s*(?:=|:)\s*" + v + r"(?![\d.])", h.t):
+                found.append(e.name)
+            continue
+        if e.name and h.named(e.name, e.val):
+            found.append(e.name)
+    for pos, val, name in _ordinal_pairs(reply):
+        for c in ix.comps:
+            if c.kind != "vec":
+                continue
+            if name and not (name == c.name or (name[:1] == c.name and name[1:].isdigit())):
+                continue
+            v = c.rows[0]
+            i = pos - 1 if pos > 0 else len(v) - 1
+            if 0 <= i < len(v) and num_eq(val, v[i]):
+                found.append(f"{c.name}{i + 1}")
+    return list(dict.fromkeys(found))
+
+
+def key_leak(reply, item=None, ctx=None):
+    """Does the reply give away the item's answer? Returns what matched (a list of names; [] when it is fine).
+    ctx: named (the question pastes or names the item, or the text is a saved guide or card), sticky (the chat
+    touched it within the last turns), short (reply under 80 words), question_refs (the question points at one value
+    without naming it), lone (a student's own message: one distinctive value is enough), small (overrides named
+    when judging small values). Rules, strongest first: a matrix or vector matching a whole value of the key (3+
+    positions, one nontrivial) is always a leak; two distinctive values (not an integer from -10 to 10, not given in
+    the problem) always; one distinctive value when named or sticky; small values only when named or sticky and
+    either bound to one of the item's names or the reply is short and the question points at a value.
+    The older call key_leak(store, course_id, text, items) still works and returns the item."""
+    if not isinstance(reply, str):
+        return _legacy_key_leak(reply, item, ctx)
+    c = dict(ctx or {})
+    if item is None or not reply.strip():
+        return []
+    ix = _index(item)
+    if not ix.entries and not ix.comps:
+        return []
+    h = _Hay(reply)
+    for comp in ix.comps:
+        if _comp_hit(h, comp):
+            return [comp.name or "value"]
+    named, sticky = bool(c.get("named")), bool(c.get("sticky"))
+    nums = [n for _, n, _ in h.nums]
+    seen: list[str] = []
+    for e in ix.entries:
+        if e.unit == "atom" or not _distinct_val(e.val) or e.val in ix.given or e.val in seen:
+            continue
+        if any(num_eq(n, e.val) for n in nums):
+            seen.append(e.val)
+    if len(seen) >= 2 or (seen and (named or sticky or c.get("lone"))):
+        return seen
+    gate = bool(c.get("small", named)) or sticky
+    if gate or named:
+        b = _bound_small(h, ix, reply)
+        if b and (gate or len(b) >= 2):  # a text not clearly about the item needs two of its names bound to its values
+            return b
+    if gate:
+        if c.get("short") and c.get("question_refs"):
+            svals = {e.val for e in ix.entries if _is_small(e.val)}
+            if any(n in svals for n in _reply_numbers(reply) if _is_small(n)):
+                return ["value"]
+    return []
+
+
+def _legacy_key_leak(store, course_id, text, items=None, ctx=None):
+    best, top = None, 0
+    base = dict(ctx or {"named": True})
+    for it in (items if items is not None else graded_view(store, course_id)):
+        n = len(key_leak(text, it, base))
+        if n > top:
+            best, top = it, n
+    return best
+
+
+def key_leak_any(store, course_id: int, text: str, items: list[dict[str, Any]] | None = None,
+                 ctx: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The graded item whose key the text gives away most (None when none). ctx as for key_leak."""
+    return _legacy_key_leak(store, course_id, text, items, ctx)
+
+
+def touches(text: str, item: dict[str, Any]) -> bool:
+    """A saved guide or card is about this item: it names it, or shares two of its concept words."""
+    if names_item(text, item):
+        return True
+    iw = content_tokens(f"{item.get('title', '')} {item.get('body', '')}") - _TOPIC_NOISE
+    return len(content_tokens(text) & iw) >= 2
+
+
+def _text_numbers_given(item: dict[str, Any]) -> set[str]:
+    return set(numbers(item.get("body") or "")) | given_constants(item.get("body") or "")
+
+
+def has_candidate(question: str, item: dict[str, Any]) -> bool:
+    """The student's message carries a candidate value for one of the item's unknowns."""
+    if states_unknown(item, question) or key_leak(question or "", item, {"lone": True}):
+        return True
+    given = _index(item).given | _text_numbers_given(item)
+    return any(_distinct_val(n) and n not in given for n in _reply_numbers(question or ""))
+
+
+_EXPLICIT_CHECK = re.compile(r"\b(check|verify|confirm|double[- ]?check|grade|sanity|right|correct|wrong|incorrect|am i|did i|"
+                             r"my\s+(?:answer|solution|result|work|attempt|value))\b", re.I)
+_HOW_GET = re.compile(r"\b(?:how|what|where|why|which)\b[^.?!]{0,20}\bi\s+(?:get|got)\b", re.I)
+
+
+def claims_check(question: str, item: dict[str, Any] | None = None) -> bool:
+    """The student asks the app to confirm or deny an answer. 'what do I get for z' and 'how do I get L and U' are
+    questions, not answers; an 'I got ...' counts only with a value in it."""
+    q = question or ""
+    if not is_check_ask(q) or _HOW_GET.search(q):
+        return False
+    if _EXPLICIT_CHECK.search(q):
+        return True
+    return item is None or has_candidate(q, item)
+
+
+def reply_ctx(item: dict[str, Any], question: str, reply: str, force_item: dict | None = None) -> dict[str, Any]:
+    """The context key_leak needs for a reply in a chat: named, sticky, short, question_refs."""
+    forced = bool(force_item and force_item.get("id") == item.get("id"))
+    sticky = forced and force_item.get("reason") == "sticky"
+    named = names_item(question or "", item) or (forced and not sticky)
+    return {"named": bool(named), "sticky": bool(forced), "short": len(_CITE_STRIP.sub("", reply or "").split()) < 80,
+            "question_refs": question_refs(item, question or "")}
+
+
+def avoid_names(item: dict[str, Any] | None) -> list[str]:
+    """Names of the item's unknowns, for the regeneration note ('l21, l31, x1 ...'), never their values."""
+    return [n for n in sorted(unknown_names(item), key=lambda s: (len(s), s)) if n not in _NON_UNKNOWN][:12]
+
+
+KEY_STRICT = ("Your last list had no named parts. Reply with ONLY a JSON list in which EVERY entry of every matrix, vector "
+              "and table, every multiplier, ratio, count and intermediate result has its own entry with a name, such as "
+              "[\"x = (1, 1, 2)\", \"x1 = 1\", \"x2 = 1\", \"x3 = 2\", \"l21 = 3\", \"u22 = 2\", \"carbon = 3\"]. List every entry, "
+              "name each one, no steps, no words outside the list.")
 KEY_SYSTEM = ("You are a careful solver for a study app. Solve the problem. Reply with ONLY a JSON list of every value "
               "the problem asks for, the final ones and every intermediate one (each entry of a matrix, vector or "
               "table, each multiplier, ratio and count), each NAMED and with units, such as [\"d = 4\", "
@@ -1537,6 +1952,16 @@ def build_answer_key(store, item_id: int, provider) -> list[str]:
     except Exception:
         raw = ""
     vals = _parse_key_reply(raw)
+    if provider is not None and not has_components({"answer_key": _json.dumps(vals or []), "body": it["body"]}):
+        # a key with no named parts (final values only, or nothing): one stricter try
+        try:
+            raw2 = provider.complete(KEY_SYSTEM + "\n\n" + KEY_STRICT, [{"role": "user", "content": it["body"][:MAX_ITEM_CHARS]}],
+                                     max_tokens=1200)
+        except Exception:
+            raw2 = ""
+        vals2 = _parse_key_reply(raw2)
+        if vals2 and (has_components({"answer_key": _json.dumps(vals2), "body": it["body"]}) or not vals):
+            vals = vals2
     store.update_graded_item(item_id, answer_key=_json.dumps(vals or []))
     return vals or []
 
@@ -1564,9 +1989,10 @@ def key_status(item: dict[str, Any]) -> bool:
 
 
 def key_state(item: dict[str, Any], connected: bool) -> str:
-    """'on' (a key exists), 'failed' (an AI is connected but no key could be made), or 'off' (no AI is connected)."""
+    """'on' (a key with named parts exists), 'final' (a key with final values only: the model named no parts), 'failed'
+    (an AI is connected but no key could be made), or 'off' (no AI is connected)."""
     if item_key(item):
-        return "on"
+        return "on" if has_components(item) else "final"
     return "failed" if connected else "off"
 
 
@@ -1732,12 +2158,15 @@ def reveals_original(solution: str) -> bool:
     return confirms_answer(sol)
 
 
-def _solution_leaks(original: str, solution: str, key: list[str] | None = None) -> bool:
+_TWIN_CTX = {"named": True, "small": False}
+
+
+def _solution_leaks(original: str, solution: str, item: dict[str, Any] | None = None) -> bool:
     """A twin's solution that reuses the original's numbers is working the original, or appends its result, or states
-    one of its answer-key values."""
+    a whole value or distinctive values of its answer key."""
     if reveals_original(solution):
         return True
-    if key and key_hits(solution, key):
+    if item and (key_leak(_CITE_STRIP.sub("", solution), item, _TWIN_CTX) or key_leak(solution, item, _TWIN_CTX)):
         return True
     rows_o = _row_set(original)
     if len(rows_o) >= 2 and len(rows_o & _row_set(_CITE_STRIP.sub("", solution))) * 2 >= len(rows_o):
@@ -1889,6 +2318,14 @@ def _sources_for(store, course_id: int, question: str, problem_text: str, graded
         found = sorted(seen.values(), key=lambda s: -s["score"])[:6]
         return _assignment_sources(store, graded) + found
     # a numeric problem's twin: the passages that teach its topic, never due dates, the schedule or unrelated chunks
+    ts = getattr(retrieval, "topic_sources", None)
+    if callable(ts) and graded.get("body"):
+        try:
+            found = ts(store, dict(graded, course_id=graded.get("course_id") or course_id), k=6)
+        except Exception:
+            found = []
+        if found:
+            return list(found)[:6]
     query, topic = topic_query(store, graded)
     if not query:
         query = " ".join(sorted(content_tokens(problem_text)))[:300] or (graded.get("title") or "")
@@ -1924,7 +2361,7 @@ def _should_verify(provider) -> bool:
 
 
 def _verify_twin(provider, original: str, twin_problem: str, solution: str, n_sources: int,
-                 key: list[str] | None = None) -> tuple[str, str]:
+                 item: dict[str, Any] | None = None) -> tuple[str, str]:
     """One extra call: re-check the twin's arithmetic. Keeps the original twin if the check is unusable."""
     if not _should_verify(provider):
         return twin_problem, solution
@@ -1935,8 +2372,8 @@ def _verify_twin(provider, original: str, twin_problem: str, solution: str, n_so
     except Exception:  # a failed check must never block the twin itself
         return twin_problem, solution
     parsed = _parse_twin(raw)
-    if parsed and numbers_changed(original, parsed[0]) and not _solution_leaks(original, parsed[1], key) \
-            and not key_hits(parsed[0], key or []):
+    if parsed and numbers_changed(original, parsed[0]) and not _solution_leaks(original, parsed[1], item) \
+            and not key_leak(parsed[0], item, _TWIN_CTX):
         return parsed
     return twin_problem, solution
 
@@ -1974,7 +2411,8 @@ def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_
     combined items). A soft essay hit is accepted: concepts mode is the end of the road, not a loop."""
     reply = _CITE_STRIP.sub("", raw or "")
     body = (graded.get("body") or "").strip()
-    if key_hits(reply, item_key(graded)):
+    if item_key(graded) and key_leak(reply, graded, {"named": True, "sticky": True, "short": len(reply.split()) < 80,
+                                                      "question_refs": question_refs(graded, question)}):
         return 2
     if kind == "problem" and body:
         return 2 if _leaks_problem(_Text(reply), _Text(body), reply, True) else 0
@@ -2006,7 +2444,7 @@ def _topic_of(graded: dict[str, Any], twin_problem: str, problem_text: str) -> s
 _REPLY_WHY = ("reply", "key", "sticky", "soft_essay", "normal_reply")
 
 
-def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = False) -> str:
+def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = False, has_answer: bool | None = None) -> str:
     """The one sentence the page shows for why this question got a similar problem or concepts help. It never says
     'a similar problem' for a page that shows none, and it blames the reply, not the question, when the reply was
     what the app threw away."""
@@ -2019,12 +2457,18 @@ def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = F
                     "different numbers." + (" The app does not say whether your answer is right." if check else ""))
         return (f"My first answer was too close to your graded {name}, so I replaced it with the concepts and an approach."
                 + (" The app does not say whether your answer is right." if check else ""))
-    if check:
+    if check and has_answer is not False:  # only a message that really holds a candidate value says so
         if mode == "twin":
             return (f"Your message has an answer to your graded {name} in it, so here is a similar problem to check your "
                     "method on. The app does not say whether the answer is right.")
         return (f"Your message has an answer to your graded {name} in it, so here are the concepts and a way to check your "
                 "own work. The app does not say whether the answer is right.")
+    if check:
+        if mode == "twin":
+            return (f"This looks like your graded {name}, so here is a similar problem to check your method on. The app "
+                    "does not say whether an answer is right.")
+        return (f"This looks like your graded {name}, so here are the concepts and a way to check your own work. The app "
+                "does not say whether an answer is right.")
     if mode == "twin":
         return f"This looks like your graded {name}, so here is a similar problem."
     return f"This looks like your graded {name}, so here are the concepts and an approach instead of the work itself."
@@ -2039,11 +2483,12 @@ def _feedback_reply(provider, store, course_id: int, graded: dict, src_block: st
     return essay.feedback_reply(provider, graded, kind, src_block, question, depth_rule, n_sources, sources)
 
 
-def twin_fallback(name: str, reason: str, check: bool = False) -> str:
+def twin_fallback(name: str, reason: str, check: bool = False, practice_button: bool = False) -> str:
     """The fixed page for a graded numeric request when two tries did not give a safe twin. One sentence of real reason,
     no claim that a similar problem is shown, and next steps."""
     why = f"I tried twice to write a similar problem with different numbers for {name}, but {reason or 'it did not come out right'}."
-    steps = ("- Press Practice below or ask again for a similar problem; a new try often works.\n"
+    steps = (("- Press Practice below or ask again for a similar problem; a new try often works.\n" if practice_button else
+              "- Ask again for a similar problem; a new try often works.\n") +
              "- Ask me about one concept, definition or technique at a time.\n"
              "- Re-read the assignment and find the lecture or reading that teaches the method (the Materials tab searches "
              "your saved files).")
@@ -2069,9 +2514,14 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
                            assignment=(kind == "essay" and bool(ESSAY_CUES.search(problem_text))) or feedback)
     src_block = grounding.format_sources(sources)
     depth_rule = grounding.DEPTH_RULES["standard"]
+    offers = [{"id": graded["id"], "label": _item_name(graded), "title": graded.get("title", "")}] \
+        if graded.get("id") and kind == "problem" else []  # a Practice button on the page (data["graded_offers"])
     mode, twin_problem, blocks, used, fell_back = "concepts", "", [], [], False
     fail_reason = ""
-    check = is_check_ask(question) or bool(key and key_hits(question, key)) or bool(graded.get("by_key"))
+    item_for_key = dict(graded, answer_key=graded.get("answer_key") or (store.graded_item(graded["id"]) or {}).get("answer_key")) \
+        if graded.get("id") else graded
+    check = claims_check(question, item_for_key) or bool(graded.get("by_key"))
+    has_answer = has_candidate(question, item_for_key) if check else False
 
     if feedback:
         blocks, used = _feedback_reply(provider, store, course_id, graded, src_block, question, depth_rule,
@@ -2088,13 +2538,13 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
             parsed = _parse_twin(raw)
             if not parsed:
                 fail_reason = "the AI's reply did not have the twin format the app needs"
-            elif not numbers_changed(problem_text, parsed[0]) or key_hits(parsed[0], key):
+            elif not numbers_changed(problem_text, parsed[0]) or key_leak(parsed[0], item_for_key, _TWIN_CTX):
                 fail_reason = "its numbers were too close to your problem's"
-            elif _solution_leaks(problem_text, parsed[1], key):
+            elif _solution_leaks(problem_text, parsed[1], item_for_key):
                 fail_reason = "its working repeated part of your problem or its answer"
             else:
                 if attempt == 0:  # one extra check call, only when it still keeps the request at two calls
-                    twin_problem, solution = _verify_twin(provider, problem_text, parsed[0], parsed[1], len(sources), key)
+                    twin_problem, solution = _verify_twin(provider, problem_text, parsed[0], parsed[1], len(sources), item_for_key)
                 else:
                     twin_problem, solution = parsed
                 blocks, used = grounding.parse_blocks(solution, len(sources))
@@ -2106,7 +2556,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
         else:
             fell_back = True
     if fell_back:  # no more model calls: a fixed, honest page that says why there is no similar problem
-        blocks, used = [Block("text", twin_fallback(_item_name(graded), fail_reason, check), [])], []
+        blocks, used = [Block("text", twin_fallback(_item_name(graded), fail_reason, check, bool(offers)), [])], []
     elif mode != "twin" and not feedback and model_calls <= 0:
         # the caller already spent the request's calls (reply plus one regeneration): fixed text, no more calls
         blocks, used = [Block("text", SAFE_CHECK if check and kind != "essay" else
@@ -2136,7 +2586,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     blocks = ([Block("text", note, [])] if note else []) + list(blocks)
     answer = grounding.make_answer(blocks, used, sources, twin=(mode == "twin"), not_covered=False)
     answer.mode = shown_mode
-    note_line = route_note(graded, "feedback" if feedback else shown_mode, why or graded.get("reason") or "", check)
+    note_line = route_note(graded, "feedback" if feedback else shown_mode, why or graded.get("reason") or "", check, has_answer)
     answer.routing_note = note_line
     excerpt = " ".join(problem_text.split())
     excerpt = excerpt if len(excerpt) <= 300 else excerpt[:297] + "..."
@@ -2147,7 +2597,30 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
               "mode": shown_mode, "graded_title": title, "graded_item_id": graded.get("id"), "kind": kind,
               "not_covered": False, "routing_note": note_line, "routed_by": why or graded.get("reason") or "match",
               "ask_normally": why not in ("key", "normal_reply") and not graded.get("by_key"), "question": question,
-              "feedback": feedback, "answer_check": bool(key)},
+              "feedback": feedback, "answer_check": bool(key),
+              "graded_offers": offers if (mode != "twin" and not feedback) else []},
+        question=question, model=getattr(provider, "model", ""))
+    return answer
+
+
+def caught_fixed(store, course_id: int, question: str, graded: dict, provider=None) -> Answer:
+    """The page for a normal reply that was caught twice (the reply and its one regeneration): fixed text that names the
+    item, no further model call, and an offer of practice on a problem like it."""
+    name = _item_name(graded)
+    sentence = f"This came too close to your graded {name}, so I left it out."
+    body = (f"{sentence}\n\nYou can ask me about one concept, definition or step at a time, or practice on a similar problem "
+            "with different numbers. The original stays yours to do.")
+    blocks = [Block("text", body, [])]
+    answer = grounding.make_answer(blocks, [], [], twin=False, not_covered=False)
+    answer.mode = "concepts"
+    answer.routing_note = sentence
+    answer.guide_id = store.add_guide(
+        course_id, "twin", f"Left out: {name}"[:90], answer.body_md, sources=[],
+        data={"blocks": grounding.block_dicts(blocks), "original_excerpt": "", "twin_problem": "", "mode": "concepts",
+              "graded_title": graded.get("title", ""), "graded_item_id": graded.get("id"), "kind": "problem",
+              "not_covered": False, "routing_note": sentence, "routed_by": "normal_reply", "ask_normally": False,
+              "question": question, "feedback": False, "answer_check": True,
+              "graded_offers": [{"id": graded.get("id"), "label": name, "title": graded.get("title", "")}]},
         question=question, model=getattr(provider, "model", ""))
     return answer
 
@@ -2202,9 +2675,10 @@ def colliding_sentence(it: dict[str, Any], text: str) -> str:
     intact); used in refusal messages, never prints the key."""
     sents = _sentences_of(text or "")
     key = item_key(it)
+    ctx = {"named": True, "small": True}
     for sn in sents:
         clean = _CITE_STRIP.sub("", sn)
-        if key and (key_hits(sn, key) or key_hits(clean, key)):
+        if key and (key_leak(sn, it, ctx) or key_leak(clean, it, ctx) or key_hits(sn, key) or key_hits(clean, key)):
             return sn
     for sn in sents:
         if (it.get("kind") or _item_kind(it)) == "problem" and states_unknown(it, sn):
@@ -2235,6 +2709,19 @@ def _labelled_answer(it: dict[str, Any], text: str) -> bool:
     return False
 
 
+def _text_key_item(items: list[dict[str, Any]], whole: str, text: str) -> dict[str, Any] | None:
+    """A saved guide or card: key values judged as named (distinctive values, whole matrices and vectors, number words),
+    small values only when the text is about the item (it names it or shares its concept words)."""
+    best, top = None, 0
+    for it in items:
+        if not item_key(it):
+            continue
+        n = len(key_leak(text, it, {"named": True, "small": touches(whole, it) or len(text.split()) <= 15}))
+        if n > top:
+            best, top = it, n
+    return best
+
+
 def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
     """The graded item a guide saved by the AI app works or gives away, or None. Every item's answer key is checked
     against the whole body however long it is, then the stricter no-key rules (a labelled answer, a bare final answer,
@@ -2249,7 +2736,7 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
         h["sentence"] = colliding_sentence(it, body or "")
         return h
 
-    k = key_leak(store, course_id, clean, items) or key_leak(store, course_id, body or "", items)
+    k = _text_key_item(items, f"{title}\n{body or ''}", clean) or _text_key_item(items, f"{title}\n{body or ''}", body or "")
     if k:
         return out(k, "key")
     hit = check_reply(store, course_id, title, body)
@@ -2294,7 +2781,7 @@ def check_card(store, course_id: int, front: str, back: str) -> dict | None:
     """The graded item a flashcard gives away: one of its answer-key values, or its own numbers in the card (worked or
     not). Cards are short, so unlike check_guide this does not treat a brief back as an answer fragment."""
     text = f"{front}\n{back}"
-    k = key_leak(store, course_id, text)
+    k = _text_key_item(graded_view(store, course_id), text, text)
     if k:
         return _hit(k, "key")
     hit = check_reply(store, course_id, front, text)
@@ -2318,35 +2805,53 @@ SCRUBBED_MANY = ("_{n} parts of this guide were left out because they repeated g
                  "with different numbers instead._")
 
 
-def scrub_markdown(store, course_id: int, text: str, question: str = "") -> tuple[str, int]:
-    """Drop and replace only the parts (paragraphs, list items, a <details> solution) of a model-written guide that
-    state a graded item's answer: an answer-key value, or its own numbers worked. Returns (text, parts replaced)."""
+def _scrub_note(names: list[str], n: int) -> str:
+    who = " and ".join(dict.fromkeys(names)) or "work"
+    if n == 1:
+        return f"A part of this guide was left out because it matched your graded {who}. Ask for a similar problem with different numbers instead."
+    return f"{n} parts of this guide were left out because they matched your graded {who}. Ask for similar problems with different numbers instead."
+
+
+def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[str, int, str]:
+    """Drop only the parts (paragraphs, list items, a <details> solution) of a model-written guide that the item's key
+    flags, judged with the request's context (the item named by the question), never for the problem's given data.
+    Returns (text without the note, parts dropped, the note that names the item or ''). Essay prose is judged by
+    essay.py as before."""
     items = graded_view(store, course_id)
     if not items:
-        return text, 0
+        return text, 0, ""
     parts = _SEG_SPLIT.split(text or "")
-    out, n = [], 0
+    out, n, names, kinds = [], 0, [], []
+
+    def hit_of(seg: str) -> dict[str, Any] | None:
+        return check_reply(store, course_id, question, seg, given_ok=True)
+
     for seg in parts:
         if not seg.strip() or _SEG_SPLIT.fullmatch(seg) and not seg.lower().startswith("<details>"):
             out.append(seg)
             continue
-        leaky = bool(check_reply(store, course_id, question, seg))
-        if not leaky:
+        hit = hit_of(seg)
+        if not hit:
             for line in seg.splitlines():
-                if re.match(r"^\s*(?:[-*+]|\d+[.)])\s", line) and check_reply(store, course_id, question, line):
-                    leaky = True
-                    break
-        if leaky:
+                if re.match(r"^\s*(?:[-*+]|\d+[.)])\s", line):
+                    hit = hit_of(line)
+                    if hit:
+                        break
+        if hit:
             n += 1
-            hit = check_reply(store, course_id, question, seg)
-            note = essay.SCRUBBED if hit and hit.get("kind") == "essay" else SCRUBBED
-            if n == 1:
-                first = len(out)
-                out.append(note)
-            else:
-                out.append("")  # the note shows once per page
+            names.append(_item_name(hit))
+            kinds.append(hit.get("kind"))
         else:
             out.append(seg)
-    if n > 1:
-        out[first] = SCRUBBED_MANY.format(n=n)
-    return re.sub(r"\n{3,}", "\n\n", "".join(out)), n
+    note = ""
+    if n:
+        note = essay.SCRUBBED.strip("_") if all(k == "essay" for k in kinds) else _scrub_note(names, n)
+    return re.sub(r"\n{3,}", "\n\n", "".join(out)), n, note
+
+
+def scrub_markdown(store, course_id: int, text: str, question: str = "") -> tuple[str, int]:
+    """scrub_parts with its note put where the dropped part was (once per page). Returns (text, parts dropped)."""
+    cleaned, n, note = scrub_parts(store, course_id, text, question)
+    if not n:
+        return text, 0
+    return (f"_{note}_\n\n" + cleaned).strip() if cleaned.strip() else f"_{note}_", n

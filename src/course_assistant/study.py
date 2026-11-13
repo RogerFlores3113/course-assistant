@@ -366,14 +366,18 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
     raw, routed = _guard(store, course_id, provider, raw, question or task[:300])
     if routed:
         return {"routed": routed}
-    scrub = getattr(_mod("integrity"), "scrub_markdown", None)
-    scrubbed = 0
-    if scrub:  # drop and replace only the parts that state a graded answer, never the whole guide
-        raw, scrubbed = scrub(store, course_id, raw, question or task[:300])
+    integ = _mod("integrity")
+    scrubbed, scrub_note = 0, ""
+    if getattr(integ, "scrub_parts", None):  # drop only the parts the item's key flags, and say which item matched
+        raw, scrubbed, scrub_note = integ.scrub_parts(store, course_id, raw, question or task[:300])
+    elif getattr(integ, "scrub_markdown", None):
+        raw, scrubbed = integ.scrub_markdown(store, course_id, raw, question or task[:300])
+    # the banners (not covered, no passages cited) are worked out from what remains, never from the note
     ans = _mod("grounding").parse_answer(normalize_details(raw), sources)
     return {"routed": None, "blocks": _block_dicts(ans.blocks), "body": _clean_body(ans.body_md),
             "used": list(ans.used or []), "outside": bool(getattr(ans, "outside", False)),
-            "not_covered": bool(getattr(ans, "not_covered", False)), "sources": sources, "scrubbed": scrubbed}
+            "not_covered": bool(getattr(ans, "not_covered", False)), "sources": sources, "scrubbed": scrubbed,
+            "scrub_note": scrub_note}
 
 
 def _generate(store: Store, course_id: int, provider, kind: str, title: str, task: str, sources: list[dict[str, Any]],
@@ -383,6 +387,7 @@ def _generate(store: Store, course_id: int, provider, kind: str, title: str, tas
     if r["routed"]:
         return r["routed"]
     body, blocks = r["body"], list(r["blocks"])
+    extra_note = " ".join(x for x in (extra_note, r.get("scrub_note", "")) if x)
     if extra_note:
         body = f"> {extra_note}\n\n{body}"
         blocks.insert(0, {"kind": "text", "md": extra_note, "cites": []})
@@ -1094,10 +1099,13 @@ def concept_map(store: Store, course_id: int, provider, *, scope: str = "", mate
     graph, rest = _ask_json(provider, _system(store, course_id), user, dict)
     graph = _clean_graph(graph, len(sources))
     integ = _mod("integrity")
-    leak = getattr(integ, "key_leak", None)
+    leak = getattr(integ, "key_leak_any", None) or getattr(integ, "key_leak", None)
     if leak:  # a node or link that states a graded answer is dropped, the rest of the map stays
         def clean(t: str) -> bool:
-            return not leak(store, course_id, t)
+            try:
+                return not leak(store, course_id, t, None, {"named": True, "small": False})
+            except TypeError:
+                return not leak(store, course_id, t)
         graph["nodes"] = [n for n in graph["nodes"] if clean(n["label"])]
         ids = {n["id"] for n in graph["nodes"]}
         graph["edges"] = [e for e in graph["edges"] if e["a"] in ids and e["b"] in ids and clean(e["label"])]
@@ -1196,20 +1204,28 @@ def _graded_overlaps(store: Store, course_id: int, topic: str, limit: int = 3) -
     return out[:limit]
 
 
-def _graded_offers(store: Store, course_id: int, topic: str, limit: int = 3) -> list[dict[str, Any]]:
-    """Numeric graded items the topic only overlaps by words: offered as a button, never twinned unasked."""
-    words = {w for w in re.findall(r"[a-z]{5,}", topic.lower()) if w not in _STOP_WORDS and w not in _TOPIC_GENERIC}
+def _distinct_words(text: str) -> set[str]:
+    """Concept words of a request, with acronyms (LU, QR) counted as words: stems of 5 letters, no generic words."""
+    integ = _mod("integrity")
+    full = getattr(integ, "content_tokens", lambda t: set())(text or "")
+    words = {w[:5] for w in full if w not in _STOP_WORDS and w not in _TOPIC_GENERIC}
+    return words | {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", text or "")}
+
+
+def _graded_offers(store: Store, course_id: int, topic: str, limit: int = 1) -> list[dict[str, Any]]:
+    """At most one numeric graded item the topic only overlaps by words, offered as a button, never twinned unasked. It
+    takes two or more distinctive content words that the request and the item share."""
     named = {str(g.get("id")) for g in _graded_overlaps(store, course_id, topic)}
-    out = []
+    want = _distinct_words(topic)
+    best: tuple[int, dict[str, Any]] | None = None
     for it in store.graded_items(course_id):
-        if str(it["id"]) in named or (it.get("kind") or "problem") != "problem" or not (it.get("body") or "").strip():
+        if str(it["id"]) in named or (it.get("kind") or "problem") != "problem" or not (it.get("body") or "").strip() \
+                or not it.get("label"):
             continue
-        text = f"{it.get('title', '')} {it.get('label', '')} {it.get('body', '')}".lower()
-        iwords = set(re.findall(r"[a-z]{5,}", text)) - _TOPIC_GENERIC
-        hit = {w for w in words if w in iwords or any(w[:5] == x[:5] for x in iwords)}
-        if hit and it.get("label"):
-            out.append({"id": it["id"], "label": it["label"], "title": it.get("title", "")})
-    return out[:limit]
+        shared = len(want & _distinct_words(f"{it.get('title', '')} {it.get('label', '')} {it.get('body', '')}"))
+        if shared >= 2 and (best is None or shared > best[0]):
+            best = (shared, {"id": it["id"], "label": it["label"], "title": it.get("title", "")})
+    return [best[1]] if best and limit >= 1 else []
 
 
 _TOPIC_GENERIC = {"solution", "system", "number", "equation", "problem", "problems", "question", "questions", "points",
@@ -1307,6 +1323,10 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
             return normal["routed"]
         if normal["routed"]:
             normal = None
+    if normal and normal.get("scrub_note"):  # name the item that matched, once, ahead of the questions
+        note = normal["scrub_note"]
+        normal = dict(normal, blocks=[{"kind": "text", "md": note, "cites": []}] + list(normal["blocks"]),
+                      body=f"> {note}\n\n{normal['body']}")
     if not twins:
         body = f"{normal['body']}\n\n{disclaimer.FOOTER}"
         data = {"twin": False, "count": count, "mode": "answer", "blocks": normal["blocks"],

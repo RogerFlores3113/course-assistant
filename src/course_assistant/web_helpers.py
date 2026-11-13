@@ -333,6 +333,14 @@ def _head_twin(md: str) -> str:
     return re.sub(r"(?m)^\*\*(Twin problem|Worked solution of the twin)\*\*\s*$", r"## \1", md)
 
 
+def _offers_of(data: dict[str, Any], course_id: int | None) -> list[dict[str, Any]]:
+    """The one practice button a page offers (data["graded_offers"], at most one): 'Practice on a problem like Problem 3'."""
+    if not course_id:
+        return []
+    out = [o for o in (data or {}).get("graded_offers") or [] if isinstance(o, dict) and o.get("label")]
+    return out[:1]
+
+
 def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: list[Any] | None = None,
                 twin: bool = False, ai_app: bool = False, mode: str | None = None,
                 data: dict[str, Any] | None = None, base_level: int = 4, store: Any = None,
@@ -437,6 +445,7 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
             "unused_sources": _merge_sources([smap[k] for k in sorted(smap) if k not in cited]),
             "twin": is_twin, "concepts": is_concepts,
             "routing_note": routing_note, "ask_normal": ask_normal,
+            "offers": _offers_of(data, course_id), "offer_course_id": course_id,
             "outside": has_outside, "not_covered": not_covered and not routed,
             "partly_covered": bool(partly and not routed), "partly_covered_note": PARTLY_COVERED_NOTE,
             "not_covered_note": NOT_COVERED_NOTE + (NOT_COVERED_EXTRA if has_outside else ""),
