@@ -57,7 +57,8 @@ def test_a_coaching_word_in_one_sentence_never_exempts_another():
     para = ("You should open with a claim. This essay argues that Madison's diagnosis of faction held in the 1780s but "
             "failed by the 1790s, and the first party system proves it.")
     assert essay.level(it, para) == 2
-    assert essay.level(it, "A student should note that this essay argues that Madison's diagnosis failed by the 1790s.") == 0
+    assert essay.level(it, "A student should note that your thesis needs a claim someone could dispute.") == 0
+    assert essay.level(it, "A student should note that this essay argues that Madison's diagnosis failed by the 1790s.") == 2
 
 
 def test_a_coaching_tail_on_a_finished_sentence_does_not_exempt_it():
