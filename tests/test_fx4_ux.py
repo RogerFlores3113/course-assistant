@@ -64,12 +64,12 @@ def test_no_duplicate_aria_describedby_on_lecture_pickers(ready):
     assert 'aria-describedby="up-lec-help"' in c.get(f"/courses/{cid}").text
 
 
-def test_delete_card_confirmation_renders_math(ready):
+def test_delete_card_confirmation_is_plain_text(ready):
     s, c = ready.store, ready.client
     cid = mk(s)
     card = s.add_flashcard(cid, "What does the trace of $A$ equal?", "The sum of the diagonal.")
     t = c.get(f"/flashcards/card/{card}/delete").text
-    assert "<p data-math>" in t and "$A$" in t
+    assert "<p>" in t and "$A$" not in t and "trace of A equal" in t
     long_card = s.add_flashcard(cid, "x" * 115 + " $a + b$ end", "B")
     t2 = c.get(f"/flashcards/card/{long_card}/delete").text
     assert "$a" not in t2  # a cut formula is dropped, never shown half open
@@ -81,8 +81,8 @@ def test_dashboard_ask_link_focuses_question_box(ready):
     s.add_event(cid, "lecture", "Lecture 4: Gases", day(2))
     s.add_event(cid, "other", "No class (Thanksgiving)", day(3))
     t = c.get("/").text
-    assert f'href="/courses/{cid}/ask#ask-question"' in t
-    assert t.count("/ask#ask-question") == 1  # none for a non-class event
+    assert f'href="/courses/{cid}/ask?about=Lecture%204%3A%20Gases#ask-question"' in t
+    assert t.count("#ask-question") == 1  # none for a non-class event
     assert 'id="ask-question"' in c.get(f"/courses/{cid}/ask").text
 
 

@@ -15,7 +15,7 @@
   <div class="actions">
   {% if e.kind == 'lecture' %}<form method="post" action="/courses/{{ e.course_id }}/study/primer" data-busy="Writing your primer. This can take up to a minute. Please wait on this page."><input type="hidden" name="event_id" value="{{ e.id }}"><button class="btn small" type="submit">Make a primer<span class="visually-hidden"> for {{ e.title }}</span></button></form>
   {% elif e.kind in ('exam', 'quiz') %}<form method="post" action="/courses/{{ e.course_id }}/study/exam" data-busy="Writing your exam guide. This can take up to a minute. Please wait on this page."><input type="hidden" name="event_id" value="{{ e.id }}"><button class="btn small" type="submit">Make an exam guide<span class="visually-hidden"> for {{ e.title }}</span></button></form>{% endif %}
-  {% if e.kind in ('lecture', 'exam', 'quiz', 'assignment', 'reading') %}<a class="btn small ghost" href="/courses/{{ e.course_id }}/ask#ask-question">Ask a question<span class="visually-hidden"> about {{ e.title }}</span></a>{% endif %}</div></li>{% endfor %}</ul>
+  {% if e.kind in ('lecture', 'exam', 'quiz', 'assignment', 'reading') %}<a class="btn small ghost" href="/courses/{{ e.course_id }}/ask?about={{ (e.title | clean) | urlencode }}#ask-question">Ask a question<span class="visually-hidden"> about {{ e.title }}</span></a>{% endif %}</div></li>{% endfor %}</ul>
 {% else %}<p class="muted">Nothing is scheduled yet. Add a syllabus to a course and its dates appear here, or add events on a course's Calendar tab.</p>{% endif %}
 {% if not has_ai %}<p class="flash warn">Primers and study guides need an AI. <a href="/setup">Connect an AI</a>: use Claude Desktop or Codex, an API key, or a local model.</p>{% endif %}
 </section>
