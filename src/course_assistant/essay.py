@@ -185,6 +185,41 @@ def cited_restatement(sent: str, sources: list[Any] | None, threshold: float = 0
 
 
 # --------------------------------------------------------------------------- positions on the essay's own question
+def cited_soft_ok(sent: str, sources: list[Any] | None) -> bool:
+    """A sentence with a [n] cite that a sticky chat may keep although it reads as soft essay prose: the cited chunk supports
+    the sentence (see supported), or supports its explanatory clause ('X mattered to the debate because it made men of
+    property fear ...', 'he argues that a large republic is better placed to ...') while the rest of the sentence passes no
+    verdict (no 'right', 'wrong', 'undermined', 'showed'). With sources None the chunks are unknown and any cite counts."""
+    if not _cite_numbers(sent):
+        return False
+    if sources is None or cited_restatement(sent, sources):
+        return True
+    bare = _CITE_STRIP.sub("", sent).strip()
+    clauses = [c.strip(" ,;") for c in re.split(r"\b(?:because|since|so\s+that|so|which|that|while|whereas|and\s+so)\b|[,;]", bare, flags=re.I)]
+    texts = _cited_texts(sent, sources)
+    good = [c for c in clauses if len(_ct(c)) >= 4 and any(supported(c, x) for x in texts)]
+    if not good:
+        return False
+    rest = [c for c in clauses if c and c not in good]
+    return not any(_POS_EVAL.search(c) or EVAL.search(c) for c in rest)
+
+
+def soft_leaks(it: dict[str, Any], text: str, question: str = "", sources: list[Any] | None = None) -> int:
+    """Level of text for a sticky chat: soft sentences that carry a cite the cited chunk backs (cited_soft_ok) are taken out
+    one by one first, so an honest cited 'X because Y [2]' sentence never makes the reply a leak. Hard hits, uncited soft
+    sentences and body paragraphs keep their level."""
+    cur = _CITE_SPLIT.sub(r" \2\1", text or "")
+    for _ in range(8):
+        lvl, why, sent = find(it, cur, question, True, sources)
+        if lvl != 1 or why == "body paragraph" or not sent:
+            return lvl
+        hit = next((x for x in _split_sentences(cur) if sent in _CITE_STRIP.sub("", x).strip()), "")
+        if not hit or hit not in cur or not cited_soft_ok(hit, sources):
+            return lvl
+        cur = cur.replace(hit, " ", 1)
+    return find(it, cur, question, True, sources)[0]
+
+
 _ATTR_VERBS = (r"(?:argu(?:es|ed)|says?|said|writes?|wrote|defin(?:es|ed)|stat(?:es|ed)|claim(?:s|ed)|describ(?:es|ed)|"
                r"explain(?:s|ed)|notes?|noted|maintain(?:s|ed)|contend(?:s|ed)|assert(?:s|ed)|warn(?:s|ed)|propos(?:es|ed)|"
                r"observ(?:es|ed)|summariz(?:es|ed)|present(?:s|ed)|identif(?:ies|ied)|list(?:s|ed)|treat(?:s|ed)|"
@@ -351,6 +386,48 @@ def attributed(sentence: str) -> bool:
     return bool(m) and not _JUDGE.search(s[m.end():])
 
 
+# Structural lead-ins (hx2): a conditional or hypothetical about the thesis, claim, argument, position or side ('Suppose your
+# thesis were that X', 'If you took the side that X', 'Imagine your claim is that X'), or a sentence saying what the thesis
+# would say ('Your thesis should say X'). The clause that follows is judged as what the writer says, whatever the opener.
+_POSN = r"(?:thesis|claim|argument|position|side|stance|view|answer|conclusion|verdict|point)"
+_COND_LEAD = re.compile(
+    r"^\W*(?:(?:and|but|so|now|okay|ok)[,\s]+)?(?:suppose|supposing|imagine|if|say|assume|assuming|pretend|let'?s\s+(?:say|suppose|imagine)|"
+    r"what\s+if|even\s+if)\b(?:\s+[\w'’-]+){0,6}?\s+" + _POSN + r"\b(?:\s+[\w'’-]+){0,5}?\s*(?:that\b|:)\s*", re.I)
+_SAY_LEAD = re.compile(
+    r"\b(?:thesis|claim|argument|position|answer|conclusion|essay|paper|paragraph)\b(?:\s+[\w'’-]+){0,2}?\s+"
+    r"(?:should|could|would|might|must|can|will|needs?\s+to|ought\s+to)\s+(?:also\s+)?(?:say|read|state|claim|argue|assert|conclude)\b"
+    r"\s*(?:that\b|:|,)?\s+", re.I)
+_LEAD_COLON = re.compile(r"^(?P<lead>[^:.;!?\d]{2,80}?)\s*:\s+(?P<rest>\S.*)$")
+_LEAD_THAT = re.compile(r"^(?P<lead>(?:[\w'’-]+\s+){1,7}?that)\s+(?P<rest>\S.*)$", re.I)
+_LEAD_SOURCE = re.compile(r"^\W*(?:in\s+[^,]{3,50},\s*)?(?:the\s+)?(?:textbook|chapter|author|reading|passage|text|paper|syllabus|document|"
+                          r"source|rubric|prompt|assignment|lecture|requirements?|materials?)s?\b", re.I)
+
+
+def lead_core(sentence: str) -> str:
+    """The clause after a lead-in of up to about eight words that ends in ':' or 'that' ('A strong thesis here would read:
+    X', 'Think of it as: X', 'Pick this side: X', 'Your thesis could take this form: X', 'It seems to me that X'), with any
+    further wrapper removed; '' when the sentence has no such lead-in or the lead-in reports what a source says. The caller
+    judges the clause as a position (strictly: a lead-in is no reason to read a plain sentence as one)."""
+    s = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
+    s = strip_frames(s)[0]
+    if _SPEAKER.match(s):
+        return ""
+    for rx in (_LEAD_COLON, _LEAD_THAT):
+        m = rx.match(s)
+        if not m:
+            continue
+        lead, rest = m.group("lead"), m.group("rest")
+        words = lead.split()
+        if len(words) > 9 or len(rest.split()) < 4 or _LEAD_SOURCE.match(lead):
+            continue
+        if re.search(rf"\b(?:{_EVAL_INFL}|{_ATTRIB_INFL}|{_ATTR_VERBS})\b", lead, re.I) or attributed(lead + " x"):
+            continue
+        if any(w[:1].isupper() for w in words[1:]):  # a name or a title in the lead-in: it reports a source
+            continue
+        return unwrap(rest)[0]
+    return ""
+
+
 def unwrap(sentence: str) -> tuple[str, bool]:
     """(core, wrapped): 'A strong essay would say that X', 'you could argue that X', 'for example by arguing that X',
     'A thesis in this direction: X', 'Your thesis: X', a coaching frame ('A student should note that X', 'Consider that X',
@@ -361,7 +438,7 @@ def unwrap(sentence: str) -> tuple[str, bool]:
     rq = _rhetorical_core(s)
     if rq and len(rq.split()) >= 3:
         return rq.strip("\"“”'*_ ").rstrip("?").strip(), True
-    m = _WRAP.search(s)
+    m = _WRAP.search(s) or _COND_LEAD.match(s) or _SAY_LEAD.search(s)
     if not m:
         return s, framed
     core = s[m.end():].strip().strip("\"“”'*_ ").rstrip("?").strip()
@@ -459,6 +536,9 @@ def imperative_coaching(s: str, topic: set[str], ents: set[str] | None = None) -
         return False
     if re.match(r"^\W*(?:please\s+)?try\s+(?:this|that|something|saying|arguing)\b", s, re.I) and _WRAP.search(s):
         return False  # 'Try this: <finished claim>' is a frame in front of a claim; the wrapper test judges the claim
+    lc = lead_core(s)
+    if lc and _wrapped_position(lc, topic, ents, "", True):
+        return False  # 'Think of it as: <finished claim>', 'Pick this side: <finished claim>': a lead-in, then the position
     for part in re.split(r"\bthat\b", s)[1:]:
         if not re.match(r"\s*(?:(?:the|an?|his|her|their|its|these|those|some|many|most|all|no|one|both)\b|[A-Z])", part):
             continue  # 'ask what that shows': no subject of its own, so no claim
@@ -582,7 +662,7 @@ def _foreign_claim(s: str, topic: set[str], ents: set[str] | None, source: str =
 _BARE_VERDICT = re.compile(
     r"^\W*(?:my\s+|the\s+|short\s+|quick\s+)?(?:verdict|answer|short\s+answer|bottom\s+line)\s*:\s*(?:\w+\s+){0,2}?"
     r"(?:right|wrong|correct|incorrect|partly|partially|half|mostly|largely|mistaken|vindicated)\b[\w\s,'-]{0,30}[.!]?\W*$", re.I)
-_SPEAKER = re.compile(r"(?:^|(?<=\s))(student|tutor|teacher|professor|prof|ta|coach|assistant)\s*:\s+", re.I)
+_SPEAKER = re.compile(r"(?:^|(?<=\s))((?i:student|tutor|teacher|professor|prof|ta|coach|assistant|question|answer)|[QA])\s*:\s+")
 
 
 def transcript_turns(line: str) -> list[str]:
@@ -599,6 +679,9 @@ def _position_level(s: str, topic: set[str], ents: set[str] | None, source: str 
     core, wrapped = unwrap(s)
     if wrapped and _wrapped_position(core, topic, ents, source, _frame_only(s)):
         return 2, "position"
+    lc = lead_core(s)
+    if lc and _wrapped_position(lc, topic, ents, source, True):
+        return 2, "position"  # any lead-in ending in ':' or 'that' in front of a position is judged as the position
     if _BARE_VERDICT.match(_CITE_STRIP.sub("", s).strip().strip("\"“”'*_ ")):
         return 2, "verdict"  # 'Verdict: partly right.' answers the essay's own question in two words
     if not wrapped and not attributed(s) and not STRICT_COACH.search(s) and is_position(s, topic, ents):
@@ -923,18 +1006,35 @@ _THESIS_FRONT = re.compile(
     r"\banswer\s+(?:to\s+)?the\s+(?:essay|prompt|question)\b|\bwhat\s+should\s+(?:the|my|your)\s+(?:essay|paper)\b", re.I)
 
 
+_VERDICT_FRONT = re.compile(r"\b(?:verdict|stance|answer|take|side)\b", re.I)
+_MY_FRONT = re.compile(r"\b(?:my|our|your|the\s+essay'?s?|essay\s*#?\s*\d*|for\s+the\s+(?:essay|paper))\b", re.I)
+_BARE_FRONT = re.compile(r"^\W*(?:the\s+)?(?:thesis|position|claim|verdict|conclusion|stance|answer)\s*[:?]?\W*$", re.I)
+_VERDICT_BACK = re.compile(r"^(?:(?:madison|he|it|they|hamilton|jefferson|the\s+\w+)\s+(?:was|were|is|are)\s+)?"
+                           r"(?:only\s+|mostly\s+|largely\s+|partly\s+|partially\s+|half\s+|both\s+)*"
+                           r"(?:right|wrong|correct|incorrect|mistaken|vindicated)\b", re.I)
+
+
 def _thesis_card_claim(it: dict[str, Any], front: str, back: str, source_text: str = "") -> str:
     """The back of a card whose front asks for a thesis, claim or conclusion when it states a short claim about the essay's
     subject ('That Madison's diagnosis fit the 1780s but his remedy failed by 1794'): one name from the assignment and a
     verdict are enough on such a card."""
-    if not _THESIS_FRONT.search(front or ""):
+    if not (_THESIS_FRONT.search(front or "") or _VERDICT_FRONT.search(front or "")):
         return ""
     topic, ents = topic_tokens(it), entities(it)
     own = f"{it.get('body', '')} {it.get('title', '')}"
+    mine = bool(_OWN_ESSAY.search(front or "") or _MY_FRONT.search(front or "") or _BARE_FRONT.match(front or ""))
     for line in re.split(r"\n+", back or ""):
         for sent in _split_sentences(line):
             s = trim_tail(_CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ "))
             s = re.sub(r"^(?:that|this)\s+", "", strip_frames(s)[0], flags=re.I)
+            s = re.sub(r"^(?:say|argue|write|answer|claim)\s*(?:that|:)\s+", "", s, flags=re.I)
+            if mine and 2 <= len(s.split()) < 6 and not _about_writing(s) and not not_covered(s) \
+                    and not (source_text and (quote_ratio(s, source_text) >= 0.5 or supported(s, source_text))) \
+                    and quote_ratio(s, own) < 0.5:
+                # a short fragment on a card whose front asks for the student's own thesis, position or verdict
+                # ('Madison was half right', 'Partly right', 'Parties show Madison underestimated faction')
+                if _VERDICT_BACK.match(s) or (_ct(s) & (ents | topic) and (_POS_EVAL.search(s) or ARGUE.search(s))):
+                    return s
             if len(s.split()) < 6 or "?" in s or _about_writing(s) or attributed(s) or not_covered(s):
                 continue
             if quote_ratio(s, own) >= 0.5 or (source_text and (quote_ratio(s, source_text) >= 0.5 or supported(s, source_text))):
@@ -1156,6 +1256,9 @@ def feedback_leaks(draft: str, assignment: Any, reply: str, sources: list[Any] |
                 # restatement: wrapped positions ('Your thesis: X', 'A strong essay would say that X'), plain ones, other languages
                 core, wrapped = unwrap(s)
                 if wrapped and _wrapped_position(core, topic, ents, known, _frame_only(s)):
+                    return True
+                lc = lead_core(s)
+                if lc and _wrapped_position(lc, topic, ents, known, True):
                     return True
                 if not wrapped and not _VOICE.search(s) and not attributed(s) and is_position(s, topic, ents):
                     return True

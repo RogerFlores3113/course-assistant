@@ -1297,7 +1297,8 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
     if graded:
         # a soft essay hit already used its regeneration: the graded page then makes no further model call
         answer = integrity.twin(store, course_id, question, provider, graded, why,
-                                **({"model_calls": 0} if why == "soft_essay" else {}))
+                                **({"model_calls": 0} if why == "soft_essay" else {}),
+                                **({"keep_sources": sources} if sources and why in ("sticky", "soft_essay", "reply", "normal_reply") else {}))
     elif not fixed:
         answer = parse_answer(raw, sources)
         if reworded:  # the retry was thinner than the first reply: never silently
