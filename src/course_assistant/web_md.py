@@ -57,9 +57,11 @@ def source_map(sources: list[dict[str, Any]] | None) -> dict[int, dict[str, Any]
         except (TypeError, ValueError):
             n = i
         title = s.get("title") or s.get("material_title") or "Material"
-        title = strip_past_words(title, bool(s.get("past")))
-        out[n] = {"n": n, "title": title, "label": clean_label(title, s.get("label") or s.get("loc_label") or ""),
-                  "href": s.get("href") or "", "past": s.get("past") or ""}
+        has_tag = bool(s.get("past"))
+        title = strip_past_words(title, has_tag)
+        label = strip_past_words(s.get("label") or s.get("loc_label") or "", has_tag)  # the label may repeat the title and "(past offering)"
+        out[n] = {"n": n, "title": title, "label": clean_label(title, label),
+                  "href": s.get("href") or "", "past": s.get("past") or "", "score": s.get("score")}
     return out
 
 
@@ -336,7 +338,9 @@ def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1, state: d
             i += 1
             continue
         if "|" in line and i + 1 < len(lines) and TABLE_SEP_RE.match(lines[i + 1]) and "|" in lines[i + 1] \
-                and len(_split_row(line)) >= 2:
+                and (len(_split_row(line)) >= 2 or (line.strip().startswith("|") and line.strip().endswith("|")
+                                                    and lines[i + 1].strip().startswith("|")
+                                                    and lines[i + 1].strip().endswith("|"))):
             flush()
             html, i = _table(lines, i, sources)
             out.append(html)
@@ -458,7 +462,10 @@ def _tex_runs(line: str) -> str:
     toks = [(k, t) for k, t in enumerate(parts) if t and not t.isspace()]
     kinds = []
     for _, t in toks:
-        core = t.rstrip(".,;:")
+        core = t.rstrip(".,;:?!")
+        if re.fullmatch(r"\d{1,2}[.)]", t):
+            kinds.append("word")  # "2." in running text numbers the next step, it is not part of a formula
+            continue
         kinds.append("strong" if _TEX_STRONG.search(core) and not re.search(r"[A-Za-z]{4,}(?<!\\)\b(?![{^_])", re.sub(r"\\[A-Za-z]+|\{[^}]*\}", "", core)) else
                      "weak" if _TEX_WEAK.match(core) else "word")
     if toks and re.fullmatch(r"(?:[A-Za-z]|\d{1,2})[.)]", toks[0][1]) and len(toks) > 1:
@@ -474,7 +481,8 @@ def _tex_runs(line: str) -> str:
             j += 1
         run = list(range(i, j))
         def bare(r: int) -> bool:  # an operator or number alone at the edge of a run is not part of the formula
-            return re.fullmatch(r"[=+\-*/<>,.;]+", toks[r][1].rstrip(".,;:") or "-") is not None
+            return re.fullmatch(r"[=+\-*/<>,.;]+", toks[r][1].rstrip(".,;:") or "-") is not None \
+                or re.fullmatch(r"[A-Za-z][.:?!]", toks[r][1]) is not None  # "A." ends the sentence before the formula
         while run and kinds[run[0]] == "weak" and bare(run[0]):
             run.pop(0)
         while run and kinds[run[-1]] == "weak" and bare(run[-1]):
@@ -483,7 +491,7 @@ def _tex_runs(line: str) -> str:
             first, last = toks[run[0]][0], toks[run[-1]][0]
             text = "".join(parts[first:last + 1])
             trail = ""
-            while text and text[-1] in ".,;:":
+            while text and text[-1] in ".,;:?!":
                 trail = text[-1] + trail
                 text = text[:-1]
             if _balanced(text):
@@ -545,9 +553,91 @@ def _stoich_line(line: str) -> str:
     return f"{lead}${t.strip()}$"
 
 
+def _close_paren(t: str, i: int) -> int:
+    depth = 0
+    for k in range(i, len(t)):
+        depth += (t[k] == "(") - (t[k] == ")")
+        if depth == 0:
+            return k
+    return -1
+
+
+def _tex_words(t: str) -> str:
+    """Plain words as \\text, with an equals sign or a times sign left as math."""
+    out = []
+    for part in re.split(r"(=|\u00d7)", t):
+        if part == "=":
+            out.append("=")
+        elif part == "\u00d7":
+            out.append("\\times")
+        elif part.strip():
+            out.append("\\text{" + re.sub(r"([%&#_$])", r"\\\1", part.strip()) + "}")
+    return " ".join(out)
+
+
+def _nested_frac_tex(t: str) -> str:
+    """"(a (b)/(c))/(d) = n" as nested \\frac with the words as \\text. Parentheses that are not a fraction stay text."""
+    out, buf, i = [], "", 0
+    while i < len(t):
+        if t[i] == "(":
+            j = _close_paren(t, i)
+            m = re.match(r"\s*/\s*\(", t[j + 1:]) if j > 0 else None
+            if m:
+                k = j + m.end()
+                e = _close_paren(t, k)
+                if e > 0:
+                    out.append(_tex_words(buf))
+                    buf = ""
+                    out.append("\\frac{" + _nested_frac_tex(t[i + 1:j]) + "}{" + _nested_frac_tex(t[k + 1:e]) + "}")
+                    i = e + 1
+                    continue
+        buf += t[i]
+        i += 1
+    out.append(_tex_words(buf))
+    return " ".join(x for x in out if x)
+
+
+def _nested_equation(line: str) -> str:
+    """A flat textbook equation whose fraction holds parentheses inside parentheses, as one math span."""
+    st = line.strip()
+    if "=" not in st or re.search(r"[.!?]\s+[A-Z]", st) or st.startswith(("#", "|", ">")):
+        return line
+    depth = peak = 0
+    for ch in st:
+        depth += (ch == "(") - (ch == ")")
+        peak = max(peak, depth)
+    if peak < 2 or not re.search(r"\)\s*/\s*\(", st):
+        return line
+    if st.count("(") != st.count(")"):
+        return line
+    tex = _nested_frac_tex(st)
+    if "\\frac" not in tex:
+        return line
+    return line[:len(line) - len(line.lstrip())] + f"${tex}$"
+
+
+_WHOLE_EQ = re.compile(rf"^({_T}\s*=\s*{_T}(?:\s*[+\-*/\u00d7\u00b7]\s*{_T})*)[.,;]?$")
+
+
+def _table_math_line(line: str) -> str:
+    """A pipe-table row: each cell gets the same equation treatment as a line of text."""
+    cells = _split_row(line)
+    if not cells or all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+        return line
+    out = []
+    for c in cells:
+        t = _math_line(c) if c and "|" not in c else c
+        out.append(t.replace("|", "\\|"))
+    return "| " + " | ".join(out) + " |"
+
+
 def _math_line(line: str) -> str:
+    if line.lstrip().startswith("|") and line.rstrip().endswith("|") and "$" not in line:
+        return _table_math_line(line)
     if "$" in line or "`" in line or line.lstrip().startswith(("#", "|", ">")):
         return line
+    if (w := _WHOLE_EQ.match(line.strip())) and not line.strip().startswith(("#", ">")):
+        return line[:len(line) - len(line.lstrip())] + f"${_tex(w.group(1))}$"
     if "=" in line:  # *C*1*V*1 = *C*2*V*2: the asterisks were italics for variable names
         line = re.sub(r"(?<![A-Za-z_*])\*([A-Za-z]{1,2})\*(?![A-Za-z*])", r"\1", line)
         line = re.sub(r"\*\*([A-Za-z]{1,2})\*(?=\d)", r"\1", line)  # **n*1: bold marks glued to a variable name
@@ -561,6 +651,9 @@ def _math_line(line: str) -> str:
     stoich = _stoich_line(line)
     if stoich != line:
         return stoich
+    nested = _nested_equation(line)
+    if nested != line:
+        return nested
 
     def sub(m: re.Match) -> str:
         e = m.group(1)

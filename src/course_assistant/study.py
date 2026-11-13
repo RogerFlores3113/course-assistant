@@ -1069,6 +1069,54 @@ def _scoped_sources(store: Store, pool: list[dict[str, Any]], scope: str, cap: i
     return _interleave(lists, cap=cap)
 
 
+def _opening(sentence: str, words: int = 5) -> str:
+    """The first words of a removed sentence, only when it has no number or math in it (a flagged line could be the answer)."""
+    plain = re.sub(r"\[\d[\d,;\s\-\u2013]*\]", "", sentence).strip()
+    if re.search(r"[0-9=$\\]", plain):
+        return ""
+    return " ".join(plain.split()[:words])
+
+
+def scrub_summary(integ, store, course_id: int, text: str, scope: str = "") -> str:
+    """A model-written summary with the sentences that a graded-work check flags taken out one by one: the safe
+    sentences stay, and the note says which sentence went (its place and its first words). A summary that is only
+    flagged as a whole paragraph is dropped whole, as before. Without the check, the text is returned as it was."""
+    scrub = getattr(integ, "scrub_parts", None)
+    if not scrub or not text.strip():
+        old = getattr(integ, "scrub_markdown", None)
+        return old(store, course_id, text, scope)[0] if old and text.strip() else text
+    return scrub_sentences(lambda t: scrub(store, course_id, t, scope), text, _mod("grounding")._sentences)
+
+
+def scrub_sentences(judge, text: str, split) -> str:
+    """judge(text) -> (cleaned, parts dropped, note). Sentence-level removal on top of it."""
+    cleaned, n, note = judge(text)
+    if not n:
+        return text
+    kept_paras, gone = [], []
+    for para in re.split(r"\n\s*\n", text.strip()):
+        if not para.strip():
+            continue
+        if not judge(para)[1]:
+            kept_paras.append(para)
+            continue
+        sents = split(para) if "\n" not in para.strip() else [para]
+        flagged = [bool(judge(x)[1]) for x in sents]
+        if not any(flagged):
+            flagged = [True] * len(sents)  # only the paragraph as a whole matched
+        kept = [x for x, f in zip(sents, flagged) if not f]
+        if kept:
+            kept_paras.append(" ".join(kept))
+        gone += [(k + 1, len(sents), x) for k, (x, f) in enumerate(zip(sents, flagged)) if f]
+    where = []
+    for k, total, x in gone:
+        start = _opening(x)
+        where.append(f"sentence {k} of {total}" + (f', which begins "{start} ..."' if start else ""))
+    detail = " Left out of the summary: " + "; ".join(where) + "." if where else ""
+    out = f"_{note.rstrip('.')}.{detail}_" if note else ""
+    return (out + "\n\n" + "\n\n".join(kept_paras)).strip()
+
+
 def concept_map(store: Store, course_id: int, provider, *, scope: str = "", material_ids: list[int] | None = None) -> int:
     _need(provider)
     scope = scope.strip()
@@ -1109,8 +1157,7 @@ def concept_map(store: Store, course_id: int, provider, *, scope: str = "", mate
         graph["nodes"] = [n for n in graph["nodes"] if clean(n["label"])]
         ids = {n["id"] for n in graph["nodes"]}
         graph["edges"] = [e for e in graph["edges"] if e["a"] in ids and e["b"] in ids and clean(e["label"])]
-        if getattr(integ, "scrub_markdown", None):
-            rest, _ = integ.scrub_markdown(store, course_id, rest or "", scope)
+        rest = scrub_summary(integ, store, course_id, rest or "", scope)
     if not graph["nodes"]:
         raise ValueError("The AI returned a concept map with no usable nodes. Try again.")
     ans = _mod("grounding").parse_answer(rest or "", sources)

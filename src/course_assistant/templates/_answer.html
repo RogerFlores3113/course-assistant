@@ -14,7 +14,7 @@
     {% else %}<div class="block">{{ b.html }}</div>{% endif %}
   {% endfor %}
   {% if view.sources %}<div class="sources"><h{{ view.base_level }}>Sources</h{{ view.base_level }}>{{ source_list(view.sources) }}</div>
-  {% else %}<p class="muted">No passages from your materials were cited in this answer.</p>{% endif %}
+  {% elif not view.routing_note %}<p class="muted">No passages from your materials were cited in this answer.</p>{% endif %}
   {% if view.unused_sources %}<details class="sources also"><summary>Also searched (not cited)</summary>{{ source_list(view.unused_sources) }}</details>{% endif %}
   {# the "Check:" line at the top says both counts; the numbers stay in the page for app.js, hidden from everyone else #}
   {% if view.removed_citations %}<span hidden data-removed-citations>{{ view.removed_citations }}</span>{% endif %}

@@ -5,7 +5,7 @@
 {% if answer_check %}<p class="answer-check {{ answer_check.tone }}" role="status" id="answer-check">{{ answer_check.text }}</p>{% endif %}
 {% if not ai.connected %}{% include "_connect_panel.html" %}{% endif %}
 {% macro turn(m) %}{% if m.role == 'user' %}<div class="msg me"><p class="who">You asked</p><p>{{ m.content }}</p></div>
-{% else %}<div class="msg ai"><h3 class="answer-heading who" tabindex="-1" data-answer-heading>Answer{% if m.question %} to: {{ m.question | truncate(90) }}{% endif %}</h3>{{ answer(m.view) }}</div>{% endif %}{% endmacro %}
+{% else %}<div class="msg ai"><h3 class="answer-heading who" tabindex="-1" data-answer-heading>{% if m.view.heading.startswith('Feedback on') %}{{ m.view.heading }}{% elif m.view.heading %}Answer to: {{ m.view.heading }}{% else %}Answer{% endif %}</h3>{{ answer(m.view) }}</div>{% endif %}{% endmacro %}
 {% set ns = namespace(last=-1, answers=0) %}{% for m in history %}{% if m.role == 'user' %}{% set ns.last = loop.index0 %}{% else %}{% set ns.answers = ns.answers + 1 %}{% endif %}{% endfor %}
 {% set older = history[:ns.last] if ns.last > 0 else [] %}{% set latest = history[ns.last:] if ns.last >= 0 else history %}
 {% if ns.answers > 1 %}<p class="ask-tools"><a class="jump-link" href="#latest-answer" data-jump-latest>Jump to latest answer</a><span class="muted small">{{ ns.answers }} answers so far. Earlier ones are folded below.</span></p>{% endif %}

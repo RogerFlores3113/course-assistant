@@ -341,10 +341,73 @@ def _offers_of(data: dict[str, Any], course_id: int | None) -> list[dict[str, An
     return out[:1]
 
 
+UNUSED_SOURCES_MAX = 5
+UNUSED_SHARE = 0.5   # an "also searched" passage must score at least this share of the best passage found
+
+
+def _fair_unused(smap: dict[int, dict[str, Any]], cited: set[int]) -> list[dict[str, Any]]:
+    """The passages that were searched but not cited, worth listing: at most UNUSED_SOURCES_MAX, only those scoring
+    within a fair share of the top hit when scores were saved. Without scores the first few stay."""
+    rest = [smap[k] for k in sorted(smap) if k not in cited]
+    scores = [float(s["score"]) for s in smap.values() if isinstance(s.get("score"), (int, float))]
+    if scores and max(scores) > 0:
+        floor = max(scores) * UNUSED_SHARE
+        rest = [s for s in rest if not isinstance(s.get("score"), (int, float)) or float(s["score"]) >= floor]
+    return rest[:UNUSED_SOURCES_MAX]
+
+
+def _join_headings(raw: list[dict[str, str]]) -> list[dict[str, str]]:
+    """A block that is only a heading goes into the block after it, so no group on the page holds a heading and nothing else."""
+    out: list[dict[str, str]] = []
+    i = 0
+    while i < len(raw):
+        b = raw[i]
+        lines = [ln for ln in b["md"].splitlines() if ln.strip()]
+        if b["kind"] == "text" and len(lines) == 1 and lines[0].lstrip().startswith("#") and i + 1 < len(raw) \
+                and raw[i + 1]["kind"] == "text":
+            out.append({"kind": "text", "md": b["md"].rstrip() + "\n\n" + raw[i + 1]["md"].lstrip()})
+            i += 2
+            continue
+        out.append(b)
+        i += 1
+    return out
+
+
+_HEADING_MAX = 80
+
+
+def answer_heading(question: str, data: dict[str, Any] | None) -> str:
+    """The short title for an answer: "Feedback on your draft for Essay 1" for draft feedback, else the question's first
+    line cut to about 80 characters at a word."""
+    data = data or {}
+    if data.get("feedback"):
+        name = str(data.get("graded_title") or "").strip()
+        return f"Feedback on your draft for {name}" if name else "Feedback on your draft"
+    q = " ".join(str(question or "").split())
+    if len(q) <= _HEADING_MAX:
+        return q
+    cut = q[:_HEADING_MAX - 3].rsplit(" ", 1)[0].rstrip(" ,;:-") or q[:_HEADING_MAX - 3]
+    return cut + "..."
+
+
+def _drop_repeated_note(raw: list[dict[str, str]], note: str) -> list[dict[str, str]]:
+    """The routing sentence is said once, in the page's note: the same sentence at the top of the first block goes."""
+    if not note or not raw or raw[0]["kind"] != "text":
+        return raw
+    md = raw[0]["md"]
+    for sent in (x.strip() for x in re.split(r"(?<=[.!?])\s+", note.strip()) if len(x.strip()) > 20):
+        md = re.sub(r"_?\*{0,2}" + re.escape(sent) + r"\*{0,2}_?[ \t]*", "", md, count=1, flags=re.I)
+    md = md.strip()
+    if md == raw[0]["md"].strip():
+        return raw
+    return ([{"kind": "text", "md": md}] if md else []) + raw[1:]
+
+
 def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: list[Any] | None = None,
                 twin: bool = False, ai_app: bool = False, mode: str | None = None,
                 data: dict[str, Any] | None = None, base_level: int = 4, store: Any = None,
-                course_id: int | None = None, question: str = "", tree_shown: bool = False) -> dict[str, Any]:
+                course_id: int | None = None, question: str = "", tree_shown: bool = False,
+                ask_normally: bool = True) -> dict[str, Any]:
     """Everything the answer partial needs, from live grounding output or from a saved guide/chat message.
 
     Banners come only from mode ("twin", "concepts"); a saved guide with no mode falls back to its kind (twin).
@@ -388,6 +451,8 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
                 sents = re.split(r"(?<=[.!?])\s+", b["md"].strip())
                 dropped_note = " ".join(x for x in sents[1:] if x.lower() not in (routing_note_src(data) or "").lower())
                 raw = raw[1:]
+    if routed:
+        raw = _drop_repeated_note(raw, routing_note_src(data))
     feedback = bool(data.get("feedback"))
     worked = grounding.worked_flags([b["md"] for b in raw])
     for b, in_worked in zip(raw, worked):
@@ -402,6 +467,7 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
     if is_twin:
         for b in raw:
             b["md"] = _head_twin(b["md"])
+    raw = _join_headings(raw)
     top = shallowest_heading(*[b["md"] for b in raw])
     uid = next(_UID)
     out_blocks: list[dict[str, Any]] = []
@@ -443,30 +509,33 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
     if unverified:
         parts.append(f"{unverified} quote{'s' if unverified != 1 else ''} not found")
     ask_normal = None
-    if routed and course_id and (question or data.get("question")):
+    if routed and ask_normally and course_id and (question or data.get("question")):
         ask_normal = {"course_id": int(course_id), "question": question or str(data.get("question"))}
     return {"blocks": out_blocks,
             "sources": _merge_sources([smap[k] for k in sorted(smap) if k in cited]),
-            "unused_sources": _merge_sources([smap[k] for k in sorted(smap) if k not in cited]),
+            "unused_sources": _merge_sources(_fair_unused(smap, cited)),
             "twin": is_twin, "concepts": is_concepts,
             "routing_note": routing_note, "ask_normal": ask_normal,
             "offers": _offers_of(data, course_id), "offer_course_id": course_id,
             "outside": has_outside, "not_covered": not_covered and not routed,
-            "partly_covered": bool(partly and not routed), "partly_covered_note": PARTLY_COVERED_NOTE,
+            "partly_covered": bool(partly and not routed and not not_covered),  # one banner, not two
+            "heading": answer_heading(question or str(data.get("question") or ""), data), "partly_covered_note": PARTLY_COVERED_NOTE,
             "not_covered_note": NOT_COVERED_NOTE + (NOT_COVERED_EXTRA if has_outside else ""),
             "removed_citations": removed, "unverified_quotes": unverified, "base_level": base_level,
             "check_line": ("Check: " + ", ".join(parts)) if parts else "",
             "footer": disclaimer.AI_APP_FOOTER if ai_app else disclaimer.FOOTER}
 
 
-def guide_view(guide: dict[str, Any], base_level: int = 2, *, store: Any = None, tree_shown: bool = False) -> dict[str, Any]:
+def guide_view(guide: dict[str, Any], base_level: int = 2, *, store: Any = None, tree_shown: bool = False,
+               ask_normally: bool = True) -> dict[str, Any]:
     data = guide.get("data") if isinstance(guide.get("data"), dict) else {}
     saved = data.get("blocks") if isinstance(data.get("blocks"), list) else None
     mode = data.get("mode") if data.get("mode") in ("answer", "twin", "concepts") else None
     view = answer_view(guide.get("body_md", ""), guide.get("sources"), blocks=saved,
                        twin=guide.get("kind") == "twin", ai_app=guide.get("created_by") == "ai_app",
                        mode=mode, data=data, base_level=base_level, store=store,
-                       course_id=guide.get("course_id"), question=guide.get("question") or "", tree_shown=tree_shown)
+                       course_id=guide.get("course_id"), question=guide.get("question") or "", tree_shown=tree_shown,
+                       ask_normally=ask_normally)
     if guide.get("kind") not in ("answer", "twin"):  # a primer or a guide was not asked as a question
         what = {"primer": "this primer", "missed": "this catch-up", "exam_guide": "this guide"}.get(guide.get("kind"), "this guide")
         view["partly_covered_note"] = f"Part of {what} is not covered by your saved materials."

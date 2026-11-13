@@ -136,7 +136,7 @@ def format_sources(sources: list[Source]) -> str:
             text = text[:MAX_SOURCE_CHARS].rsplit(" ", 1)[0] + " ..."
         past = _past_label(s)
         title = strip_past_words(s.get("material_title", "Material"), bool(past))
-        loc = (s.get("loc_label") or "").strip()
+        loc = strip_past_words((s.get("loc_label") or "").strip(), bool(past))
         if loc and (loc == title or title.endswith(", " + loc) or title.endswith(": " + loc)):
             loc = ""  # the title already says where in the material this is
         head = f"[{i}] {title}" + (f", {loc}" if loc else "")
@@ -478,13 +478,17 @@ _META_ADVICE = re.compile(
 _ABBREV = {"e.g", "i.e", "vs", "dr", "fig", "eq", "eqs", "etc", "cf", "no", "nos", "approx", "mr", "ms", "mrs", "prof",
            "sec", "ch", "al", "gov", "gen", "sen", "rep", "st", "pp", "vol", "vols", "col", "jr", "sr", "u.s", "capt",
            "lt", "rev"}
-_SENT_SPLIT = re.compile(r"(?<=[.!?])((?:\s*\[\d+(?:\s*[,;–-]\s*\d+)*\])*)\s+(?=[A-Z0-9\"“*_])")
+_SENT_SPLIT = re.compile(r"(?:(?<=[.!?])|(?<=[.!?][\"\u201d]))((?:\s*\[\d+(?:\s*[,;–-]\s*\d+)*\])*)\s+(?=[A-Z0-9\"“*_])")
+
+
+# A double-quoted span (a verbatim quote) is never cut into sentences: its citation belongs to the whole span.
+_QUOTED_SPAN = re.compile(r'"[^"\n\x01]{7,}?"|“[^”\n\x01]{7,}?”')
 
 
 def _sentences(p: str) -> list[str]:
     """A one-line prose paragraph cut into sentences (citations stay with the sentence they follow). Math, code
     and abbreviations never end a sentence."""
-    masked = _mask(p)
+    masked = _QUOTED_SPAN.sub(lambda m: "\x01" * (len(m.group(0)) - 2) + m.group(0)[-2:], _mask(p))
     out, pos = [], 0
     for m in _SENT_SPLIT.finditer(masked):
         head = masked[pos:m.start()]
@@ -623,6 +627,17 @@ _ASSERTS = re.compile(r"\b(?:is|are|was|were|has|had|have|means|became|called|kn
                       re.I)
 
 
+_LEAD_IN = re.compile(
+    r"^\W*(?:(?:good|great|nice|fair|excellent)\s+(?:question|point)|sure|okay|ok|of\s+course|happy\s+to|"
+    r"(?:the\s+)?short\s+(?:answer|version)|in\s+short|in\s+brief|to\s+answer|to\s+summari[sz]e|"
+    r"here(?:'s|\s+is|\s+are)|let(?:'s|\s+us)|thanks|yes|no|right|so)\b", re.I)
+
+
+def _lead_in(plain: str) -> bool:
+    """A short opener that states no fact ("Good question.", "Here is a summary.", "Let's look at it.")."""
+    return len(plain.split()) <= 8 and not re.search(r"[0-9=$]", plain) and bool(_LEAD_IN.match(plain))
+
+
 def _split_sentences(cleaned: str, found: list[int], calc: bool = False) -> list[Block]:
     """A cited prose paragraph. A sentence that makes a claim and has no citation of its own is cut out and labelled,
     whether it comes after a cited sentence or before one; a lead-in that states no fact stays with its cited sentence."""
@@ -640,7 +655,7 @@ def _split_sentences(cleaned: str, found: list[int], calc: bool = False) -> list
         flag = (not cites[i] and (any(cites[:i]) or later) and REMOVED_MARK not in x
                 and len(plain.split()) >= 5 and not _is_meta(plain)[0] and not _makes_no_claim(plain)
                 and not is_non_claim(plain, calc=calc)
-                and (any(cites[:i]) or bool(_ASSERTS.search(plain))))  # a lead-in before a cite needs a stated fact
+                and (any(cites[:i]) or not _lead_in(plain)))  # before a cite only a short lead-in stating no fact stays plain
         flags.append(flag)
     if not any(flags):
         return [Block("text", cleaned, sorted(set(found)))]
@@ -854,7 +869,16 @@ _COMPARISON = re.compile(
 _ABOUT_DRAFT = re.compile(
     r"^\W*(?:you|your|you're|you've)\b|^\W*(?:the|this)\s+draft\b|"
     r"^\W*(?:the|this)\s+(?:assignment|rubric|prompt|task)\s+(?:asks|requires|wants|needs|expects|says|lists|grades|"
-    r"scores)\b|^\W*(?:honest\s+answer|verdict|feedback|overall|strength|weakness|gap|missing)\b", re.I)
+    r"scores)\b|^\W*(?:honest\s+answer|verdict|feedback|overall|strength|weakness|gap|missing)\b|"
+    r"^\W*what\s+(?:the|this)\s+(?:assignment|rubric|prompt|task|problem|question)\s+(?:asks|wants|needs|requires)\b|"
+    r"^\W*(?:nothing|none|no\s+\w+)\s+(?:\w+\s+){0,2}?(?:in|of)\s+(?:the|this|your)\s+(?:draft|essay|proof|answer|paragraph|response)\b|"
+    r"\b(?:in|of|about|from)\s+(?:the|this|your)\s+draft\b|\bas\s+the\s+(?:prompt|assignment|rubric|problem)\s+(?:says|states|asks)\b", re.I)
+# a pointer to what to study ("Concepts worth reviewing: ...") names topics to look at and claims nothing about them
+_POINTER = re.compile(
+    r"^\W*(?:key\s+|main\s+|core\s+)?(?:concepts?|topics?|terms?|ideas?|sections?|chapters?|lectures?|readings?|"
+    r"definitions?|skills?)\s+(?:worth|to|for\s+you\s+to|you\s+(?:should|could|might))\s+(?:review|revisit|look|study|"
+    r"know|learn|read|practi[cs]e|go|re-?read|focus|brush|work)\w*\b", re.I)
+_ABOUT_ASSIGNMENT_IT = re.compile(r"^\W*(?:it|this)\s+(?:has|asks|wants|needs|requires|expects|is\s+asking|is\s+worth)\b", re.I)
 # when the page is feedback on the student's own draft or proof, these third-person lines are about the draft too
 _ABOUT_DRAFT_LOOSE = re.compile(
     r"^\W*(?:the|this|that|each|every|one\s+of\s+the)\s+(?:\w+\s+){0,2}?(?:essay|thesis|paragraph|introduction|intro|"
@@ -934,6 +958,8 @@ def _claimless_sentence(x: str, calc: bool, coach: bool = False, feedback: bool 
             or _META_SELF.search(plain) or _CAUTION.search(plain) or _ABOUT_DRAFT.match(plain)):
         return True
     if plain.endswith(":") and words <= 25:
+        return True
+    if _POINTER.match(plain) or ((coach or feedback) and _ABOUT_ASSIGNMENT_IT.match(plain)):
         return True
     no_fact = not re.search(r"[0-9=$]", plain)
     if words <= 4 and no_fact and _PLAN_WORD.match(plain):
@@ -1120,6 +1146,8 @@ def source_rows(sources: list[Source], used: list[int] | None = None) -> list[di
     for i, s in enumerate(sources, 1):
         row = {"n": i, "chunk_id": s["chunk_id"], "material_id": s["material_id"], "label": s.get("loc_label", ""),
                "title": s.get("material_title", ""), "href": s.get("href", ""), "used": i in used_set}
+        if isinstance(s.get("score"), (int, float)):
+            row["score"] = round(float(s["score"]), 4)  # kept so the page can fold away the passages that scored low
         if (past := _past_label(s)):
             row["past"] = past  # "Past offering: Fall 2018", shown on the Sources row and in the chip's label
         rows.append(row)

@@ -129,7 +129,7 @@ def test_concept_graph_svg_full_labels_arrows_edge_labels_p4():
 def test_concept_map_page_p4(ready):
     gid = ready.store.add_guide(ready.cid, "concept_map", "Map", "", sources=sources(3), data=MAP)
     t = ready.client.get(f"/guides/{gid}").text
-    assert 'role="img"' in t and "aria-hidden" not in t.split("<svg")[1].split("</svg>")[0] and "text list above" in t
+    assert 'role="img"' in t and "aria-hidden" not in t.split("<svg")[1].split(">")[0] and "text list above" in t
     assert 'marker-end="url(#arrow)"' in t and "<marker" in t and "implies" in t
     tree = t.split('<ul class="tree">')[1].split('<div class="mapwrap">')[0]
     assert tree.count("Not from your materials") == 2  # the uncited tree edge and the uncited back link
