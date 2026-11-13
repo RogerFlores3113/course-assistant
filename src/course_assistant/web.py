@@ -1239,7 +1239,7 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         if not is_htmx(request):
             return redirect(f"/guides/{int(result)}", notice=ready)
         return after(request, course_id, "study", notice=ready, result_guide=guide,
-                     result_view=guide_view(guide, base_level=4, store=store) if guide else None)
+                     result_view=guide_view(guide, base_level=4, store=store, ask_normally=False) if guide else None)  # not the Ask page
 
     def _safe_fill_keys(cid: int, p) -> None:
         """Lazily make the answer key of graded numeric items that have none (one model call each, once)."""
