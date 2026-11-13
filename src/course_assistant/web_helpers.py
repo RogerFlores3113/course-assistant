@@ -384,13 +384,17 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
     if routed:  # the page says why once (the routing note); the intro block that said it again goes
         for i, b in enumerate(raw[:1]):
             m_intro = _INTRO_NOTE.match(b["md"].strip())
-            if b["kind"] == "text" and m_intro and "cannot say whether" not in b["md"]:
+            if b["kind"] == "text" and m_intro:
                 sents = re.split(r"(?<=[.!?])\s+", b["md"].strip())
                 dropped_note = " ".join(x for x in sents[1:] if x.lower() not in (routing_note_src(data) or "").lower())
                 raw = raw[1:]
-    for b in raw:
-        if b["kind"] == "outside" and grounding.is_non_claim(b["md"], calc=is_twin):
-            b["kind"] = "text"  # advice, questions, honest gaps and a twin's own arithmetic are not factual claims
+    feedback = bool(data.get("feedback"))
+    worked = grounding.worked_flags([b["md"] for b in raw])
+    for b, in_worked in zip(raw, worked):
+        if b["kind"] == "text":
+            b["md"] = grounding.unmark_gaps(b["md"])  # "the sources do not say X" is never an outside-knowledge tag
+        elif grounding.is_non_claim(b["md"], calc=is_twin or in_worked, feedback=feedback):
+            b["kind"] = "text"  # advice, questions, honest gaps and a worked example's own arithmetic are not claims
     raw = _merge_list_blocks(raw)
     for b in raw:
         if b["kind"] == "text":
@@ -426,7 +430,8 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
     # the saved flag counts only when nothing is cited; a cited answer that ends "your materials don't list more" is covered
     not_covered = bool(raw) and (grounding.is_not_covered(gb, len(sources)) or (bool(data.get("not_covered")) and not any_cited))
     has_outside = any(b["kind"] == "outside" for b in raw)
-    partly = any_cited and any(b["kind"] == "text" and not grounding.cited_numbers(b["md"]) and grounding.says_gap(b["md"])
+    partly = any_cited and any(b["kind"] == "text" and (grounding.has_uncited_gap(b["md"])
+                                                         or (not grounding.cited_numbers(b["md"]) and grounding.says_gap(b["md"])))
                                for b in raw)
     routing_note = str(data.get("routing_note") or "").strip() if routed else ""
     if routed and not routing_note:
@@ -549,6 +554,19 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
 
     forest = [tree(r, None) for r in roots if r not in seen]
     forest += [tree(k, None) for k in nodes if k not in seen]
+
+    def flatten(n: dict[str, Any]) -> None:
+        """A concept with one link to the next, and that one to the next, is a chain: it reads as a flat numbered
+        sequence, not as lists nested one inside the other. Only a real branch nests."""
+        chain, cur = [], n
+        while len(cur["children"]) == 1:
+            cur = cur["children"][0]
+            chain.append(cur)
+        n["chain"], n["branches"] = chain, cur["children"]
+        for b in n["branches"]:
+            flatten(b)
+    for root in forest:
+        flatten(root)
     cross = [{"a": nodes[e["a"]]["label"], "b": nodes[e["b"]]["label"], "label": e["label"], "cites": e["cites"],
               "removed": e["removed"]}
              for i, e in enumerate(edges) if i not in tree_edges]

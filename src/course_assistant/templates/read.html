@@ -12,7 +12,8 @@
 {% if not chunks %}<div class="card empty"><p>This material has no readable text yet.{% if m.status == 'needs_transcription' %} It is waiting to be transcribed.{% endif %}</p></div>{% endif %}
 <div class="chunks">
 {% for c in chunks %}<section id="c{{ c.id }}" class="chunk{% if at == c.id %} hit{% endif %}" {% if at == c.id %}aria-current="location"{% endif %} tabindex="-1">
-  <header><h2 class="loc">{{ c.start_label or c.range_label or c.loc_label }}</h2>{% if c.start_label and c.range_label and c.range_label != c.start_label %} <span class="muted">(this part runs {{ c.range_label }})</span>{% endif %}{% if c.heading %} <span class="muted">{{ c.heading }}</span>{% endif %}
+  {% set loc = c.start_label or c.range_label or c.loc_label or '' %}
+  <header><h2 class="loc"{% if "$" in loc %} data-math{% endif %}>{{ loc }}</h2>{% if c.start_label and c.range_label and c.range_label != c.start_label %} <span class="muted">(this part runs {{ c.range_label }})</span>{% endif %}{% if c.heading and c.heading != loc and c.heading not in loc and loc not in c.heading %} <span class="muted"{% if "$" in c.heading %} data-math{% endif %}>{{ c.heading }}</span>{% endif %}
   {% if c.seek is not none and media %}<button type="button" class="btn small ghost" data-seek="{{ c.seek }}">Go to {{ c.start_label or c.loc_label }}</button> <button type="button" class="btn small ghost" data-pause>Pause</button>{% endif %}</header>
   <div class="chunk-text">{{ c.html }}</div></section>{% endfor %}
 </div>{% endblock %}

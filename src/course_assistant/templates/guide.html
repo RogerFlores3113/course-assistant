@@ -2,8 +2,10 @@
 {% macro removed(flag) %}{% if flag %} <span class="cite-removed">(citation removed)</span>{% endif %}{% endmacro %}
 {% macro chips(cites) %}{% for c in cites %}{% if smap.get(c) %} <a class="cite" href="{{ smap[c].href }}" aria-label="Source {{ c }}: {{ smap[c].title }}{% if smap[c].label %}, {{ smap[c].label }}{% endif %}{% if smap[c].past %}, {{ smap[c].past }}{% endif %}">[{{ c }}]</a>{% endif %}{% endfor %}{% endmacro %}
 {% macro edge(label, cites, gone) %}{% if label %}<span class="muted" data-math>{{ label }}</span>{% endif %}{% if cites %}{{ chips(cites) }}{% elif not gone %} <span class="edge-note">Not from your materials</span>{% endif %}{{ removed(gone) }}{% endmacro %}
+{% macro step(c) %}<li><span class="muted">links to</span> {{ edge(c.via, c.via_cites, c.via_removed) }}: <strong data-math>{{ c.label }}</strong>{{ chips(c.cites) }}{{ removed(c.removed) }}</li>{% endmacro %}
 {% macro node(n) %}<li><strong data-math>{{ n.label }}</strong>{{ chips(n.cites) }}{{ removed(n.removed) }}
-{% if n.children %}<ul>{% for ch in n.children %}<li class="via"><span class="muted">links to</span> {{ edge(ch.via, ch.via_cites, ch.via_removed) }}<ul>{{ node(ch) }}</ul></li>{% endfor %}</ul>{% endif %}</li>{% endmacro %}
+{% if n.chain %}<ol class="chain">{% for c in n.chain %}{{ step(c) }}{% endfor %}</ol>{% endif %}
+{% if n.branches %}<ul>{% for ch in n.branches %}<li class="via"><span class="muted">links to</span> {{ edge(ch.via, ch.via_cites, ch.via_removed) }}<ul>{{ node(ch) }}</ul></li>{% endfor %}</ul>{% endif %}</li>{% endmacro %}
 {% block body %}
 <div class="course-head" style="--accent-c: {{ accent }}"><p class="crumbs"><a href="/courses/{{ course.id }}/guides">{{ course.name }}</a> &rsaquo; {{ kind_label }}</p>
 <h1>{{ g.title }}</h1><p class="muted small">{{ g.created_at[:10] }}{% if g.model %} &middot; {{ g.model }}{% endif %}</p></div>
