@@ -100,6 +100,21 @@ def _numbers_in_query(q: str) -> list[str]:
         out += _NUM.findall(m.group(0))
     rest = _POWER.sub(" ", _MATRIX.sub(" ", q))
     out += [n for n in _NUM.findall(rest)]
+    out += _spoken_numbers(rest)
+    return out
+
+
+_SPOKEN_RUN = re.compile(r"\b(?:(?:negative|minus)\s+)?(?:zero|one|two|three|four|five|six|seven|eight|nine|ten)\b"
+                         r"(?:\s*(?:,|and|then)?\s*(?:(?:negative|minus)\s+)?(?:zero|one|two|three|four|five|six|seven|eight|nine|ten)\b)+",
+                         re.I)
+
+
+def _spoken_numbers(text: str) -> list[str]:
+    """Numbers a student spells out in a run ('one, negative two', 'rows four, one and two, three'): a lone 'one' is
+    ordinary English, so only a run of two or more number words counts. Sign words are dropped, as in captions."""
+    out: list[str] = []
+    for m in _SPOKEN_RUN.finditer(text or ""):
+        out += [_NUMBER_WORDS[w] for w in re.findall(r"[a-z]+", m.group(0).lower()) if w in _NUMBER_WORDS and _NUMBER_WORDS[w] != "-"]
     return out
 
 
@@ -234,10 +249,13 @@ def _number_score(qnums: list[str], text: str) -> float:
     digits = [d for _, d in toks]
     pos = [p for p, _ in toks]
     if len(qnums) >= 3:
-        k = len(qnums)
-        for i in range(len(toks) - k + 1):
-            if digits[i:i + k] == qnums and all(pos[i + j + 1] - pos[i + j] <= 6 for j in range(k - 1)):
-                return 3.0
+        # the whole list, then shorter runs (the matrix's entries without the 'eigenvalue 2' typed beside them)
+        for k in range(len(qnums), 2, -1):
+            for w in range(len(qnums) - k + 1):
+                want = qnums[w:w + k]
+                for i in range(len(toks) - k + 1):
+                    if digits[i:i + k] == want and all(pos[i + j + 1] - pos[i + j] <= 6 for j in range(k - 1)):
+                        return 3.0
     have = set(digits)
     frac = sum(1 for n in qnums if n in have) / len(qnums)
     return (0.8 if len(qnums) >= 3 else 0.5) * frac
@@ -276,7 +294,7 @@ def _source(row: dict[str, Any], score: float) -> Source:
     }
 
 
-_SELECT = """SELECT c.id, c.material_id, c.heading, c.text, c.loc_kind, c.loc_start, c.loc_label,
+_SELECT = """SELECT c.id, c.ord, c.material_id, c.heading, c.text, c.loc_kind, c.loc_start, c.loc_label,
                     m.title AS material_title, m.kind AS material_kind"""
 
 
@@ -464,8 +482,18 @@ def _is_intro_chunk(r: dict[str, Any]) -> bool:
     return bool(_INTRO_HEAD.match(r["heading"] or "") or _INTRO_LEAD.match(r["text"] or ""))
 
 
+_PROBLEM_MARK = re.compile(r"(?m)^\W{0,4}Problem\.\W{0,3}")
+_SOLUTION_MARK = re.compile(r"(?m)^\W{0,4}Solution\.\W{0,3}")
+_LETTERED = re.compile(r"(?m)^\s*\([a-e]\)\s+\S")
+
+
 def _is_exercise_chunk(r: dict[str, Any]) -> bool:
-    return bool(_EXERCISE_HEAD.search(r["heading"] or "") or _EXERCISE_LEAD.match(r["text"] or ""))
+    if _EXERCISE_HEAD.search(r["heading"] or "") or _EXERCISE_LEAD.match(r["text"] or ""):
+        return True
+    text = r["text"] or ""
+    # exercises that a converter filed under another heading ('Key Equations'): Problem. / Solution. pairs, lettered parts
+    return len(_PROBLEM_MARK.findall(text)) >= 2 or (bool(_PROBLEM_MARK.search(text)) and bool(_SOLUTION_MARK.search(text))) \
+        or len(_LETTERED.findall(text)) >= 2
 
 
 def is_filler_chunk(text: str, heading: str = "") -> bool:
@@ -715,7 +743,10 @@ def split_clauses(question: str) -> list[str]:
     carry = ""
     for p in parts:
         cur = f"{carry} {p}".strip() if carry else p
-        if len(normalize_query(cur)["core"]) < 2:
+        # a lead-in ('in the lecture example,') has no topic of its own: it joins the part that does
+        topical = [t for t in normalize_query(cur)["core"] if t not in _LECTURE_NOISE and t not in _GENERIC_TOPIC
+                   and t not in {"example", "examples"}]
+        if len(normalize_query(cur)["core"]) < 2 or not topical:
             carry = cur
             continue
         out.append(cur)
@@ -839,6 +870,25 @@ def _term_weights(store, terms: list[str], extra: str, fparams: list[Any]) -> di
         if _stem(t) in _ANSWER_KIND or _stem(t) in _WEAK:
             out[t] = min(out[t], 0.3)
     return out
+
+
+def telling_terms(store, course_id: int, text: str, *, floor: float = 0.6) -> list[str]:
+    """The words of a topic that say what it is about in this course ('exponential', not 'matrix' or 'equations')."""
+    terms = [t for t in query_terms(text) if t not in _GENERIC_TOPIC and t not in _LECTURE_NOISE and not t.isdigit()]
+    if not terms:
+        return []
+    extra, fparams = _filters(course_id, None, None, True)
+    w = _term_weights(store, terms, extra, fparams)
+    return [t for t in terms if w.get(t, 1.0) >= floor]
+
+
+def mentions_any(src: dict[str, Any], terms: list[str]) -> bool:
+    """True when a passage is about the topic: its heading has one of the telling words, or its text has two of them
+    (one, when the topic has only one). A passing mention of one word in a passage about something else is padding."""
+    hs = {_stem(w) for w in _words(src.get("heading", ""))}
+    ts = {_stem(w) for w in _words(src.get("text", ""))}
+    want = {_stem(t) for t in terms}
+    return bool(want & hs) or len(want & ts) >= min(2, len(want))
 
 
 def _has_term(t: str, words: set[str], stems: set[str]) -> bool:
@@ -966,19 +1016,32 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
         ranked = _fair_share(ranked, named_ids, limit)
     if len(qnums) >= 3 and ranked:
         # a passage that carries the question's numbers (the matrix as the lecturer wrote it) is followed by the one
-        # that solves it; checked for each such passage among the leading results, not only the first one
+        # that solves it; checked for each such passage among the leading results, not only the first one. The solving
+        # passage can be a few chunks on (a caption that sets the matrix up, then finds the eigenvalues, then the
+        # eigenvectors), so the next three are weighed by the question's own words and the best one or two come along.
+        wanted = {*(_stem(t) for t in core), *(_stem(t) for t in related)} - {_stem(t) for t in _GENERIC_TOPIC}
         hits = [i for i in range(min(len(ranked), 8)) if _number_score(qnums, ranked[i][1]["text"]) >= 3.0][:3]
         for pos in reversed(hits):
-            nxt = store._row("SELECT id FROM chunks WHERE material_id = ? AND ord = (SELECT ord + 1 FROM chunks WHERE id = ?)",
-                             (ranked[pos][1]["material_id"], ranked[pos][1]["id"]))
-            if not nxt or nxt["id"] in {r["id"] for _, r in ranked[:pos + 2]}:
-                continue
-            row = store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE c.id = ?"
-                              f"{extra}", [nxt["id"], *fparams])
-            if row:  # the line after a matching worked example is where it is solved
-                at = min(pos + 1, max(0, limit - 1))
-                rest = [x for x in ranked if x[1]["id"] != nxt["id"]]
-                ranked = rest[:at] + [(ranked[pos][0] - 0.01, row[0])] + rest[at:]
+            cands = store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE c.material_id = ? "
+                                f"AND c.ord > ? AND c.ord <= ?{extra} ORDER BY c.ord",
+                                [ranked[pos][1]["material_id"], ranked[pos][1]["ord"], ranked[pos][1]["ord"] + 3, *fparams]) \
+                if "ord" in ranked[pos][1] else []
+            if not cands:
+                nxt = store._row("SELECT id FROM chunks WHERE material_id = ? AND ord = (SELECT ord + 1 FROM chunks WHERE id = ?)",
+                                 (ranked[pos][1]["material_id"], ranked[pos][1]["id"]))
+                cands = store._rows(f"{_SELECT} FROM chunks c JOIN materials m ON m.id = c.material_id WHERE c.id = ?"
+                                    f"{extra}", [nxt["id"], *fparams]) if nxt else []
+            have = {r["id"] for _, r in ranked[:pos + 2]}
+            cands = [r for r in cands if r["id"] not in have and not is_manifest_noise(r["text"])]
+            if len(cands) > 1:
+                def overlap(r):
+                    ws = {_stem(w) for w in _words(r["text"])}
+                    return len(wanted & ws) + (1 if r is cands[0] else 0)
+                cands = sorted(cands, key=lambda r: (-overlap(r), r["ord"]))[:2]
+            for k, row in enumerate(cands):  # the lines after a matching worked example are where it is solved
+                at = min(pos + 1 + k, max(0, limit - 1))
+                rest = [x for x in ranked if x[1]["id"] != row["id"]]
+                ranked = rest[:at] + [(ranked[pos][0] - 0.01 * (k + 1), row)] + rest[at:]
     return [_source(r, sc) for sc, r in ranked[:limit]]
 
 
@@ -1161,7 +1224,7 @@ def search(store, course_id: int, query: str, *, limit: int = 8, kinds: list[str
     if not kinds and not material_ids and is_comparison(query, intent):
         merged = _comparison_fill(store, course_id, query, merged, limit, exclude_graded, intent)
     if not lead:
-        return merged
+        return _tidy_tail(merged, intent) if not kinds and not material_ids and not is_comparison(query, intent) else merged
     kept = [_shingles(s["text"]) for s in lead]
     out = list(lead)
     seen = {s["chunk_id"] for s in lead}
@@ -1178,6 +1241,24 @@ def search(store, course_id: int, query: str, *, limit: int = 8, kinds: list[str
         out.append(s)
         seen.add(s["chunk_id"])
     return out[:limit]
+
+
+def _tidy_tail(merged: list[Source], intent: dict[str, Any]) -> list[Source]:
+    """The passages after the best few are what a page lists as 'Also searched': keep them to ones that could help.
+    Exercise lists (found by their Problem/Solution pairs too) and a book's summary and glossary sections go unless the
+    question asks for them or little else is left, and a passage far behind the best one goes. The leading three are
+    never touched, so a cited answer keeps what it needs."""
+    if len(merged) <= 3:
+        return merged
+    top = max((s["score"] for s in merged), default=0.0)
+    out = list(merged[:3])
+    for i, s in enumerate(merged[3:], start=3):
+        junk = (not intent["practice"] and not intent["assignment"] and _is_exercise_chunk(s)) or \
+               (not intent["define"] and not intent["overview"] and bool(_SCAFFOLD_HEAD.match(s["heading"] or "")))
+        if junk or (top > 0 and s["score"] < 0.25 * top):
+            continue
+        out.append(s)
+    return out
 
 
 _COMPARE_RX = re.compile(r"\b(compar\w*|vs\.?|versus|differ\w*|different(?:ly)?|changed?|same|unlike|than)\b", re.I)
@@ -1370,7 +1451,8 @@ def topic_sources(store, item: dict[str, Any], k: int = 6) -> list[Source]:
     scored: list[tuple[float, dict[str, Any]]] = []
     for r in pool.values():
         if (is_manifest_noise(r["text"]) or is_title_only(r["text"], r["heading"]) or is_scaffold_chunk(r["text"], r["heading"])
-                or is_header_chunk(r["text"], r["material_title"]) or _is_code_chunk(r) or _is_notes_chunk(r["text"])):
+                or is_header_chunk(r["text"], r["material_title"]) or _is_code_chunk(r) or _is_notes_chunk(r["text"])
+                or _is_exercise_chunk(r)):
             continue
         hseq = [_stem(w) for w in _words(r["heading"])]
         bseq = [_stem(w) for w in _words(r["text"])]
@@ -1398,8 +1480,9 @@ def topic_sources(store, item: dict[str, Any], k: int = 6) -> list[Source]:
             sc *= 0.8
         scored.append((sc, r))
     scored.sort(key=lambda x: (-x[0], x[1]["id"]))
-    if scored:  # passages far behind the best one are about something else
-        scored = [x for x in scored if x[0] >= 0.3 * scored[0][0]]
+    if scored:  # passages far behind the best one are about something else (a molarity item is not a percent-yield item)
+        close = [x for x in scored if x[0] >= 0.5 * scored[0][0]]
+        scored = close if len(close) >= 4 else [x for x in scored[:4] if x[0] >= 0.3 * scored[0][0]]
     out: list[tuple[float, dict[str, Any]]] = []
     per: dict[int, int] = {}
     kept: list[set[str]] = []

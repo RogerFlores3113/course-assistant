@@ -549,6 +549,50 @@ def import_file(store: Store, course_id: int, src: Path, *, kind: str | None = N
                 captions: Path | None = None) -> int:
     """Save a file into the course and make it searchable. Returns the material id.
     Importing the same file again returns the existing material."""
+    return _import_file(store, course_id, src, kind=kind, title=title, original_name=original_name,
+                        lecture_date=lecture_date, added_by=added_by, captions=captions)[0]
+
+
+def import_file_report(store: Store, course_id: int, src: Path, *, kind: str | None = None, title: str | None = None,
+                       original_name: str | None = None, lecture_date: str = "", added_by: str = "student",
+                       captions: Path | None = None) -> dict[str, Any]:
+    """import_file, with a plain account of what happened to the file:
+    {material_id, name, title, kind, kind_label, kind_how ('guessed' or 'chosen'), chunks, already_saved, status,
+     skipped: [what was left out and why], line: one sentence for the student}. Raises what import_file raises."""
+    mid, meta, already = _import_file(store, course_id, src, kind=kind, title=title, original_name=original_name,
+                                      lecture_date=lecture_date, added_by=added_by, captions=captions)
+    return describe_import(store, mid, name=original_name or Path(src).name, kind_given=bool(kind),
+                           already_saved=already, extraction_skips=list(meta.get("skipped") or []))
+
+
+def describe_import(store: Store, material_id: int, *, name: str = "", kind_given: bool = False, already_saved: bool = False,
+                    extraction_skips: list[str] | None = None) -> dict[str, Any]:
+    m = store.material(material_id) or {}
+    chunks = int(m.get("chunk_count") or len(store.chunks_of(material_id)))
+    skipped = list(extraction_skips or [])
+    if already_saved:
+        skipped.append("Already saved, so nothing was added.")
+    if m.get("duplicate_of"):
+        other = store.material(m["duplicate_of"]) or {}
+        skipped.append(f"Looks like a copy of {other.get('title') or 'another material'}, so it is left out of searches.")
+    if m.get("status") == "needs_transcription":
+        skipped.append(m.get("status_note") or "No text yet: it is waiting to be read or transcribed.")
+    elif chunks == 0:
+        skipped.append("No readable text was found in it.")
+    from ..store import MATERIAL_KINDS
+    label = MATERIAL_KINDS.get(m.get("kind", ""), m.get("kind", ""))
+    how = "chosen" if kind_given else "guessed"
+    title = m.get("title") or name
+    line = (f"{name or title}: {label.lower()} ({how}), {chunks} passage{'s' if chunks != 1 else ''}"
+            + (f". Left out: {' '.join(skipped)}" if skipped else "."))
+    return {"material_id": material_id, "name": name or title, "title": title, "kind": m.get("kind", ""), "kind_label": label,
+            "kind_how": how, "chunks": chunks, "already_saved": already_saved, "status": m.get("status", ""),
+            "skipped": skipped, "line": line}
+
+
+def _import_file(store: Store, course_id: int, src: Path, *, kind: str | None = None, title: str | None = None,
+                 original_name: str | None = None, lecture_date: str = "", added_by: str = "student",
+                 captions: Path | None = None) -> tuple[int, dict[str, Any], bool]:
     src = Path(src)
     if not store.course(course_id):
         raise ImportError_("That course doesn't exist any more.")
@@ -581,7 +625,7 @@ def import_file(store: Store, course_id: int, src: Path, *, kind: str | None = N
         sha = _sha256_file(work)
         existing = store.material_by_sha(course_id, sha)
         if existing:
-            return int(existing["id"])
+            return int(existing["id"]), {}, True
 
         # extract before saving anything, so a bad file leaves nothing behind
         chunks: list[dict[str, Any]] = []
@@ -629,7 +673,7 @@ def import_file(store: Store, course_id: int, src: Path, *, kind: str | None = N
         store.add_job("ocr" if ext in IMAGES else "transcribe", mid, note=final_title)
     _process_syllabus(store, mid)
     link_to_lecture(store, mid)
-    return mid
+    return mid, meta, False
 
 
 def import_text(store: Store, course_id: int, title: str, text: str, *, kind: str = "notes",

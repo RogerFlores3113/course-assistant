@@ -204,6 +204,14 @@ def _page_text(page) -> str:
     return _clean_page_text(re.sub(r"[ \t]+\n", "\n", best)).strip()
 
 
+def _skip_note(what: str, numbers: list[int]) -> list[str]:
+    """['3 pages with no readable text (pages 2, 5, 9)'] for the import report; [] when nothing was left out."""
+    if not numbers:
+        return []
+    shown = ", ".join(str(n) for n in numbers[:8]) + (", and more" if len(numbers) > 8 else "")
+    return [f"{len(numbers)} {what}{'s' if len(numbers) != 1 else ''} with no readable text ({what}{'s' if len(numbers) != 1 else ''} {shown})"]
+
+
 def extract_pdf(path: Path) -> Result:
     from pypdf import PdfReader
     from pypdf.errors import PyPdfError
@@ -220,14 +228,17 @@ def extract_pdf(path: Path) -> Result:
         n = len(reader.pages)
         chunks: list[dict[str, Any]] = []
         total = 0
+        blank: list[int] = []
         for i, page in enumerate(reader.pages, start=1):
             try:
                 text = _page_text(page)
             except Exception:  # noqa: BLE001 - one bad page should not sink the file
                 text = ""
             total += len(text.strip())
+            if not text.strip():
+                blank.append(i)
             chunks.extend(chunks_for(text, "page", i))
-        meta: dict[str, Any] = {"page_count": n}
+        meta: dict[str, Any] = {"page_count": n, "skipped": _skip_note("page", blank)}
         try:
             t = (reader.metadata.title or "").strip() if reader.metadata else ""
         except Exception:  # noqa: BLE001
@@ -293,6 +304,7 @@ def extract_pptx(path: Path) -> Result:
         raise ImportError_("I couldn't open this PowerPoint file. It may be damaged or an old .ppt. Save it as "
                            ".pptx and try again.") from exc
     chunks: list[dict[str, Any]] = []
+    blank: list[int] = []
     for i, slide in enumerate(prs.slides, start=1):
         title = ""
         try:
@@ -314,11 +326,13 @@ def extract_pptx(path: Path) -> Result:
         if notes:
             notes = _new_notes(notes, f"{title} {body}")
         text = "\n\n".join(x for x in (title, body, f"Speaker notes: {notes}" if notes else "") if x)
+        if not text.strip():
+            blank.append(i)
         chunks.extend(chunks_for(text, "slide", i, heading=title))
     if not chunks:
         raise ImportError_("I found no text on these slides. If they are pictures, export the deck to PDF or add "
                            "photos of the slides so they can be read with OCR.")
-    return chunks, {"page_count": len(prs.slides)}
+    return chunks, {"page_count": len(prs.slides), "skipped": _skip_note("slide", blank)}
 
 
 # ------------------------------------------------------------------ DOCX
