@@ -42,7 +42,41 @@ def _today() -> str:
     return _date.today().isoformat()
 
 
+
+
+# ---------------------------------------------------------------- results and wording
+READY_MESSAGES = {
+    "primer": "Your primer is ready.", "exam": "Your exam guide is ready.", "exam_guide": "Your exam guide is ready.",
+    "map": "Your concept map is ready.", "concept_map": "Your concept map is ready.",
+    "explain": "The explanation is ready.", "practice": "Your practice questions are ready.",
+    "missed": "Your catch-up is ready.", "twin": "Your twin problem is ready.", "flashcards": "Your flashcards are ready.",
+}
+
+
+def ready_message(kind: str) -> str:
+    """'Your practice questions are ready.' for a guide kind or a Study action name."""
+    return READY_MESSAGES.get((kind or "").strip().lower(), "Your guide is ready.")
+
+
+class FlashcardResult(list):
+    """Ids of the cards made. Also says what was left out, so the web can tell the student."""
+
+    dropped: int = 0          # cards whose cite pointed at no source
+    duplicates: int = 0       # cards the student already has
+    malformed: int = 0
+    note: str = ""
+
+
 # ---------------------------------------------------------------- sources
+def _usable(m: dict[str, Any]) -> bool:
+    return not m.get("duplicate_of") and not m.get("graded") and m["kind"] not in ("syllabus", "past_offering")
+
+
+def _is_noise(text: str) -> bool:
+    fn = getattr(_mod("retrieval"), "is_manifest_noise", None)
+    return bool(fn and fn(text))
+
+
 def _source_from_chunk(c: dict[str, Any], title: str = "", kind: str = "") -> dict[str, Any]:
     return {"chunk_id": c["id"], "material_id": c["material_id"],
             "material_title": c.get("material_title") or title, "material_kind": c.get("material_kind") or kind,
@@ -50,11 +84,22 @@ def _source_from_chunk(c: dict[str, Any], title: str = "", kind: str = "") -> di
             "heading": c.get("heading", ""), "text": c["text"], "href": locations.href_for(c), "score": 0.0}
 
 
-def _material_sources(store: Store, material_id: int, limit: int = 12) -> list[dict[str, Any]]:
+def _spread_pick(items: list, k: int) -> list:
+    """k items spread evenly over the list, in order."""
+    if k >= len(items):
+        return list(items)
+    if k <= 0:
+        return []
+    return [items[int(i * len(items) / k)] for i in range(k)]
+
+
+def _material_sources(store: Store, material_id: int, limit: int = 12, *, spread: bool = False) -> list[dict[str, Any]]:
     m = store.material(material_id)
     if not m:
         return []
-    return [_source_from_chunk(c, m["title"], m["kind"]) for c in store.chunks_of(material_id)[:limit]]
+    chunks = [c for c in store.chunks_of(material_id) if not _is_noise(c["text"])]
+    chunks = _spread_pick(chunks, limit) if spread else chunks[:limit]
+    return [_source_from_chunk(c, m["title"], m["kind"]) for c in chunks]
 
 
 def _search(store: Store, course_id: int, query: str, limit: int = 6, **kw) -> list[dict[str, Any]]:
@@ -88,6 +133,56 @@ def _interleave(lists: list[list[dict[str, Any]]], cap: int = MAX_SOURCES) -> li
     return _merge(merged, cap=cap)
 
 
+def _spread_materials(store: Store, material_ids: list[int], cap: int, per: int = 3) -> list[dict[str, Any]]:
+    """Every material gets a share of the budget, drawn from across the whole file, not just its start."""
+    n = max(1, len(material_ids))
+    per = max(1, min(per, cap // n))
+    return _interleave([_material_sources(store, mid, per, spread=True) for mid in material_ids], cap=cap)
+
+
+_TERM = re.compile(r"\b(fall|autumn|spring|summer|winter|fa|sp|su|wi)[\s\-_']*((?:20)?\d{2})\b", re.I)
+_SEASONS = {"fa": "Fall", "autumn": "Fall", "sp": "Spring", "su": "Summer", "wi": "Winter"}
+
+
+def term_of(text: str) -> str:
+    """'Fall 2018' from 'fall2018-lecture-summaries.md', 'sp22' ..., or ''."""
+    m = _TERM.search(text or "")
+    if not m:
+        return ""
+    season = m.group(1).lower()
+    season = _SEASONS.get(season, season.capitalize())
+    year = m.group(2)
+    return f"{season} {year if len(year) == 4 else '20' + year}"
+
+
+def _past_label(store: Store, course_id: int, material_id: int, cache: dict) -> str:
+    """'' for this term's material; else 'from a past offering, Fall 2018; may differ from this term'."""
+    if material_id in cache:
+        return cache[material_id]
+    m = store.material(material_id) or {}
+    course = store.course(course_id) or {}
+    term = term_of(" ".join(str(m.get(k, "")) for k in ("title", "original_name", "source_url")))
+    mine = term_of(course.get("term", ""))
+    past = m.get("kind") == "past_offering" or bool(term and mine and term != mine)
+    label = ""
+    if past:
+        label = "from a past offering" + (f", {term}" if term else "") + "; may differ from this term"
+    cache[material_id] = label
+    return label
+
+
+def _prepare(store: Store, course_id: int, sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cache: dict = {}
+    out = []
+    for s in sources:
+        s = dict(s)
+        label = _past_label(store, course_id, s["material_id"], cache)
+        if label:
+            s["past_label"] = label
+        out.append(s)
+    return out
+
+
 def _sources_block(sources: list[dict[str, Any]]) -> str:
     if not sources:
         return "(No course materials matched. Everything you say is outside knowledge and must be labelled.)"
@@ -96,6 +191,8 @@ def _sources_block(sources: list[dict[str, Any]]) -> str:
         head = f"[{i}] {s.get('material_title', '')} ({s.get('loc_label', '')})"
         if s.get("heading"):
             head += f" - {s['heading']}"
+        if s.get("past_label"):
+            head += f" [{s['past_label']}]"
         parts.append(f"{head}\n{(s.get('text') or '')[:MAX_CHARS]}")
     return "\n\n".join(parts)
 
@@ -110,14 +207,71 @@ def _guide_sources(sources: list[dict[str, Any]], used: list[int]) -> list[dict[
     return out
 
 
+FALLBACK_FORMAT_RULES = ("Put ALL math, including vectors and matrices, inside $...$ or $$...$$. Put code in backticks. "
+                         "Square brackets are only for citations like [2], outside math and code.")
+
 SYSTEM = """You are Course Assistant, a patient study helper for a college student. Rules you always follow:
 - Ground everything in the numbered sources the student's own course materials provide. Cite the source number in square brackets like [2] right after each claim. Cite only numbers that exist.
 - If the sources do not cover something and you add it from general knowledge, put it inside <outside>...</outside> tags so the app can label it "Not from your materials". Never present outside knowledge as if it came from the sources.
 - Never invent page numbers, quotes, dates or deadlines. If the materials do not say, say so.
+- A source marked "from a past offering" comes from an earlier term. Say so when you use it ("in Fall 2018, ...") and never present it as this term's policy, dates or exam format.
 - Use plain, friendly language a student can read quickly. Define jargon the first time you use it.
-- This is often STEM material: write math in LaTeX style with $...$ for inline and $$...$$ for display, and keep units and steps explicit.
+- This is often STEM material: keep units and steps explicit.
 - Use Markdown with short headings, bullets and numbered lists.
 - Academic integrity: never solve a problem the student says is graded. Work an example with different numbers instead."""
+
+
+def _system(store: Store, course_id: int) -> str:
+    """The study system prompt: base rules, the shared format rules, and the course's integrity block."""
+    parts = [SYSTEM, getattr(_mod("grounding"), "FORMAT_RULES", FALLBACK_FORMAT_RULES)]
+    block = getattr(_mod("integrity"), "prompt_block", None)
+    if block:
+        try:
+            text = block(store, course_id)
+        except Exception:
+            text = ""
+        if text and text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts)
+
+
+def _guard(store: Store, course_id: int, provider, raw: str, question: str) -> tuple[str, int | None]:
+    """Integrity post-check of a reply. Returns (reply without marker, id of a twin/concepts guide if routed)."""
+    integ = _mod("integrity")
+    item_id = None
+    reader = getattr(integ, "read_marker", None)
+    if reader:
+        item_id, raw = reader(raw)
+    graded = None
+    if item_id not in (None, ""):
+        try:
+            graded = store.graded_item(int(item_id))
+        except (TypeError, ValueError):
+            graded = None
+    if graded is None:
+        check = getattr(integ, "check_reply", None)
+        if check:
+            graded = check(store, course_id, question, raw)
+    if graded:
+        ans = integ.twin(store, course_id, question, provider, graded)
+        gid = getattr(ans, "guide_id", None)
+        if not gid:  # a twin that was not saved by its author: save it so the student gets it
+            gid = store.add_guide(course_id, "twin", f"Twin problem: {graded.get('title', '')}"[:90],
+                                  _clean_body(getattr(ans, "body_md", "")) + "\n\n" + disclaimer.FOOTER,
+                                  data={"blocks": _block_dicts(getattr(ans, "blocks", None)), "mode": "twin"},
+                                  question=question, model=getattr(provider, "model", "") or "")
+        return raw, int(gid)
+    return raw, None
+
+
+_DETAILS_ONE_LINE = re.compile(r"<details>\s*<summary>(.*?)</summary>[ \t]*", re.I)
+
+
+def normalize_details(text: str) -> str:
+    """<details>, <summary> and </details> each on their own line, so every renderer shows a hidden solution."""
+    text = _DETAILS_ONE_LINE.sub(lambda m: f"\n<details>\n<summary>{m.group(1)}</summary>\n", text or "")
+    text = re.sub(r"[ \t]*</details>[ \t]*", "\n</details>\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip("\n")
 
 
 def _clean_body(body: str) -> str:
@@ -125,22 +279,35 @@ def _clean_body(body: str) -> str:
     return body
 
 
+def _compose(store: Store, course_id: int, provider, task: str, sources: list[dict[str, Any]], *, question: str = "",
+             max_tokens: int = 4000) -> dict[str, Any]:
+    """Ask, guard, parse. Returns {routed, blocks, body, used, outside, not_covered, sources}."""
+    sources = _prepare(store, course_id, sources)
+    user = f"{task}\n\nSOURCES\n\n{_sources_block(sources)}"
+    raw = provider.complete(_system(store, course_id), [{"role": "user", "content": user}], max_tokens=max_tokens)
+    raw, routed = _guard(store, course_id, provider, raw, question or task[:300])
+    if routed:
+        return {"routed": routed}
+    ans = _mod("grounding").parse_answer(normalize_details(raw), sources)
+    return {"routed": None, "blocks": _block_dicts(ans.blocks), "body": _clean_body(ans.body_md),
+            "used": list(ans.used or []), "outside": bool(getattr(ans, "outside", False)),
+            "not_covered": bool(getattr(ans, "not_covered", False)), "sources": sources}
+
+
 def _generate(store: Store, course_id: int, provider, kind: str, title: str, task: str, sources: list[dict[str, Any]],
               *, question: str = "", event_id: int | None = None, data: dict[str, Any] | None = None,
               max_tokens: int = 4000, extra_note: str = "") -> int:
-    user = f"{task}\n\nSOURCES\n\n{_sources_block(sources)}"
-    raw = provider.complete(SYSTEM, [{"role": "user", "content": user}], max_tokens=max_tokens)
-    ans = _mod("grounding").parse_answer(raw, sources)
-    body = _clean_body(ans.body_md)
-    blocks = list(ans.blocks)
+    r = _compose(store, course_id, provider, task, sources, question=question, max_tokens=max_tokens)
+    if r["routed"]:
+        return r["routed"]
+    body, blocks = r["body"], list(r["blocks"])
     if extra_note:
         body = f"> {extra_note}\n\n{body}"
         blocks.insert(0, {"kind": "text", "md": extra_note, "cites": []})
     body = f"{body}\n\n{disclaimer.FOOTER}"
     d = dict(data or {})
-    d["outside"] = bool(getattr(ans, "outside", False))
-    d["blocks"] = _block_dicts(blocks)
-    return store.add_guide(course_id, kind, title, body, sources=_guide_sources(sources, list(ans.used or [])), data=d,
+    d.update({"outside": r["outside"], "not_covered": r["not_covered"], "mode": "answer", "blocks": blocks})
+    return store.add_guide(course_id, kind, title, body, sources=_guide_sources(r["sources"], r["used"]), data=d,
                            question=question, event_id=event_id, model=getattr(provider, "model", "") or "")
 
 
@@ -192,82 +359,272 @@ def _ask_json(provider, system: str, user: str, want, max_tokens: int = 4000):
     raise ValueError("The AI did not return usable JSON. Try again.")
 
 
-# ---------------------------------------------------------------- events
+# ---------------------------------------------------------------- events and lectures
+_DAYS = r"(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*"
+_DANGLING = (" on", " to", " of", " for", " the", " and", " in", " at", " by")
+
+
+def is_junk_event(e: dict[str, Any]) -> bool:
+    """Rows a syllabus import leaves behind: 'to', 'Wed Sep 23, Fri Sep 25, Mon', a sentence, 'There is no class on'."""
+    t = (e.get("title") or "").strip()
+    if len(re.sub(r"[^A-Za-z0-9]", "", t)) < 3:
+        return True
+    low = t.lower().strip(" .:;,-|")
+    if low in {"to", "and", "or", "the", "tbd", "tba", "no class", "none", "n/a"}:
+        return True
+    if re.match(rf"^{_DAYS}\b[^,]*,\s*{_DAYS}\b", low) or re.match(r"^there is no\b", low):
+        return True
+    if len(t.split()) > 14 or low.endswith(_DANGLING):
+        return True
+    return False
+
+
+def clean_title(e: dict[str, Any]) -> str:
+    """'17 | Lecture 20' -> 'Lecture 20'."""
+    t = re.sub(r"^\s*\d+\s*\|\s*", "", (e.get("title") or "").strip())
+    return t.strip()
+
+
+def event_label(e: dict[str, Any]) -> str:
+    """What a picker shows: the topic when there is one, otherwise the cleaned title."""
+    title, topics = clean_title(e), (e.get("topics") or "").strip()
+    if topics and (is_junk_event(dict(e, title=title)) or topics.lower() not in title.lower()):
+        short = topics if len(topics) <= 60 else topics[:57].rstrip() + "..."
+        if is_junk_event(dict(e, title=title)):
+            return short
+        return f"{title}: {short}"
+    return title
+
+
+def study_form_options(store: Store, course_id: int) -> dict[str, Any]:
+    """Choices for the Study tab: lectures (next and past), exams, and materials to pick from."""
+    today = _today()
+    evs = [e for e in store.events(course_id) if not is_junk_event(e)]
+
+    def row(e):
+        return {"id": e["id"], "date": e["date"], "label": event_label(e), "kind": e["kind"]}
+
+    return {"next_lectures": [row(e) for e in evs if e["kind"] == "lecture" and e["date"] >= today],
+            "past_lectures": [row(e) for e in evs if e["kind"] == "lecture" and e["date"] <= today][-20:],
+            "exams": [row(e) for e in evs if e["kind"] in ("exam", "quiz")],
+            "materials": [{"id": m["id"], "title": m["title"], "kind": m["kind"]} for m in store.materials(course_id)
+                          if not m.get("duplicate_of") and m["kind"] not in ("syllabus", "past_offering")]}
+
+
 def _pick_event(store: Store, course_id: int, event_id: int | None, kind: str) -> dict[str, Any]:
     if event_id is not None:
         e = store.event(event_id)
         if not e or e["course_id"] != course_id:
             raise ValueError(f"No such event {event_id} in this course.")
         return e
-    nxt = store.events(course_id, start=_today(), kinds=[kind])
+    nxt = [e for e in store.events(course_id, start=_today(), kinds=[kind]) if not is_junk_event(e)]
     if not nxt:
         raise ValueError(f"No upcoming {kind} on this course's calendar. Add one first.")
     return nxt[0]
 
 
-def _event_sources(store: Store, course_id: int, ev: dict[str, Any], cap: int = 20) -> list[dict[str, Any]]:
-    query = " ".join(x for x in (ev["title"], ev.get("topics", "")) if x)
-    dated = []
-    for m in store.materials(course_id):
-        if m["lecture_date"] == ev["date"]:
-            dated += _material_sources(store, m["id"], 8)
+_GENERIC = {"lecture", "lectures", "week", "class", "slides", "notes", "introduction", "intro", "chapter", "part",
+            "review", "overview", "captions", "recording", "video", "transcript"}
+
+
+def _lecture_number(ev: dict[str, Any]) -> str | None:
+    for text in (clean_title(ev), ev.get("topics") or ""):
+        m = re.search(r"(?:lecture|lec\.?|week|class|session)\s*#?\s*0*(\d+)", text, re.I)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _name_has_number(m: dict[str, Any], num: str) -> bool:
+    names = " ".join(str(m.get(k, "")) for k in ("title", "original_name", "filename")).lower()
+    return bool(re.search(rf"(?<![a-z0-9])(?:lecture|lec|l|week|wk|class|session)[\s_\-#.]*0*{num}(?!\d)", names))
+
+
+def _topic_words(ev: dict[str, Any]) -> set[str]:
+    text = f"{clean_title(ev)} {ev.get('topics') or ''}".lower()
+    return {w for w in re.findall(r"[a-z]{4,}", text) if w not in _GENERIC}
+
+
+def _is_recording(m: dict[str, Any]) -> bool:
+    names = " ".join(str(m.get(k, "")) for k in ("title", "original_name")).lower()
+    return m["kind"] == "recording" or "caption" in names or "transcript" in names
+
+
+def lecture_materials(store: Store, course_id: int, ev: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
+    """Saved materials for one lecture, with why each was chosen.
+
+    Order: linked to the event, then dated the same day, then matched by lecture number, title or topic. A recording
+    or captions file that matches is always included."""
+    mats = [m for m in store.materials(course_id) if _usable(m)]
+    out: list[tuple[dict[str, Any], str]] = []
+    seen: set[int] = set()
+
+    def add(m, why):
+        if m["id"] not in seen:
+            seen.add(m["id"])
+            out.append((m, why))
+
+    for m in mats:
+        if m.get("event_id") == ev["id"]:
+            add(m, "linked to this lecture")
+    for m in mats:
+        if m.get("lecture_date") and m["lecture_date"] == ev["date"]:
+            add(m, f"dated {ev['date']}")
+    num, words = _lecture_number(ev), _topic_words(ev)
+    for m in mats:
+        if m["id"] in seen or (out and not _is_recording(m)):
+            continue
+        if m.get("event_id") or (m.get("lecture_date") and m["lecture_date"] != ev["date"]):
+            continue  # belongs to some other lecture
+        if num is not None and _name_has_number(m, num):
+            add(m, "matched by lecture number in its name")
+            continue
+        title_words = {w for w in re.findall(r"[a-z]{4,}", f"{m['title']} {m.get('original_name', '')}".lower())
+                       if w not in _GENERIC}
+        if num is None or not re.search(r"(?:lecture|lec|week)[\s_\-#.]*\d+", m["title"].lower()):
+            if len(words & title_words) >= 2 or (len(words) == 1 and words <= title_words and len(next(iter(words))) >= 6):
+                add(m, "matched by title")
+    return out
+
+
+def _lecture_sources(store: Store, course_id: int, ev: dict[str, Any], cap: int = 20):
+    """(sources, used materials [(title, why)], note) for a lecture."""
+    found = lecture_materials(store, course_id, ev)
+    recs = [m for m, _ in found if _is_recording(m)]
+    others = [m for m, _ in found if not _is_recording(m)]
+    ordered = [m["id"] for m in recs + others]
+    own = _spread_materials(store, ordered, cap=max(4, cap - 8), per=8) if ordered else []
+    query = " ".join(x for x in (clean_title(ev), ev.get("topics", "")) if x)
     syl = _search(store, course_id, query, 3, kinds=["syllabus"])
-    found = _search(store, course_id, query, 10, exclude_graded=True)
-    return _merge(dated, found, syl, cap=cap)
+    found_hits = _search(store, course_id, query, 10, exclude_graded=True)
+    sources = _merge(own, found_hits, syl, cap=cap)
+    used = [(m["title"], why) for m, why in found]
+    if used:
+        note = "Used for this lecture: " + "; ".join(f"{t} ({w})" for t, w in used) + "."
+    else:
+        note = ("No saved material is linked to this lecture, so this uses a topic search of everything you saved. "
+                "Link a material to the lecture in Materials for a better result.")
+    return sources, used, note
 
 
 # ---------------------------------------------------------------- primer
 def primer(store: Store, course_id: int, provider, *, event_id: int | None = None) -> int:
     _need(provider)
     ev = _pick_event(store, course_id, event_id, "lecture")
-    sources = _event_sources(store, course_id, ev)
-    task = (f"Write a short pre-lecture primer for {_course_name(store, course_id)}, lecture \"{ev['title']}\" on "
+    sources, used, note = _lecture_sources(store, course_id, ev)
+    title = clean_title(ev) or ev["title"]
+    task = (f"Write a short pre-lecture primer for {_course_name(store, course_id)}, lecture \"{title}\" on "
             f"{ev['date']}. Topics listed: {ev.get('topics') or 'not listed'}. Use these sections: ## The big picture "
             "(a short, broad overview), ## Key terms (each with a one-line definition), ## What to watch for in lecture, "
             "## 3 questions to keep in mind. Keep it to what a student can read in five minutes. Stay broad: this is "
             "before the lecture, so do not go deep.")
-    return _generate(store, course_id, provider, "primer", f"Primer: {ev['title']}", task, sources,
-                     question=ev["title"], event_id=ev["id"], max_tokens=3000)
+    return _generate(store, course_id, provider, "primer", f"Primer: {title}", task, sources,
+                     question=title, event_id=ev["id"], max_tokens=3000,
+                     data={"used_materials": [{"title": t, "why": w} for t, w in used]})
 
 
 # ---------------------------------------------------------------- exam guide
-def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None = None) -> int:
-    _need(provider)
-    ev = _pick_event(store, course_id, event_id, "exam")
-    exams = [e for e in store.events(course_id, kinds=["exam"]) if e["date"] < ev["date"]]
+def _window(store: Store, course_id: int, ev: dict[str, Any]):
+    exams = [e for e in store.events(course_id, kinds=["exam"]) if e["date"] < ev["date"] and not is_junk_event(e)]
     prev = exams[-1]["date"] if exams else ""
     lectures = [e for e in store.events(course_id, kinds=["lecture"])
-                if e["date"] <= ev["date"] and (not prev or e["date"] > prev)]
-    topics = [" ".join(x for x in (e["title"], e.get("topics", "")) if x) for e in lectures]
-    if not topics:
-        topics = [" ".join(x for x in (ev["title"], ev.get("topics", "")) if x)]
-    per_topic = [_search(store, course_id, t, 4, exclude_graded=True) for t in topics]
-    syl = _search(store, course_id, ev["title"], 3, kinds=["syllabus"])
-    sources = _merge(_interleave(per_topic, cap=MAX_SOURCES - 3), syl)
+                if not is_junk_event(e) and e["date"] <= ev["date"] and (not prev or e["date"] > prev)]
+    return prev, lectures
+
+
+def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None = None,
+               material_ids: list[int] | None = None) -> int:
+    """Study guide for one exam. Topics come from the saved materials and syllabus rows between the previous exam and
+    this one. Lectures in that window with no saved materials are named. `material_ids` limits it to chosen materials."""
+    _need(provider)
+    ev = _pick_event(store, course_id, event_id, "exam")
+    prev, lectures = _window(store, course_id, ev)
+    chosen: list[dict[str, Any]] = []
+    if material_ids:
+        for mid in material_ids:
+            m = store.material(int(mid))
+            if m and m["course_id"] == course_id:
+                chosen.append(m)
+        if not chosen:
+            raise ValueError("None of the chosen materials are in this course.")
+    missing: list[str] = []
+    in_window: dict[int, dict[str, Any]] = {}
+    for lec in lectures:
+        found = lecture_materials(store, course_id, lec)
+        if not found:
+            missing.append(f"{event_label(lec)} ({lec['date']})")
+        for m, _ in found:
+            in_window[m["id"]] = m
+    for m in store.materials(course_id):  # dated materials in the window that no lecture event claims
+        d = m.get("lecture_date") or ""
+        if _usable(m) and d and d <= ev["date"] and (not prev or d > prev):
+            in_window.setdefault(m["id"], m)
+    scope_note = ""
+    if chosen:
+        mats = chosen
+        scope_note = "Limited to the materials you chose."
+    elif in_window:
+        mats = list(in_window.values())
+        scope_note = f"Built from the materials saved for {'the lectures since ' + prev if prev else 'the course so far'}."
+    else:
+        mats = [m for m in store.materials(course_id) if _usable(m)]
+        scope_note = "No material is linked to the lectures before this exam, so this covers all your saved materials."
+    topics = [" ".join(x for x in (clean_title(e), e.get("topics", "")) if x) for e in lectures]
+    topics_text = [t for t in topics if t] or [" ".join(x for x in (ev["title"], ev.get("topics", "")) if x)]
+    syllabus_rows = [f"{e['date']}: {event_label(e)}" for e in lectures if e.get("topics")]
+    mids = [m["id"] for m in mats]
+    per_topic = [_search(store, course_id, t, 4, exclude_graded=True, **({"material_ids": mids} if mids else {}))
+                 for t in [*topics_text, *[m["title"] for m in mats]]]
+    own = _spread_materials(store, mids, cap=MAX_SOURCES - 6, per=2) if mids else []
+    syl = _search(store, course_id, " ".join([ev["title"], *topics_text[:6]]), 3, kinds=["syllabus"])
+    sources = _merge(_interleave([own, *per_topic], cap=MAX_SOURCES - 3), syl)
     today = _today()
     try:
         days = max(0, (_date.fromisoformat(ev["date"]) - _date.fromisoformat(today)).days)
     except ValueError:
         days = 0
     plan_days = [(_date.fromisoformat(today) + timedelta(days=i)).isoformat() for i in range(min(days, 14) + 1)] \
-        if days >= 0 and re.match(r"\d{4}-\d{2}-\d{2}$", ev["date"]) else []
-    graded = _mod("integrity").match_graded(store, course_id, " ".join(topics))
-    note = ("Practice questions below are original twins with different numbers. Questions you marked as graded are "
-            "not solved here.") if graded else ""
+        if re.match(r"\d{4}-\d{2}-\d{2}$", ev["date"]) else []
+    graded = _mod("integrity").match_graded(store, course_id, " ".join(topics_text))
+    notes = [scope_note]
+    if missing:
+        notes.append("No saved materials for: " + "; ".join(missing) + ". Add them to cover those topics.")
+    if graded:
+        notes.append("Practice questions below are original twins with different numbers. Questions you marked as "
+                     "graded are not solved here.")
     task = (f"Write an exam study guide for {_course_name(store, course_id)}: \"{ev['title']}\" on {ev['date']} "
-            f"({days} days from today, {today}). Lectures covered since "
-            f"{'the previous exam on ' + prev if prev else 'the start of the course'}:\n- " + "\n- ".join(topics) +
+            f"({days} days from today, {today}). Window: {'since the previous exam on ' + prev if prev else 'the start of the course'}.\n"
+            f"Materials used: {', '.join(m['title'] for m in mats) or 'none'}.\n"
+            f"Lecture topics in the window:\n- " + "\n- ".join(topics_text) +
+            ("\nSyllabus rows:\n- " + "\n- ".join(syllabus_rows) if syllabus_rows else "") +
+            (("\nThese lectures have NO saved materials, so say plainly that the guide cannot cover them and do not "
+              "invent their content:\n- " + "\n- ".join(missing)) if missing else "") +
             "\n\nSections: ## What's covered (by topic, with citations), ## Key formulas and definitions, ## Common "
-            "mistakes, ## Practice set (4 to 6 short questions; give answers hidden in <details><summary>Answer"
-            "</summary>...</details>; make up new numbers and never copy a graded problem; if a graded problem would be "
-            "the natural question, write a twin with different numbers instead), ## Study plan (one line per day from "
+            "mistakes, ## Practice set (4 to 6 short questions; put each answer in a block with <details> on its own "
+            "line, then <summary>Answer</summary> on the next line, the answer, then </details> on its own line; make "
+            "up new numbers and never copy a graded problem; if a graded problem would be the natural question, write "
+            "a twin with different numbers instead), ## Study plan (one line per day from "
             f"these dates: {', '.join(plan_days) or ev['date']}; spread the topics, put review and rest near the end).")
     return _generate(store, course_id, provider, "exam_guide", f"Exam guide: {ev['title']}", task, sources,
-                     question=ev["title"], event_id=ev["id"], data={"topics": topics, "previous_exam": prev},
-                     max_tokens=5000, extra_note=note)
+                     question=ev["title"], event_id=ev["id"],
+                     data={"topics": topics, "previous_exam": prev, "missing_lectures": missing,
+                           "materials": [m["title"] for m in mats], "syllabus_rows": syllabus_rows},
+                     max_tokens=5000, extra_note=" ".join(n for n in notes if n))
 
 
 # ---------------------------------------------------------------- concept map
+def _valid_cites(raw, n_sources: int) -> list[int]:
+    out: list[int] = []
+    for c in raw or []:
+        try:
+            ci = int(c)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= ci <= n_sources and ci not in out:
+            out.append(ci)
+    return out
+
+
 def _clean_graph(graph: dict[str, Any], n_sources: int) -> dict[str, Any]:
     nodes, ids = [], set()
     for n in graph.get("nodes") or []:
@@ -276,43 +633,44 @@ def _clean_graph(graph: dict[str, Any], n_sources: int) -> dict[str, Any]:
         nid = str(n["id"]).strip()
         if nid in ids:
             continue
-        cites = []
-        for c in n.get("cites") or []:
-            try:
-                ci = int(c)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= ci <= n_sources and ci not in cites:
-                cites.append(ci)
         ids.add(nid)
-        nodes.append({"id": nid, "label": str(n["label"]).strip(), "cites": cites})
+        nodes.append({"id": nid, "label": str(n["label"]).strip(), "cites": _valid_cites(n.get("cites"), n_sources)})
     edges = []
     for e in graph.get("edges") or []:
         if not isinstance(e, dict):
             continue
         a, b = str(e.get("a", "")).strip(), str(e.get("b", "")).strip()
         if a in ids and b in ids and a != b:
-            edges.append({"a": a, "b": b, "label": str(e.get("label", "")).strip()})
+            edges.append({"a": a, "b": b, "label": str(e.get("label", "")).strip(),
+                          "cites": _valid_cites(e.get("cites"), n_sources)})  # out-of-range cites are dropped
     return {"nodes": nodes, "edges": edges}
 
 
-def concept_map(store: Store, course_id: int, provider, *, scope: str = "") -> int:
+def concept_map(store: Store, course_id: int, provider, *, scope: str = "", material_ids: list[int] | None = None) -> int:
     _need(provider)
     scope = scope.strip()
+    pool = [m for m in store.materials(course_id) if _usable(m)]
+    if material_ids:
+        pool = [m for m in store.materials(course_id) if m["id"] in {int(i) for i in material_ids}]
     if scope:
-        sources = _search(store, course_id, scope, MAX_SOURCES, exclude_graded=True)
+        mine = [m["id"] for m in pool if scope.casefold() in m["title"].casefold()]
+        sources = _merge(_spread_materials(store, mine, 8, per=4) if mine else [],
+                         _search(store, course_id, scope, MAX_SOURCES, exclude_graded=True,
+                                 **({"material_ids": [m["id"] for m in pool]} if material_ids else {})),
+                         cap=MAX_SOURCES)
     else:
-        sources = []
-        for m in store.materials(course_id):
-            if m["kind"] in ("slides", "handout", "notes", "textbook", "recording"):
-                sources = _merge(sources, _material_sources(store, m["id"], 3))
+        # every material takes part, primary sources and 'other' files included, sampled across each whole file
+        sources = _spread_materials(store, [m["id"] for m in pool], MAX_SOURCES, per=3)
     user = (f"Build a concept map of {scope or 'the main ideas of ' + _course_name(store, course_id)} from these "
             "sources. Reply with ONE JSON object, then a blank line, then a short summary (3 to 5 sentences) with [n] "
             "citations. JSON shape: {\"nodes\":[{\"id\":\"short_id\",\"label\":\"Concept\",\"cites\":[1,2]}],"
-            "\"edges\":[{\"a\":\"id1\",\"b\":\"id2\",\"label\":\"relationship, e.g. 'leads to'\"}]}. Use 6 to 20 nodes. "
-            "Every node needs at least one cite from the numbered sources. Edges only between node ids you defined.\n\n"
-            f"SOURCES\n\n{_sources_block(sources)}")
-    graph, rest = _ask_json(provider, SYSTEM, user, dict)
+            "\"edges\":[{\"a\":\"id1\",\"b\":\"id2\",\"label\":\"relationship, e.g. 'leads to'\",\"cites\":[3]}]}. "
+            "Use 6 to 20 nodes. Every node needs at least one cite from the numbered sources. Every edge needs at least "
+            "one cite: the source that says the two ideas are linked that way. Cover every kind of source, readings and "
+            "primary documents included. Edges only between node ids you defined.\n\n"
+            f"SOURCES\n\n{_sources_block(_prepare(store, course_id, sources))}")
+    sources = _prepare(store, course_id, sources)
+    graph, rest = _ask_json(provider, _system(store, course_id), user, dict)
     graph = _clean_graph(graph, len(sources))
     if not graph["nodes"]:
         raise ValueError("The AI returned a concept map with no usable nodes. Try again.")
@@ -320,11 +678,14 @@ def concept_map(store: Store, course_id: int, provider, *, scope: str = "") -> i
     summary = _clean_body(ans.body_md) or "Concepts in this map: " + ", ".join(n["label"] for n in graph["nodes"]) + "."
     labels = {n["id"]: n["label"] for n in graph["nodes"]}
     lines = [f"- **{n['label']}** " + "".join(f"[{c}]" for c in n["cites"]) for n in graph["nodes"]]
-    lines += [f"- {labels[e['a']]} {e['label'] or 'relates to'} {labels[e['b']]}" for e in graph["edges"]]
-    parsed = _mod("grounding").parse_answer("## Concepts and links\n\n" + "\n".join(lines), sources)
-    used = sorted({c for n in graph["nodes"] for c in n["cites"]} | set(ans.used or []))
+    lines += [f"- {labels[e['a']]} {e['label'] or 'relates to'} {labels[e['b']]} " + "".join(f"[{c}]" for c in e["cites"])
+              for e in graph["edges"]]
+    parsed = _mod("grounding").parse_answer("## Concepts and links\n\n" + "\n".join(l.rstrip() for l in lines), sources)
+    used = sorted({c for n in graph["nodes"] for c in n["cites"]} | {c for e in graph["edges"] for c in e["cites"]}
+                  | set(ans.used or []))
     body = f"{summary}\n\n{_clean_body(parsed.body_md)}\n\n{disclaimer.FOOTER}"
-    graph = dict(graph, blocks=_block_dicts(list(ans.blocks) + list(parsed.blocks)))
+    graph = dict(graph, blocks=_block_dicts(list(ans.blocks) + list(parsed.blocks)), mode="answer",
+                 not_covered=bool(getattr(ans, "not_covered", False)))
     return store.add_guide(course_id, "concept_map", f"Concept map: {scope}" if scope else "Concept map", body,
                            sources=_guide_sources(sources, used), data=graph, question=scope,
                            model=getattr(provider, "model", "") or "")
@@ -337,9 +698,11 @@ def explain(store: Store, course_id: int, provider, topic: str, *, depth: str = 
     guide = {"quick": "Give a quick explanation: 1 short paragraph and at most 4 bullets.",
              "standard": "Give a standard explanation: what it is, why it matters, how it works with one worked "
                          "example, and the usual pitfalls.",
-             "from scratch": "Assume the student has never seen this. Start from the prerequisites, build up in small "
-                             "steps with plain words and an analogy or two, include a simple worked example, then "
-                             "connect it back to how the course uses it."}[depth]
+             "from scratch": "Assume the student has never seen this. Define every term the first time you use it. "
+                             "Use short sentences. Start from the prerequisites and build up in small steps with plain "
+                             "words. Work exactly one example, taken from the sources when they have one. Connect it "
+                             "back to how the course uses it. End with a section '## Check your understanding' that "
+                             "has 2 questions for the student to try, with no answers."}[depth]
     sources = _search(store, course_id, topic, 10, exclude_graded=True)
     task = f"Explain \"{topic}\" for a student in {_course_name(store, course_id)}. Depth: {depth}. {guide}"
     return _generate(store, course_id, provider, "explain", f"Explain ({depth}): {topic}", task, sources,
@@ -347,33 +710,144 @@ def explain(store: Store, course_id: int, provider, topic: str, *, depth: str = 
 
 
 # ---------------------------------------------------------------- practice
+_STOP_WORDS = {"the", "and", "with", "from", "that", "this", "problem", "question", "about", "help", "please",
+               "practice", "solve", "find", "using", "what", "each", "have"}
+
+
+def _graded_overlaps(store: Store, course_id: int, topic: str, limit: int = 3) -> list[dict[str, Any]]:
+    """Graded items the topic overlaps: the integrity matcher's pick, then items sharing words with the topic."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(g):
+        if not g:
+            return
+        key = str(g.get("id") or g.get("title"))
+        if key not in seen:
+            seen.add(key)
+            out.append(g)
+
+    add(_mod("integrity").match_graded(store, course_id, topic))
+    words = {w for w in re.findall(r"[a-z]{4,}", topic.lower()) if w not in _STOP_WORDS}
+    for it in store.graded_items(course_id):
+        text = f"{it.get('title', '')} {it.get('label', '')} {it.get('body', '')}".lower()
+        if len(words & set(re.findall(r"[a-z]{4,}", text))) >= 2:
+            add(dict(it, source="item"))
+    return out[:limit]
+
+
+_CITE_MARK = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+
+
+def _shift_block(b: dict[str, Any], offset: int) -> dict[str, Any]:
+    """Renumber a block's own citations so they point into a merged source list."""
+    cites = [int(c) for c in b.get("cites") or []]
+    if not cites or not offset:
+        return dict(b)
+    allowed = set(cites)
+
+    def fix(m):
+        nums = [int(x) for x in re.split(r"\s*,\s*", m.group(1))]
+        if all(n in allowed for n in nums):
+            return "[" + ", ".join(str(n + offset) for n in nums) + "]"
+        return m.group(0)
+
+    return {"kind": b.get("kind", "text"), "md": _CITE_MARK.sub(fix, b.get("md", "")),
+            "cites": [c + offset for c in cites]}
+
+
+def _render_blocks(blocks: list[dict[str, Any]]) -> str:
+    label = getattr(_mod("grounding"), "OUTSIDE_LABEL", "Not from your materials")
+    out, prev = [], False
+    for b in blocks:
+        if b.get("kind") == "outside":
+            lines = (b.get("md") or "").splitlines() or [""]
+            if not prev:
+                lines[0] = f"**{label}:** {lines[0]}"
+            out.append("\n".join(f"> {ln}" for ln in lines))
+            prev = True
+        else:
+            out.append(b.get("md", ""))
+            prev = False
+    return "\n\n".join(out)
+
+
 def practice(store: Store, course_id: int, provider, topic: str, *, count: int = 5) -> int:
+    """N practice questions. Where the topic overlaps graded work, some of the N are twins of it (never the original)."""
     _need(provider)
     count = max(1, min(int(count), 20))
-    graded = _mod("integrity").match_graded(store, course_id, topic)
-    if graded:
-        ans = _mod("integrity").twin(store, course_id, topic, provider, graded)
-        body = (f"> This topic matches graded work ({graded.get('title', 'a graded item')}). I wrote a twin with "
-                "different numbers and left your original for you.\n\n" + _clean_body(ans.body_md) +
-                f"\n\n{disclaimer.FOOTER}")
-        used = list(ans.used or [])
-        srcs = [{"n": i, "chunk_id": s["chunk_id"], "material_id": s["material_id"], "label": s["loc_label"],
-                 "title": s["material_title"], "href": s["href"]}
-                for i, s in enumerate(ans.sources or [], 1) if i in used]
-        note = {"kind": "text", "cites": [],
-                "md": f"This topic matches graded work ({graded.get('title', 'a graded item')}). "
-                      "I wrote a twin with different numbers and left your original for you."}
-        return store.add_guide(course_id, "practice", f"Practice (twin): {topic}", body, sources=srcs,
-                               data={"blocks": _block_dicts([note, *ans.blocks]), "twin": True, "graded": graded.get("title", ""), "twin_guide_id": ans.guide_id},
-                               question=topic, model=getattr(provider, "model", "") or "")
-    sources = _search(store, course_id, topic, 10, exclude_graded=True)
-    task = (f"Write {count} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to hardest, "
-            "in the style of the materials. For each, number it, state the question, then give the worked solution "
-            "step by step with citations inside a block exactly like:\n<details><summary>Show solution</summary>\n\n"
-            "steps and final answer here\n\n</details>\nNever show the solution outside the details block. Invent your "
-            "own numbers; do not copy a question from the materials.")
-    return _generate(store, course_id, provider, "practice", f"Practice: {topic}", task, sources, question=topic,
-                     data={"twin": False, "count": count}, max_tokens=5000)
+    overlaps = _graded_overlaps(store, course_id, topic, limit=min(3, count))
+    twins: list[dict[str, Any]] = []
+    for g in overlaps:
+        ans = _mod("integrity").twin(store, course_id, topic, provider, g)
+        tdata: dict[str, Any] = {}
+        gid = getattr(ans, "guide_id", None)
+        if gid:
+            tg = store.guide(gid)
+            tdata = (tg or {}).get("data") or {}
+            store.delete_guide(gid)  # its content is folded into this practice set
+        blocks = _block_dicts(getattr(ans, "blocks", None)) or [
+            {"kind": "text", "md": _clean_body(getattr(ans, "body_md", "")), "cites": []}]
+        twins.append({"graded": g, "blocks": blocks, "sources": list(getattr(ans, "sources", None) or []),
+                      "mode": tdata.get("mode") or "twin", "title": g.get("title", "a graded item")})
+    n_normal = count - len(twins)
+    normal = None
+    if n_normal > 0:
+        sources = _search(store, course_id, topic, 10, exclude_graded=True)
+        task = (f"Write {n_normal} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to "
+                "hardest, in the style of the materials. For each, number it and state the question, then give the "
+                "worked solution step by step with citations, inside a block laid out exactly like this, with "
+                "<details> alone on its line and <summary> alone on the next line:\n<details>\n"
+                "<summary>Show solution</summary>\n\nsteps and final answer here\n\n</details>\n"
+                "Never show the solution outside the details block. Invent your own numbers; do not copy a question "
+                "from the materials.")
+        normal = _compose(store, course_id, provider, task, sources, question=topic, max_tokens=5000)
+        if normal["routed"] and not twins:
+            return normal["routed"]
+        if normal["routed"]:
+            normal = None
+    if not twins:
+        body = f"{normal['body']}\n\n{disclaimer.FOOTER}"
+        data = {"twin": False, "count": count, "mode": "answer", "blocks": normal["blocks"],
+                "outside": normal["outside"], "not_covered": normal["not_covered"], "twins": []}
+        return store.add_guide(course_id, "practice", f"Practice: {topic}", body,
+                               sources=_guide_sources(normal["sources"], normal["used"]), data=data, question=topic,
+                               model=getattr(provider, "model", "") or "")
+    blocks: list[dict[str, Any]] = []
+    all_sources: list[dict[str, Any]] = []
+    used: list[int] = []
+    titles = ", ".join(t["title"] for t in twins)
+    blocks.append({"kind": "text", "cites": [], "md": (
+        f"This set has {count} question{'s' if count != 1 else ''}. {len(twins)} "
+        f"{'is a twin' if len(twins) == 1 else 'are twins'} of your graded work ({titles}), with different numbers, "
+        "so your original stays yours to do.")})
+    if normal:
+        all_sources = list(normal["sources"])
+        used = list(normal["used"])
+        blocks += normal["blocks"]
+    for t in twins:
+        offset = len(all_sources)
+        tsrc = [dict(s) for s in t["sources"]]
+        shifted = [_shift_block(b, offset) for b in t["blocks"]]
+        all_sources += _prepare(store, course_id, tsrc)
+        blocks.append({"kind": "text", "cites": [], "md": f"## Twin of graded work: {t['title']}"})
+        blocks += shifted
+        used += [c + offset for b in t["blocks"] if b.get("kind") == "text" for c in b.get("cites") or []]
+    verify = getattr(_mod("grounding"), "verify_quotes", None)
+    Block = getattr(_mod("grounding"), "Block", None)
+    if verify and Block:
+        objs = [Block(b["kind"], b["md"], list(b["cites"])) for b in blocks]
+        verify(objs, all_sources)
+        blocks = _block_dicts(objs)
+    body = f"{_render_blocks(blocks)}\n\n{disclaimer.FOOTER}"
+    only_twins = normal is None
+    mode = twins[0]["mode"] if only_twins and len({t['mode'] for t in twins}) == 1 else "answer"
+    data = {"twin": True, "count": count, "mode": mode, "blocks": blocks, "outside": any(b["kind"] == "outside" for b in blocks),
+            "not_covered": bool(normal and normal["not_covered"]), "graded": titles,
+            "twins": [{"graded": t["title"], "mode": t["mode"]} for t in twins]}
+    return store.add_guide(course_id, "practice", f"Practice (twin): {topic}" if only_twins else f"Practice: {topic}", body,
+                           sources=_guide_sources(all_sources, sorted(set(used))), data=data, question=topic,
+                           model=getattr(provider, "model", "") or "")
 
 
 # ---------------------------------------------------------------- flashcards
@@ -381,48 +855,122 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").casefold()).strip()
 
 
+def _section_chunks(store: Store, chunk_id: int, cap: int = 4) -> list[dict[str, Any]]:
+    """The chunk and the chunks after it that share its heading (the rest of its section)."""
+    ch = store.chunk(chunk_id)
+    if not ch:
+        return []
+    rows = store.chunks_of(ch["material_id"])
+    idx = next((i for i, r in enumerate(rows) if r["id"] == chunk_id), None)
+    if idx is None:
+        return [ch]
+    out = [rows[idx]]
+    for r in rows[idx + 1: idx + cap]:
+        if ch.get("heading") and r.get("heading") == ch["heading"]:
+            out.append(r)
+        else:
+            break
+    return out
+
+
 def make_flashcards(store: Store, course_id: int, provider, *, material_id: int | None = None, topic: str = "",
-                    count: int = 12) -> list[int]:
+                    count: int = 12) -> FlashcardResult:
     _need(provider)
     count = max(1, min(int(count), 50))
     if material_id is not None:
         m = store.material(material_id)
         if not m or m["course_id"] != course_id:
             raise ValueError("That material is not in this course.")
-        sources = _material_sources(store, material_id, MAX_SOURCES)
+        mat_sources = _material_sources(store, material_id, 10_000)  # the whole material
+        if topic.strip():
+            hits = _search(store, course_id, topic, MAX_SOURCES, material_ids=[material_id])
+            hit_ids = {s["chunk_id"] for s in hits}
+            rest = [s for s in mat_sources if s["chunk_id"] not in hit_ids]
+            sources = _merge(hits, _spread_pick(rest, max(0, MAX_SOURCES - len(hits))), cap=MAX_SOURCES)
+            sources.sort(key=lambda s: [x["chunk_id"] for x in mat_sources].index(s["chunk_id"]))
+        else:
+            sources = _spread_pick(mat_sources, MAX_SOURCES)
         deck = m["title"]
     else:
         if not topic.strip():
             raise ValueError("Give a material or a topic.")
-        sources = _search(store, course_id, topic, MAX_SOURCES, exclude_graded=True)
+        hits = _search(store, course_id, topic, 14, exclude_graded=True)
+        extra = []
+        for h in hits[:8]:  # whole sections, not only the section's first chunk
+            for c in _section_chunks(store, h["chunk_id"])[1:]:
+                mm = store.material(c["material_id"]) or {}
+                extra.append(_source_from_chunk(c, mm.get("title", ""), mm.get("kind", "")))
+        sources = _merge(hits, extra, cap=MAX_SOURCES)
         deck = topic.strip()
-    user = (f"Make up to {count} study flashcards from these sources. Reply with ONLY a JSON list: "
-            "[{\"front\":\"question or term\",\"back\":\"short answer\",\"cite\":1}]. One idea per card, backs under "
-            "40 words, math as $...$, cite is the single source number the answer comes from. Skip anything the sources "
-            "do not support.\n\n" f"SOURCES\n\n{_sources_block(sources)}")
-    cards, _ = _ask_json(provider, SYSTEM, user, list)
+    sources = _prepare(store, course_id, sources)
+    user = (f"Make up to {count} study flashcards from these sources. Cover the main concepts, definitions, formulas and "
+            "procedures, and spread the cards across the sources: at most 2 cards from one source. Reply with ONLY a "
+            "JSON list: [{\"front\":\"question or term\",\"back\":\"short answer\",\"cite\":1}]. One idea per card, "
+            "backs under 40 words, math as $...$, cite is the single source number the answer comes from. Skip anything "
+            f"the sources do not support.\n\nSOURCES\n\n{_sources_block(sources)}")
+    cards, _ = _ask_json(provider, _system(store, course_id), user, list)
+    res = FlashcardResult()
     seen = {_norm(c["front"]) for c in store.flashcards(course_id)}
-    ids: list[int] = []
+    per_source: dict[int, int] = {}
+    ok: list[tuple[str, str, int]] = []
     for c in cards:
-        if len(ids) >= count:
-            break
         if not isinstance(c, dict):
+            res.malformed += 1
             continue
         front, back = str(c.get("front", "")).strip(), str(c.get("back", "")).strip()
         try:
             cite = int(c.get("cite"))
         except (TypeError, ValueError):
+            res.dropped += 1
             continue
-        if not front or not back or not (1 <= cite <= len(sources)) or _norm(front) in seen:
-            continue
-        seen.add(_norm(front))
+        if not front or not back:
+            res.malformed += 1
+        elif not (1 <= cite <= len(sources)):
+            res.dropped += 1
+        elif _norm(front) in seen:
+            res.duplicates += 1
+        else:
+            seen.add(_norm(front))
+            ok.append((front, back, cite))
+    first, rest = [], []
+    for t in ok:  # at most 2 cards per source first, the overflow only if the count is not reached
+        if per_source.get(t[2], 0) < 2:
+            per_source[t[2]] = per_source.get(t[2], 0) + 1
+            first.append(t)
+        else:
+            rest.append(t)
+    for front, back, cite in (first + rest)[:count]:
         s = sources[cite - 1]
-        ids.append(store.add_flashcard(course_id, front, back, deck=deck, chunk_id=s["chunk_id"],
+        res.append(store.add_flashcard(course_id, front, back, deck=deck, chunk_id=s["chunk_id"],
                                        source_label=f"{s['material_title']}, {s['loc_label']}"))
-    return ids
+    bits = [f"Made {len(res)} card{'s' if len(res) != 1 else ''}."]
+    if res.dropped:
+        bits.append(f"{res.dropped} card{'s were' if res.dropped != 1 else ' was'} dropped because "
+                    f"{'their' if res.dropped != 1 else 'its'} source number did not match any passage.")
+    if res.duplicates:
+        bits.append(f"{res.duplicates} you already have {'were' if res.duplicates != 1 else 'was'} skipped.")
+    res.note = " ".join(bits)
+    return res
 
 
-def review_flashcard(store: Store, card_id: int, grade: str) -> dict[str, Any]:
+def _exam_date_for(store: Store, course_id: int) -> str:
+    nxt = [e for e in store.events(course_id, start=_today(), kinds=["exam"]) if not is_junk_event(e)]
+    return nxt[0]["date"] if nxt else ""
+
+
+def cram_queue(store: Store, course_id: int, *, material_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    """Cards for a cram session: every card, weakest first, ignoring due dates."""
+    cards = store.flashcards(course_id)
+    if material_id is not None:
+        chunk_ids = {c["id"] for c in store.chunks_of(material_id)}
+        title = (store.material(material_id) or {}).get("title", "")
+        cards = [c for c in cards if c.get("chunk_id") in chunk_ids or (title and c.get("deck") == title)]
+    cards.sort(key=lambda c: (float(c["ease"]), float(c["interval_days"]), int(c["reps"]), c["id"]))
+    return cards[:max(0, int(limit))]
+
+
+def review_flashcard(store: Store, card_id: int, grade: str, *, cram: bool = False,
+                     exam_date: str | None = None) -> dict[str, Any]:
     grade = (grade or "").strip().lower()
     if grade not in GRADES:
         raise ValueError(f"grade must be one of {', '.join(GRADES)}")
@@ -445,6 +993,15 @@ def review_flashcard(store: Store, card_id: int, grade: str) -> dict[str, Any]:
             interval = 4.0 if reps == 0 else max(interval * ease * 1.3, 6.0 if reps == 1 else 0)
         reps += 1
         interval = round(interval, 2)
+        # before an exam, a card must come back before it: in cram mode always, otherwise within the last 7 days
+        exam = exam_date if exam_date is not None else _exam_date_for(store, card["course_id"])
+        if exam:
+            try:
+                left = (_date.fromisoformat(exam) - _date.fromisoformat(_today())).days
+            except ValueError:
+                left = None
+            if left is not None and left >= 0 and (cram or left <= 7):
+                interval = round(min(interval, left / 2 if left >= 1 else 0.25), 2)
         due = now + timedelta(days=interval)
     store.update_flashcard(card_id, ease=round(ease, 3), interval_days=interval, reps=reps, due_at=due.isoformat())
     return store.flashcard(card_id)  # type: ignore[return-value]
@@ -462,26 +1019,29 @@ def missed(store: Store, course_id: int, provider, *, event_id: int | None = Non
     elif not date:
         raise ValueError("Give an event or a date.")
     else:
-        same = [e for e in store.events(course_id, start=date, end=date, kinds=["lecture"])]
+        same = [e for e in store.events(course_id, start=date, end=date, kinds=["lecture"]) if not is_junk_event(e)]
         ev = same[0] if same else None
-    mats = [m for m in store.materials(course_id) if m["lecture_date"] == date]
-    dated: list[dict[str, Any]] = []
-    for m in mats:
-        dated += _material_sources(store, m["id"], MAX_SOURCES)
-    extra = []
     if ev:
-        extra = _search(store, course_id, " ".join(x for x in (ev["title"], ev.get("topics", "")) if x), 8,
-                        exclude_graded=True)
+        sources, used, note = _lecture_sources(store, course_id, ev, cap=MAX_SOURCES)
+    else:
+        mats = [m for m in store.materials(course_id) if _usable(m) and m["lecture_date"] == date]
+        sources = _spread_materials(store, [m["id"] for m in mats], MAX_SOURCES - 4, per=10) if mats else []
+        used = [(m["title"], f"dated {date}") for m in mats]
+        note = ("Used: " + "; ".join(t for t, _ in used) + ".") if used else \
+            "No saved material is dated that day, so this has little to go on."
+    ids = [m["id"] for m in store.materials(course_id) if m["title"] in {t for t, _ in used}]
     announce = _search(store, course_id, "announcement deadline due reading assignment exam", 4,
-                       material_ids=[m["id"] for m in mats] or None) if mats else []
-    sources = _merge(dated[:MAX_SOURCES - 8], announce, extra)
-    title = ev["title"] if ev else date
+                       material_ids=ids) if ids else []
+    sources = _merge(sources[:MAX_SOURCES - 4], announce, sources[MAX_SOURCES - 4:], cap=MAX_SOURCES)
+    title = clean_title(ev) if ev else date
     task = (f"A student skipped the {date} lecture{' (' + title + ')' if ev else ''} of {_course_name(store, course_id)}. "
             "Catch them up. Sections: ## Main points (what was taught, with citations), ## Announcements and deadlines "
             "(only what the sources actually say; if none, say none were found in the materials), ## What to read or "
-            "do next. Be brief and concrete.")
-    return _generate(store, course_id, provider, "missed", f"What you missed: {title}", task, sources,
-                     question=date, event_id=ev["id"] if ev else None, max_tokens=3000)
+            "do next. Be brief and concrete. If a recording or captions of the lecture are among the sources, base the "
+            "main points on them first.")
+    return _generate(store, course_id, provider, "missed", f"What you missed: {title}", task, sources, question=date,
+                     event_id=ev["id"] if ev else None, max_tokens=3000, extra_note=note,
+                     data={"used_materials": [{"title": t, "why": w} for t, w in used]})
 
 
 # ---------------------------------------------------------------- dashboard
