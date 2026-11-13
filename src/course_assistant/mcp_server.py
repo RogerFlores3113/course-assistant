@@ -356,8 +356,12 @@ def get_twin_instructions(course_id: int, problem_text: str) -> str:
     title = match.get("title") or match.get("material_title") or "a graded item"
     kind = match.get("kind", "problem")
     check = _integrity().is_check_ask(text)
-    extra = ("\nThe student wants their answer checked. Never say it is right or wrong. Write a twin and tell them to "
-             "check their method on the twin.\n" if check else "")
+    if check and kind != "problem":  # an essay or a proof has no twin: point at the rubric and the concepts instead
+        extra = ("\nThe student wants their draft or answer checked. Never say it is right or wrong and never write a twin. "
+                 "Quote their own words, ask questions about the rubric and the requirements, and point at what to improve.\n")
+    else:
+        extra = ("\nThe student wants their answer checked. Never say it is right or wrong. Write a twin and tell them to "
+                 "check their method on the twin.\n" if check else "")
     extra += ("\nThis is writing or a proof: explain concepts, the assignment's requirements and a plan. Do not write "
              "a thesis, topic sentences, any paragraph or a finished proof.\n" if kind != "problem" else
              "\nWrite a twin: change every number. Do not state the original's answer or intermediate results.\n")
@@ -571,6 +575,15 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
                     f"\"{(hit.get('sentence') or '')[:200]}\". Write concepts, what the assignment and rubric ask for, "
                     "and questions the student can ask themselves, citing the materials; no sentence the student could "
                     "submit. Then call save_guide again.")
+    if hit and hit.get("kind") == "essay":  # name the sentence that judges, not the background that shares words with the prompt
+        from . import essay as _essay
+        try:
+            _it = next((i for i in _integrity().graded_view(st, c["id"]) if i.get("id") == hit.get("id")), None)
+            _lvl, _why, _sent = _essay.find(_it, b, t, True, quote_sources) if _it else (0, "", "")
+        except Exception:  # noqa: BLE001
+            _lvl, _sent = 0, ""
+        if _lvl and _sent:
+            hit = dict(hit, sentence=_sent)
     if hit:
         _log("save_guide_refused", {"course_id": c["id"], "kind": kind, "title": t}, f"graded: {hit.get('title')}")
         sent = (hit.get("sentence") or "").strip()
