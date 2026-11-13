@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block title %}{{ m.title }} - Course Assistant{% endblock %}
+{% block body %}
+<div class="course-head" style="--accent-c: {{ accent }}">
+<p class="crumbs"><a href="/courses/{{ course.id }}">{{ course.name }}</a> &rsaquo; Reader</p>
+<h1>{{ m.title }}</h1>
+<p><span class="badge">{{ kind_label }}</span>
+{% if has_file %} <a href="/files/{{ m.id }}" target="_blank" rel="noopener">Open the original file</a>{% endif %}
+{% if source_url %} <a href="{{ source_url }}" rel="noopener noreferrer">Original web page</a>{% endif %}</p></div>
+{% if media == 'audio' %}<audio id="player" controls preload="metadata" src="/files/{{ m.id }}">Your browser cannot play this recording.</audio>
+{% elif media == 'video' %}<video id="player" controls preload="metadata" src="/files/{{ m.id }}"></video>{% endif %}
+{% if not chunks %}<div class="card empty"><p>This material has no readable text yet.{% if m.status == 'needs_transcription' %} It is waiting to be transcribed.{% endif %}</p></div>{% endif %}
+<div class="chunks">
+{% for c in chunks %}<section id="c{{ c.id }}" class="chunk{% if at == c.id %} hit{% endif %}" {% if at == c.id %}aria-current="location"{% endif %} tabindex="-1">
+  <header><span class="loc">{{ c.loc_label }}</span>{% if c.heading %} <span class="muted">{{ c.heading }}</span>{% endif %}
+  {% if c.seek is not none and media %}<button type="button" class="btn small ghost" data-seek="{{ c.seek }}">Play from {{ c.loc_label }}</button>{% endif %}</header>
+  <div class="chunk-text">{{ c.text }}</div></section>{% endfor %}
+</div>{% endblock %}

@@ -1,0 +1,19 @@
+<h2>Past offerings</h2>
+<p>Earlier versions of this course at your university (old syllabi, exams, notes) can help you study. You choose what gets saved.</p>
+<p class="muted small">The app obeys each site's robots.txt and reads only a few pages a minute from any one site. It cannot read a site's terms of use, so following them is up to you. Saved pages stay on this computer, and the app never signs in anywhere for you.</p>
+<div class="two">
+<div class="card"><h3>Paste links</h3>
+<form method="post" action="/courses/{{ course.id }}/offerings/paste" hx-post="/courses/{{ course.id }}/offerings/paste" hx-target="#course-body" hx-swap="outerHTML" class="form">
+  <label>Links, one per line <textarea name="links" rows="4" required></textarea></label>
+  <label>Term (optional) <input name="term_label" placeholder="Fall 2024"></label>
+  <button class="btn" type="submit">Add to the list</button></form></div>
+<div class="card"><h3>Find past offerings</h3><p class="muted">Searches for pages that look like earlier versions of {{ course.name }}. Nothing is saved until you tick it.</p>
+<form method="post" action="/courses/{{ course.id }}/offerings/search" hx-post="/courses/{{ course.id }}/offerings/search" hx-target="#course-body" hx-swap="outerHTML" data-busy="Searching. This goes slowly on purpose." class="form"><button class="btn" type="submit">Find past offerings</button></form></div>
+</div>
+{% if candidates %}<h3>Pages found</h3>
+{% if pickable %}<form method="post" action="/courses/{{ course.id }}/offerings/save" hx-post="/courses/{{ course.id }}/offerings/save" hx-target="#course-body" hx-swap="outerHTML" data-busy="Saving the pages you picked. This goes slowly on purpose." class="form">
+<fieldset><legend>Tick the pages to save</legend><ul class="plain list">
+{% for c in pickable %}<li class="row-item"><label class="check"><input type="checkbox" name="pick" value="{{ c.id }}"> <span><strong>{{ c.title or c.url }}</strong>{% if c.term_label %} <span class="badge">{{ c.term_label }}</span>{% endif %}<br><span class="muted small">{{ c.url }}{% if c.note %} &middot; {{ c.note }}{% endif %}</span></span></label></li>{% endfor %}</ul></fieldset>
+<button class="btn" type="submit">Save picked pages</button></form>{% endif %}
+{% for c in candidates if c.status == 'saved' %}{% if loop.first %}<h3>Saved</h3><ul class="plain list">{% endif %}<li class="row-item"><div class="grow">{% if c.material_id %}<a href="/read/{{ c.material_id }}">{{ c.title or c.url }}</a>{% else %}{{ c.title or c.url }}{% endif %} <span class="badge">Saved</span></div></li>{% if loop.last %}</ul>{% endif %}{% endfor %}
+{% else %}<div class="card empty"><p><strong>Nothing on the list yet.</strong> Paste a link to an old syllabus or course page, or let the app search.</p></div>{% endif %}

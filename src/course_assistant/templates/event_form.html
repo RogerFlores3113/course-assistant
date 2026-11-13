@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block title %}Edit event - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>Edit event</h1><p class="muted">{{ course.name }}</p>
+<form method="post" class="form card">
+  <label>Type <select name="kind">{% for k, l in event_kinds.items() %}<option value="{{ k }}" {% if event.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+  <label>Title <input name="title" required value="{{ event.title }}"></label>
+  <label>Date <input name="date" type="date" required value="{{ event.date }}"></label>
+  <label>Time (optional) <input name="time" type="time" value="{{ event.time }}"></label>
+  <label>Topics (optional) <input name="topics" value="{{ event.topics }}"></label>
+  <div class="row"><button class="btn" type="submit">Save event</button> <a class="btn ghost" href="/courses/{{ course.id }}/calendar">Cancel</a></div>
+</form><p><a class="danger-link" href="/events/{{ event.id }}/delete">Delete this event</a></p></section>{% endblock %}
