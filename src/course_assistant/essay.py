@@ -109,20 +109,138 @@ def quote_ratio(p: str, source: str) -> float:
     return sum(1 for g in grams if g in sw) / len(grams) if grams else 0.0
 
 
+def _cite_numbers(sent: str) -> list[int]:
+    return [int(x) for m in _CITE_NUMS.finditer(sent) for x in re.split(r"[,;]\s*", m.group(1))]
+
+
+def _cited_texts(sent: str, sources: list[Any] | None) -> list[str]:
+    out = []
+    for n in _cite_numbers(sent):
+        if sources and 1 <= n <= len(sources):
+            src = sources[n - 1]
+            out.append(str(src.get("text") if isinstance(src, dict) else src or ""))
+    return [x for x in out if x.strip()]
+
+
+def _chunk_sentences(text: str) -> list[str]:
+    return [x.strip() for x in re.split(r"(?<=[.!?;])\s+|\n+", text or "") if x.strip()]
+
+
+def supported(sentence: str, chunk: Any) -> bool:
+    """True when a cited source really says this: the sentence (cite marks removed) matches one WINDOW of one to three
+    neighbouring sentences of the chunk, never the whole chunk. A match is a run of ordered 4-word phrases (a quarter of
+    the sentence's phrases) or 60 percent of its content words inside that one window. chunk is the text or a dict with
+    "text". Shared by the essay gates, the MCP gates and grounding."""
+    text = str(chunk.get("text") if isinstance(chunk, dict) else chunk or "")
+    s = _CITE_STRIP.sub("", sentence or "").strip()
+    if not s or not text.strip():
+        return False
+    sents = _chunk_sentences(text)
+    st = _ct(s)
+    for size in (1, 2, 3):
+        for i in range(0, max(1, len(sents) - size + 1)):
+            win = " ".join(sents[i:i + size])
+            if quote_ratio(s, win) >= 0.25:
+                return True
+            if len(st) >= 3 and len(st & _ct(win)) / len(st) >= 0.6:
+                return True
+    return False
+
+
 def cited_restatement(sent: str, sources: list[Any] | None, threshold: float = 0.5) -> bool:
-    """A sentence carrying a [n] citation that restates what the cited source says. With sources None, any cited
-    sentence counts (the model cited a retrieved, ungraded source); with a list, the cite must back the sentence."""
-    nums = [int(x) for m in _CITE_NUMS.finditer(sent) for x in re.split(r"[,;]\s*", m.group(1))]
-    if not nums:
+    """A sentence carrying a [n] citation whose cited chunk really says it (see supported). With sources None the chunks
+    are unknown, so any cited sentence counts."""
+    if not _cite_numbers(sent):
         return False
     if sources is None:
         return True
-    texts = [(sources[n - 1].get("text") or "") for n in nums if 1 <= n <= len(sources)]
-    if not any(texts):
+    return any(supported(sent, t) for t in _cited_texts(sent, sources))
+
+
+# --------------------------------------------------------------------------- positions on the essay's own question
+_ATTR_VERBS = (r"(?:argu(?:es|ed)|says?|said|writes?|wrote|defin(?:es|ed)|stat(?:es|ed)|claim(?:s|ed)|describ(?:es|ed)|"
+               r"explain(?:s|ed)|notes?|noted|maintain(?:s|ed)|contend(?:s|ed)|assert(?:s|ed)|warn(?:s|ed)|propos(?:es|ed)|"
+               r"observ(?:es|ed)|summariz(?:es|ed)|present(?:s|ed)|identif(?:ies|ied)|list(?:s|ed)|treat(?:s|ed)|"
+               r"call(?:s|ed)|hold(?:s)?|held|believ(?:es|ed)|add(?:s|ed))")
+_ATTRIBUTED = re.compile(
+    r"^\W*(?:(?:in|according to)\s+[^,]{3,50},\s*)?(?:(?:the|a|an)\s+)?"
+    r"(?:[A-Z][\w.'’-]*|\d+)(?:\s+(?:[A-Z][\w.'’-]*|\d+|and|of|the|textbook|chapter|author|reading|passage|text|paper|papers|"
+    r"essay|document))*\s+(?:also\s+|further\s+|then\s+)?" + _ATTR_VERBS + r"\b")
+_ATTRIBUTED_DOC = re.compile(r"^\W*(?:in\s+[^,]{3,50},\s*)?the\s+(?:textbook|chapter|author|reading|passage|text|paper|syllabus|"
+                             r"document|source)s?\s+(?:also\s+)?" + _ATTR_VERBS + r"\b", re.I)
+_JUDGE = re.compile(
+    r"\b(?:right|wrong|correct(?:ly)?|incorrect\w*|mistaken|vindicat\w*|undermin\w*|refut\w*|disprov\w*|prov(?:ed|es|en)|"
+    r"came\s+true|accurate|inaccurate|misjudg\w*|missed|underestimat\w*|overestimat\w*|half|partly|partially|"
+    r"confirm\w*|validat\w*|bear(?:s|ing)?\s+out|in\s+hindsight|turned\s+out|failed|fits?|fit)\b", re.I)
+_POS_EVAL = re.compile(
+    rf"\b(?:{_EVAL_INFL}|right|wrong|correct(?:ly)?|incorrect\w*|mistaken|accurate|inaccurate|miss(?:ed|es)|misjudg\w*|"
+    r"diagnos\w*|predict(?:ed|s)|half|partly|partially|success\w*|failure|undone|validat\w*|came\s+true|held\s+up|"
+    r"fell\s+short|turned\s+out|fit|fits)\b", re.I)
+_YEAR = re.compile(r"\b1[0-9]{3}s?\b|\b20[0-9]{2}s?\b")
+_WRAP = re.compile(
+    r"(?:\b(?:would|could|might|can|may|will|should|to|you\s+(?:could|might|can))\s+(?:also\s+)?"
+    r"(?:say|argue|claim|state|contend|maintain|propose|suggest|conclude|assert|show|write|put\s+it|be)\s*(?:that|:|,)\s+|"
+    r"\b(?:by|for\s+example\s+by|e\.g\.\s+by)\s+(?:arguing|claiming|saying|showing|stating|noting|concluding)\s+(?:that\s+)?|"
+    r"\b(?:arguing|claiming|saying|stating|concluding)\s+that\s+|"
+    r"\b(?:a|your|the|one|possible|sample|example|stronger|better|working|rough)\s+(?:\w+\s+){0,2}thesis"
+    r"(?:\s+(?:in\s+this\s+direction|along\s+these\s+lines|might\s+be|could\s+be|would\s+be|will\s+be|is|could\s+read|"
+    r"might\s+read|would\s+read))?\s*[:,]\s+|"
+    r"\bsomething\s+like\s*[:,]?\s+|\bfor\s+(?:example|instance)\s*[:,]\s+|\byou\s+(?:could|might|can)\s+say\s*[:,]?\s+|"
+    r"\b(?:one|a)\s+(?:possible\s+)?(?:position|claim|argument|take)\s+(?:is|would\s+be|could\s+be)\s*[:,]?\s*(?:that\s+)?)",
+    re.I)
+
+
+def entities(it: dict[str, Any]) -> set[str]:
+    """Content tokens of the proper names in the assignment (Madison, Federalist, Hamilton ...): capitalised words in
+    the middle of its sentences. The tokens of the assignment that name what the essay is about."""
+    out: set[str] = set()
+    for line in (it.get("body") or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith(("|", "#")):
+            continue
+        for sent in re.split(r"(?<=[.!?:])\s+", line):
+            words = re.findall(r"[A-Za-z][\w'’-]*", sent)
+            for w in words[1:]:
+                if w[0].isupper() and len(w) > 3:
+                    out |= _ct(w.replace("-", " "))
+    return out - ESSAY_GENERIC - {"friday", "november", "monday", "chicago", "worth", "include", "address", "open", "quote",
+                                  "length", "grading", "prompt", "requirements", "criterion", "points", "thesis"}
+
+
+def attributed(sentence: str) -> bool:
+    """The sentence reports what a source author or document says ('Madison argues that ...', 'Federalist No. 10
+    says ...', 'The textbook describes ...') and does not itself pass judgement on whether it was right."""
+    s = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
+    m = _ATTRIBUTED.match(s) or _ATTRIBUTED_DOC.match(s)
+    return bool(m) and not _JUDGE.search(s[m.end():])
+
+
+def unwrap(sentence: str) -> tuple[str, bool]:
+    """(core, wrapped): 'A strong essay would say that X', 'you could argue that X', 'for example by arguing that X',
+    'A thesis in this direction: X' and 'Your thesis: X' give X. Coaching that names no position is not unwrapped."""
+    s = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
+    m = _WRAP.search(s)
+    if not m:
+        return s, False
+    core = s[m.end():].strip().strip("\"“”'*_ ")
+    return (core, True) if core else (s, False)
+
+
+def is_position(core: str, topic: set[str], ents: set[str] | None = None, years: bool = True) -> bool:
+    """One sentence that takes a position on the essay's own question in the writer's voice: it names what the essay is
+    about (two topic words, one of them a name from the assignment) and judges it (right, wrong, missed, showed ...)."""
+    c = _CITE_STRIP.sub("", core or "").strip().strip("\"“”'*_ ")
+    if len(c.split()) < 6 or "?" in c or re.search(r"\bwhether\b|\bright\s+or\s+wrong\b|\bwrong\s+or\s+right\b|\bfor\s+or\s+against\b", c, re.I):
         return False
-    body = _CITE_STRIP.sub("", sent)
-    ct, st = _ct(body), _ct(" ".join(texts))
-    return bool(ct) and len(ct & st) / len(ct) >= threshold
+    if not _POS_EVAL.search(c):
+        return False
+    toks = _ct(c)
+    shared = toks & topic
+    if len(shared) < 2:
+        return False
+    if ents is None:
+        return True
+    return bool(shared & ents) or (years and bool(_YEAR.search(c)) and len(shared) >= 2 and bool(ents))
 
 
 def _claims_before_modal(s: str) -> bool:
@@ -134,17 +252,32 @@ def _claims_before_modal(s: str) -> bool:
 
 
 def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, sources: list[Any] | None,
-              loose: bool = False) -> tuple[int, str]:
-    """(level, reason) of one sentence or span. span: 'quoted' | 'colon' | 'label' | 'plain'."""
-    if cited_restatement(sent, sources):
-        return 0, ""
+              loose: bool = False, ents: set[str] | None = None) -> tuple[int, str]:
+    """(level, reason) of one sentence or span. span: 'quoted' | 'colon' | 'label' | 'plain'. ents: the assignment's own
+    names; given for essays, it turns on the one-sentence position check."""
+    cited = bool(_cite_numbers(sent))
     s = _CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ ")
+    if cited and attributed(s):  # "Madison argues ..." with a cite: fine when the cited passage says it
+        if sources is None or cited_restatement(sent, sources):
+            return 0, ""
+    elif cited and sources is not None and cited_restatement(sent, sources):
+        return 0, ""
+    if ents is not None and span == "plain":
+        core, wrapped = unwrap(s)
+        if wrapped and is_position(core, topic, ents):
+            return 2, "position"
+        if not wrapped and not attributed(s) and not STRICT_COACH.search(s) and is_position(s, topic, ents):
+            return 1, "position"  # a cite does not back a judgement the cited passage was not checked to make
+    if cited and sources is None:
+        return 0, ""
     if len(s.split()) < 8 or "?" in s or STRICT_COACH.search(s):
         return 0, ""
     if source and quote_ratio(s, source) >= 0.5:  # quoting the assignment's own requirement
         return 0, ""
     plain = span == "plain"
     if plain and not _claims_before_modal(s):
+        return 0, ""
+    if plain and ents is not None and not cited and attributed(s):  # reporting what a source says, with no verdict on it
         return 0, ""
     shared = len(_ct(s) & topic)
     cue = THESIS_CUE.search(s)
@@ -188,13 +321,14 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
     source = f"{it.get('body', '')} {it.get('title', '')}"
     loose = is_short_answer(it) and force_asked if loose is None else loose
     best = (0, "", "")
+    ents = entities(it) if not is_short_answer(it) and it.get("kind", "essay") == "essay" else None
     reply = _CITE_SPLIT.sub(r" \2\1", text or "")
     for line in re.split(r"\n+", reply):
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip() if not _LABEL.match(line) else line.strip()
         if not line:
             continue
         for sent, span in _spans(line):
-            lvl, why = _classify(sent, span, topic, source, asked, sources, loose)
+            lvl, why = _classify(sent, span, topic, source, asked, sources, loose, ents)
             if lvl > best[0]:
                 best = (lvl, why, _CITE_STRIP.sub("", sent).strip())
         if best[0] == 2:
@@ -216,7 +350,7 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
             return 2, "thesis", bare[:200]
         if shared >= 3 and EVAL.search(bare) and best[0] < 1:
             best = (1, "body paragraph", bare[:200])
-        elif asked and shared >= 2 and best[0] < 1:
+        elif asked and shared >= 2 and best[0] < 1 and not is_short_answer(it):  # short answers: short_answer_hit
             best = (1, "body paragraph", bare[:200])
     return best
 
@@ -292,38 +426,107 @@ def outline_hit(it: dict[str, Any], title: str, body: str) -> str:
 
 
 # --------------------------------------------------------------------------- the MCP gates
+_SA_COACH = re.compile(r"\b(rubric|assignment|ask yourself|make sure|aim to|remember|the question asks|this question|the prompt|"
+                       r"requirements?|check (?:that|whether)|think about|consider|try to|students?|should)\b", re.I)
+_SA_ANSWER = re.compile(r"\b(?:because|since|therefore|thus|rather\s+than|instead\s+of|must|so\s+that|which\s+is\s+why|"
+                        r"this\s+is\s+why|put|add|dissolve|fill|pour|transfer|mix|weigh)\b", re.I)
+_PRESCRIBE = re.compile(
+    r"\b(?:your|the|a(?:\s+(?:good|full|complete|strong|model))?)\s+(?:answer|response|explanation|reply)\s+"
+    r"(?:should|must|needs?\s+to|will|would|could)\s+(?:say|state|explain|mention|note|include|give|argue|be)\b|"
+    r"\b(?:start|begin|open|lead)\s+(?:with|by)\b[^.]{0,40}\b(?:sentence|saying|stating|explaining|noting)\b|"
+    r"\b(?:a|one)\s+sentence\s+(?:saying|stating|explaining|noting|that\s+says)\b|\bsay(?:ing)?\s+that\b|\bwrite\s+that\b", re.I)
+_SA_STOP = frozenset("explain describe sentences sentence problem started question questions give state answer three two "
+                     "one use using each how why what which when would could might should must rather than".split())
+
+
+def _short_topic(it: dict[str, Any]) -> set[str]:
+    """The words of the question itself (not its worksheet title)."""
+    return (_ct(it.get("body") or "") - ESSAY_GENERIC) - _SA_STOP
+
+
+def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = None) -> tuple[int, str]:
+    """(shared topic words, sentence) when text reads as a finished or prescribed answer to a short-answer item, even
+    when reworded: a sentence about the item that says what the answer says, or a short passage of declarative
+    sentences that together cover three or more of the item's own words. Concept sentences that share fewer words, and
+    sentences a cited passage really says, are fine."""
+    topic = _short_topic(it)
+    if not topic:
+        return 0, ""
+    clean = _CITE_SPLIT.sub(r" \2\1", text or "")
+    keep: list[tuple[str, set[str]]] = []
+    for line in re.split(r"\n+", clean):
+        line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip()
+        if not line or line.startswith("#"):
+            continue
+        for sent in re.split(r"(?<=[.!?])\s+", line):
+            body = _CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ ")
+            if len(body.split()) < 5 or "?" in body:
+                continue
+            if sources is not None and _cite_numbers(sent) and cited_restatement(sent, sources) and not _PRESCRIBE.search(body):
+                continue
+            keep.append((body, _ct(body) & topic))
+    best = (0, "")
+    for body, sh in keep:
+        if _PRESCRIBE.search(body) and len(sh) >= 2 and len(sh) > best[0]:
+            best = (len(sh), body)
+        elif len(sh) >= 3 and _SA_ANSWER.search(body) and not _SA_COACH.search(body) and len(sh) > best[0]:
+            best = (len(sh), body)
+    if best[0]:
+        return best
+    free = [(b, sh) for b, sh in keep if not _SA_COACH.search(b)]
+    words = sum(len(b.split()) for b, _ in free)
+    union = set().union(*[sh for _, sh in free]) if free else set()
+    if len(free) >= 2 and words <= 90 and len(union) >= 3 and len(union) / len(topic) >= 0.3:
+        return len(union), max(free, key=lambda x: len(x[1]))[0]
+    return 0, ""
+
+
 def guide_hit(store, course_id: int, title: str, body: str, sources: list[Any] | None = None) -> dict | None:
     """The graded written item (essay, short answer) that a guide saved by the student's AI app answers, or None. The
-    hit carries `sentence`. sources: the text of the chunks the guide cites ({"text": ...} per [n])."""
+    hit carries `sentence` (the sentence that matched, never the student's own words). When several items match, the one
+    the guide covers most is returned. sources: the text of the chunks the guide cites ({"text": ...} per [n])."""
     from . import integrity
-    clean = _CITE_STRIP.sub("", body or "")
+    hits: list[tuple[int, dict]] = []
     for it in integrity.graded_view(store, course_id):
         if it.get("kind") != "essay" or not (it.get("body") or "").strip():
             continue
+        short = is_short_answer(it)
         line = outline_hit(it, title, body or "")
         if line:
-            return dict(integrity._hit(it, "outline"), sentence=line)
-        lvl, why, sent = find(it, body or "", title, True, sources, loose=is_short_answer(it))
+            hits.append((len(_ct(line) & topic_tokens(it)) + 1, dict(integrity._hit(it, "outline"), sentence=line)))
+            continue
+        lvl, why, sent = find(it, body or "", title, True, sources, loose=False if short else None)
         if lvl > 0:
-            return dict(integrity._hit(it, "essay_text"), sentence=sent)
-    return None
+            hits.append((len(_ct(sent) & topic_tokens(it)) + 1, dict(integrity._hit(it, "essay_text"), sentence=sent)))
+            continue
+        if short:
+            n, sent = short_answer_hit(it, body or "", sources)
+            if n:
+                hits.append((n, dict(integrity._hit(it, "essay_text"), sentence=sent)))
+    return max(hits, key=lambda h: h[0])[1] if hits else None
 
 
 def card_hit(store, course_id: int, front: str, back: str, source_text: str = "") -> dict | None:
-    """The graded essay or short-answer item a flashcard gives away (an essay thesis, conclusion or finished answer)."""
+    """The graded essay or short-answer item a flashcard gives away (an essay thesis, position or conclusion, or a
+    finished answer, reworded or not). Cards about concepts are fine."""
     from . import integrity
     srcs = [{"text": source_text}] if source_text else None
+    hits: list[tuple[int, dict]] = []
     for it in integrity.graded_view(store, course_id):
         if it.get("kind") != "essay" or not (it.get("body") or "").strip():
             continue
+        short = is_short_answer(it)
         for text in (back, f"{front}\n{back}"):
             lvl, why, sent = find(it, text, "", False, srcs, loose=False)
             if lvl > 0:
-                return dict(integrity._hit(it, "card"), sentence=sent)
-            if is_short_answer(it) and len(_ct(text) & topic_tokens(it)) >= 3 and len(text.split()) >= 8 \
-                    and not srcs and not STRICT_COACH.search(text) and "?" not in back:
-                return dict(integrity._hit(it, "card"), sentence=text.strip()[:200])
-    return None
+                hits.append((len(_ct(sent) & topic_tokens(it)) + 1, dict(integrity._hit(it, "card"), sentence=sent)))
+                break
+            if short:
+                n, sent = short_answer_hit(it, text, srcs)
+                if n:
+                    hits.append((n, dict(integrity._hit(it, "card"), sentence=sent)))
+                    break
+    return max(hits, key=lambda h: h[0])[1] if hits else None
 
 
 # --------------------------------------------------------------------------- the student's own draft
@@ -338,6 +541,8 @@ _FEEDBACK = re.compile(
 _ASK_OPEN = re.compile(r"^\W*(?:please|can|could|would|will|check|give|review|read|look|here|any|thoughts|what|how|is|does|do|am|"
                       r"fix|help|i\s+(?:want|need|would))\b", re.I)
 _DRAFT_REF = re.compile(r"\b(?:my|this|that|it|here(?:'s|\s+is)|below|following|attached|the)\b", re.I)
+_DRAFT_HEADER = re.compile(r"^\W*(?:here(?:'s|\s+is|\s+are)|this\s+is|below\s+is|attached\s+is)\s+(?:my|our|the)\s+(?:\w+\s+){0,3}"
+                           r"(?:draft|essay|paper|paragraphs?|thesis|intro\w*|conclusion|attempt|writing|work)\b", re.I)
 _QUOTED_SPAN = (re.compile(r"[\"“]([^\"”]{30,})[\"”]", re.S),
                 re.compile(r"(?<!\w)['‘](.{30,}?)['’](?!\w)", re.S))
 
@@ -364,7 +569,8 @@ def draft_request(question: str) -> str | None:
     sents = _sentences(q)
     lo, hi = 0, len(sents)
     def askish(x: str) -> bool:
-        return len(x.split()) <= 25 and ("?" in x or bool(_FEEDBACK.search(x) and _ASK_OPEN.match(x)))
+        return len(x.split()) <= 25 and ("?" in x or bool(_FEEDBACK.search(x) and _ASK_OPEN.match(x))
+                                         or bool(_DRAFT_HEADER.match(x)))
     while lo < hi - 1 and askish(sents[lo]):
         lo += 1
     while hi - 1 > lo and askish(sents[hi - 1]):
@@ -445,22 +651,46 @@ def feedback_leaks(draft: str, assignment: Any, reply: str, sources: list[Any] |
     topic = _ct(atext) - ESSAY_GENERIC
     if isinstance(assignment, dict):
         topic = topic_tokens(assignment)
+    ents = entities(assignment) if isinstance(assignment, dict) else None
     for line in re.split(r"\n+", _CITE_SPLIT.sub(r" \2\1", reply or "")):
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip()
         if not line:
             continue
         for sent, span in _spans(line):
-            if cited_restatement(sent, sources):
+            if cited_restatement(sent, sources) and (sources is not None or not unwrap(sent)[1]):
                 continue
             s = _CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ ")
+            core, wrapped = unwrap(s)
+            if span == "plain" and wrapped and is_position(core, topic, ents) and quote_ratio(core, known) < 0.5:
+                return True  # 'for example by arguing that ...', 'A thesis in this direction: ...', 'Your thesis: ...'
             if len(s.split()) < 8 or "?" in s or quote_ratio(s, known) >= 0.5:
                 continue
             if span in ("quoted", "colon") and not STRICT_COACH.search(s):
+                if span == "colon" and _describes_draft(s, line, sent):
+                    continue  # 'Honest answer against the rubric [1]: the paragraph makes a claim but is thin on evidence.'
                 if span == "quoted" or len(_ct(s) & topic) >= 2:
                     return True
             elif span == "plain" and not _VOICE.search(s) and len(_ct(s) & topic) >= 2:
                 return True
     return False
+
+
+_DESCRIBES = re.compile(r"\b(?:the|your|this|that|it)\s+(?:paragraph|draft|thesis|essay|intro\w*|conclusion|claim|argument|"
+                        r"evidence|section|opening|counter-?argument|citations?|footnotes?|writing|organization|structure|"
+                        r"cites?|quotes?|sources?)\b|\b(?:you|your)\b", re.I)
+_LEAD_IN = re.compile(r"\b(?:honest\s+answer|verdict|feedback|against\s+the\s+rubric|short\s+answer|overall|in\s+short|"
+                      r"my\s+(?:take|read|assessment)|assessment|summary|bottom\s+line)\b", re.I)
+
+
+def _describes_draft(span_text: str, line: str, sent: str) -> bool:
+    """The text after a colon describes the student's draft (feedback), not new writing for it: a short clause about
+    'the paragraph', 'your thesis' or 'the draft', after a lead-in such as 'Verdict:' or 'Honest answer against the
+    rubric [1]:'. Not when it is a position on the essay's own question, or long."""
+    words = len(span_text.split())
+    if words > 25 or not _DESCRIBES.search(span_text):
+        return False
+    head = line.rsplit(":", 1)[0] if ":" in line else ""
+    return bool(_LEAD_IN.search(head) or len(head.split()) <= 8)
 
 
 FEEDBACK_SYSTEM = """You are the study assistant inside Course Assistant. The student pasted their OWN draft for work \
