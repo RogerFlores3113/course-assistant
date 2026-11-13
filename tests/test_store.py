@@ -37,3 +37,21 @@ def test_migration_adds_new_columns_to_old_db(tmp_path):
     mid = s.add_material(cid, kind="notes", title="x")
     s.update_material(mid, event_id=3, duplicate_of=None)
     assert s.material(mid)["event_id"] == 3
+
+
+def test_graded_item_answer_key_roundtrip_and_migration(tmp_path):
+    import sqlite3
+    from course_assistant.store import Store
+    db = tmp_path / "old.db"
+    s = Store(str(db))
+    c = s.add_course("X")
+    gid = s.add_graded_item(c, "P1", "body", kind="problem", label="Problem 1", answer_key='["5.11 g"]')
+    assert s.graded_item(gid)["answer_key"] == '["5.11 g"]'
+    s.update_graded_item(gid, answer_key='["5.1"]')
+    assert s.graded_item(gid)["answer_key"] == '["5.1"]'
+    s.conn.close()
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE graded_items DROP COLUMN answer_key")
+    con.commit(); con.close()
+    s2 = Store(str(db))
+    assert s2.graded_item(gid)["answer_key"] == ""

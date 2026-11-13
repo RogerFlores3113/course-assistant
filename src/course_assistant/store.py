@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MATERIAL_KINDS = {
     "slides": "Lecture slides",
@@ -246,7 +246,8 @@ class Store:
         "materials": [("event_id", "INTEGER"),            # the lecture event this material belongs to
                       ("duplicate_of", "INTEGER")],       # a near-identical material in the same course
         "graded_items": [("kind", "TEXT NOT NULL DEFAULT 'problem'"),   # problem | proof | essay
-                         ("label", "TEXT NOT NULL DEFAULT ''")],        # e.g. "Problem 2"
+                         ("label", "TEXT NOT NULL DEFAULT ''"),         # e.g. "Problem 2"
+                         ("answer_key", "TEXT NOT NULL DEFAULT ''")],   # final values never to reveal (JSON list)
     }
 
     def _migrate(self) -> None:
@@ -457,16 +458,17 @@ class Store:
 
     # ------------------------------------------------------------ graded items (academic integrity, section 8)
     def add_graded_item(self, course_id: int, title: str, body: str = "", material_id: int | None = None, *,
-                        kind: str = "problem", label: str = "") -> int:
+                        kind: str = "problem", label: str = "", answer_key: str = "") -> int:
         return self._insert("graded_items", {"course_id": course_id, "title": title.strip(), "body": body,
                                              "material_id": material_id, "kind": kind, "label": label,
+                                             "answer_key": answer_key,
                                              "created_at": now_iso()})
 
     def graded_item(self, item_id: int) -> dict[str, Any] | None:
         return self._row("SELECT * FROM graded_items WHERE id = ?", (item_id,))
 
     def update_graded_item(self, item_id: int, **values: Any) -> None:
-        allowed = {"title", "body", "kind", "label", "material_id"}
+        allowed = {"title", "body", "kind", "label", "material_id", "answer_key"}
         self._update("graded_items", item_id, {k: v for k, v in values.items() if k in allowed})
 
     def graded_items(self, course_id: int) -> list[dict[str, Any]]:
