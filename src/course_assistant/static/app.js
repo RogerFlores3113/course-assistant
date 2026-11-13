@@ -281,4 +281,37 @@
       }
     });
   }
+  // Copy buttons on code blocks (answers and guides). A real button after the block, reachable by keyboard,
+  // that announces "Copied" through the polite live region. Without clipboard access it says so instead.
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); }
+    return new Promise(function (ok, no) {
+      try {
+        var t = document.createElement("textarea"); t.value = text; t.setAttribute("readonly", ""); t.style.position = "fixed"; t.style.opacity = "0";
+        document.body.appendChild(t); t.select(); var done = document.execCommand("copy"); document.body.removeChild(t);
+        if (done) { ok(); } else { no(); }
+      } catch (err) { no(err); }
+    });
+  }
+  function addCopyButtons(root) {
+    var pres = (root || document).querySelectorAll("pre");
+    Array.prototype.forEach.call(pres, function (pre) {
+      if (pre.hasAttribute("data-copy-ready") || pre.closest(".copy-wrap")) { return; }
+      pre.setAttribute("data-copy-ready", "1");
+      var wrap = document.createElement("div"); wrap.className = "copy-wrap";
+      pre.parentNode.insertBefore(wrap, pre); wrap.appendChild(pre);
+      var b = document.createElement("button"); b.type = "button"; b.className = "btn small ghost copy-btn";
+      b.textContent = "Copy"; b.setAttribute("aria-label", "Copy this code");
+      b.addEventListener("click", function () {
+        var code = pre.querySelector("code") || pre;
+        copyText(code.textContent).then(function () {
+          b.textContent = "Copied"; say("Copied");
+          window.setTimeout(function () { b.textContent = "Copy"; }, 2000);
+        }, function () { say("Could not copy. Select the code and copy it by hand."); });
+      });
+      wrap.appendChild(b);
+    });
+  }
+  addCopyButtons(document);
+  document.body.addEventListener("htmx:afterSwap", function (e) { addCopyButtons(e.target || document); });
 })();
