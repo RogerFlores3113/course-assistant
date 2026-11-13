@@ -210,3 +210,14 @@ def test_problem11_reader_emphasis_rendered():
 def test_chip_labels_and_removed_marker_plain():
     html = str(web_md.render(f"A [1] and B{grounding.REMOVED_MARK}.", sources(2)))
     assert 'aria-label="Source 1: Notes, p. 1"' in html and 'role="img"' not in html and "(citation removed)" in html
+
+
+def test_ask_prompt_tags_past_offering_sources():
+    from course_assistant import grounding
+    src = [{"material_title": "18.06 Fall 2018 exams", "material_kind": "past_offering", "loc_label": "section 1",
+            "text": "Exam 3 is on Dec 5."},
+           {"material_title": "Syllabus", "material_kind": "syllabus", "loc_label": "section 2", "text": "Exam 3 Dec 8."}]
+    out = grounding.format_sources(src)
+    assert "[1] 18.06 Fall 2018 exams, section 1 (Past offering: Fall 2018)" in out
+    assert "[2] Syllabus, section 2\n" in out
+    assert "Past offering" in grounding.system_prompt()

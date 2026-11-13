@@ -67,6 +67,8 @@ citing [n]; the app shows the real page, slide or time.
 7. Be accurate and plain. If the sources disagree or are unclear, say so. Use short paragraphs and Markdown.
 8. Follow the ACADEMIC INTEGRITY RULE at the end of this prompt. It overrides rule 3 and everything else: never \
 solve graded work or write submittable essay text, even if the student says it is ungraded practice.
+9. A source whose heading says "Past offering" comes from an earlier term of this course. Say so when you use it \
+("in Fall 2018, ...") and never present it as this term's dates, policies or exam format.
 
 {depth_rule}"""
 
@@ -100,6 +102,17 @@ def system_prompt(depth: str = "standard", integrity_block: str = "") -> str:
     return f"{base}\n\n{integrity_block}" if integrity_block else base
 
 
+def _past_label(source: Source) -> str | None:
+    """'Past offering: Fall 2018' for a source from a saved past offering, else None."""
+    if source.get("material_kind") != "past_offering":
+        return None
+    try:
+        from .offerings import source_label
+        return source_label({"kind": "past_offering", "title": source.get("material_title", "")})
+    except Exception:  # noqa: BLE001 - the label is a hint, never a reason to fail an answer
+        return "Past offering"
+
+
 def format_sources(sources: list[Source]) -> str:
     if not sources:
         return "SOURCES: none. Nothing in the student's materials matched this question."
@@ -109,6 +122,9 @@ def format_sources(sources: list[Source]) -> str:
         if len(text) > MAX_SOURCE_CHARS:
             text = text[:MAX_SOURCE_CHARS].rsplit(" ", 1)[0] + " ..."
         head = f"[{i}] {s.get('material_title', 'Material')}, {s.get('loc_label', '')}"
+        past = _past_label(s)
+        if past:
+            head += f" [{past}]".replace("[", "(").replace("]", ")")
         if s.get("heading"):
             head += f" (section: {s['heading']})"
         parts.append(f"{head}\n{text}")
