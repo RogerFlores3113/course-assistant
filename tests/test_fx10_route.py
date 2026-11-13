@@ -281,3 +281,59 @@ def test_d8_handout_passages_rank_by_score_with_the_rest(tmp_path):
     scores = [float(x.get("score") or 0) for x in a.sources if "score" in x]
     assert scores == sorted(scores, reverse=True)
     assert "burets" in (a.sources[0].get("text") or "")
+
+
+# ------------------------------------------------------------------ decision 9: no finished answer under the concepts banner
+Q8 = ("Problem 8 (10 points). Explain in your own words why a hybrid orbital differs from an atomic orbital, using one example "
+      "you choose.")
+FINISHED = ("An atomic orbital is a region around one atom where an electron is likely to be found. A hybrid orbital is a mixture "
+            "of atomic orbitals on the same atom that points toward a bond. The hybrid orbital differs because it is built from "
+            "several atomic orbitals and has a new shape, as in methane where one s and three p orbitals make four equal hybrid orbitals. [1]")
+COACHING = ("This asks you to contrast two kinds of orbital, so start with what the chapter says an atomic orbital is [1]. "
+            "Then ask yourself what mixing does to the shape and energy, and choose one molecule you can name as your example.")
+
+
+def _world8():
+    s, c, ids = world()
+    ids["Problem 8"] = s.add_graded_item(c, "Set 4: Problem 8", Q8, None, kind="essay", label="Problem 8")
+    return s, c, ids
+
+
+def test_d9_finished_answer_is_not_shown_under_the_concepts_banner_and_the_coaching_reply_is():
+    s, c, ids = _world8()
+    seen = []
+
+    def f(system, messages):
+        txt = messages[-1]["content"]
+        seen.append(txt)
+        if "THE STUDENT'S GRADED TASK" in messages[0]["content"]:
+            return COACHING if "Your last reply contained" in txt else FINISHED
+        return "ok"
+    a = grounding.ask(s, c, Q8, FakeProvider(f))
+    assert held(a) and "mixture of atomic orbitals" not in a.body_md and "ask yourself" in a.body_md.lower()
+
+
+def test_d9_the_coaching_reply_and_two_sentence_background_pass_the_first_time():
+    s, c, ids = _world8()
+    it = s.graded_item(ids["Problem 8"])
+    assert integrity.finished_answer(Q8, COACHING) is False
+    assert integrity.finished_answer(Q8, FINISHED) is True
+    two = "An atomic orbital is a region around one atom where an electron is likely to be found [1]. A hybrid orbital is a mixture of atomic orbitals on one atom [1]."
+    assert integrity.finished_answer(Q8, two) is False
+    assert integrity._reply_leak_level(dict(it, kind="essay"), "essay", COACHING, Q8, Q8) == 0
+
+
+def test_d9_a_numberless_explain_item_kept_as_a_problem_is_covered_too():
+    s, c, ids = world()  # Problem 5 of the shared world: 'Explain in your own words why a molecular formula can differ ...'
+    fin = ("An empirical formula is the simplest whole-number ratio of the atoms in a compound. A molecular formula gives the actual "
+           "number of atoms in one molecule, so it can be a multiple of the empirical formula. For example glucose has the molecular "
+           "formula C6H12O6 and the empirical formula CH2O, which differ by a factor of six. [1]")
+
+    def f(system, messages):
+        if "THE STUDENT'S GRADED TASK" in messages[0]["content"]:
+            return ("Name the two formulas, say what each tells you, and choose a pair of your own to compare. Ask yourself how the "
+                    "ratio and the count could differ.") if "Your last reply contained" in messages[-1]["content"] else fin
+        return "ok"
+    a = grounding.ask(s, c, "Problem 5: explain in your own words why a molecular formula can differ from an empirical formula, "
+                      "using one example you choose.", FakeProvider(f))
+    assert held(a) and "simplest whole-number ratio" not in a.body_md

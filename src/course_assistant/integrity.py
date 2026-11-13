@@ -3581,6 +3581,22 @@ def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, sr
                   SAFE_ESSAY if kind in ("essay", "proof") else SAFE_CONCEPTS, [])], []
 
 
+def finished_answer(body: str, reply: str) -> bool:
+    """The reply states, in plain declarative sentences (no advice to the student), every required part of a short written
+    item: three or more such sentences that between them carry 60 percent of the item's own concept words. Coaching names
+    the parts and asks the student to write them; it does not state them."""
+    want = content_tokens(body) - essay.ESSAY_GENERIC
+    if len(want) < 3:
+        return False
+    sents = [x for x in _proof_sentences(reply) if len(x.split()) >= 6 and not essay.STRICT_COACH.search(x) and not essay.MODAL.search(x)]
+    if len(sents) < 3:
+        return False
+    covered = set()
+    for x in sents:
+        covered |= content_tokens(x) & want
+    return len(covered) >= 0.6 * len(want)
+
+
 def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_text: str,
                       sources: list[Any] | None = None) -> int:
     """0 fine, 1 soft, 2 hard: check_reply, but against exactly this item even if it is not in the store (typed-in or
@@ -3592,10 +3608,14 @@ def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_
                                                       "question_refs": question_refs(graded, question)}):
         return 2
     if kind == "problem" and body:
+        if not numbers(body) and essay.is_short_answer({"body": body}) and finished_answer(body, reply):
+            return 2  # a written 'explain why' item with no numbers: a finished answer is never shown as coaching
         return 2 if _leaks_problem(_Text(reply), _Text(body), reply, True) else 0
     if kind == "essay":
-        return essay_leak_level({"title": graded.get("title", ""), "body": body or problem_text}, raw or "", question,
-                                True, sources)
+        it = {"title": graded.get("title", ""), "body": body or problem_text}
+        if essay.is_short_answer(it) and finished_answer(it["body"], reply):
+            return 2  # a finished answer is never shown under the 'concepts and an approach' banner
+        return essay_leak_level(it, raw or "", question, True, sources)
     if kind == "proof":
         return 2 if _leaks_proof({"body": body or problem_text}, reply, question) else 0
     return 0
