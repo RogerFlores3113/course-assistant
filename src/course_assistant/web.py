@@ -671,6 +671,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                                                data=(g or {}).get("data"), store=store, course_id=cid,
                                                question=last_q)
                     item["question"] = last_q
+                    # a plain answer is saved by default; one about graded work is kept (it keeps the chat's graded context)
+                    if g and g["kind"] == "answer" and not (g.get("data") or {}).get("graded_item_id"):
+                        item["unsave_id"] = g["id"]
                 history.append(item)
             ctx["history"] = history
             ctx["answer_check"] = answer_check_note(cid)
@@ -1507,6 +1510,17 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         return page(request, "confirm.html", title=f"Delete {g['title']}?", back=f"/guides/{guide_id}",
                     action=f"/guides/{guide_id}/delete", button="Delete the guide",
                     message="This removes the saved guide. Your materials are not touched.")
+
+    @app.post("/guides/{guide_id}/unsave")
+    def guide_unsave(guide_id: int):
+        """"Don't save this answer" on the Ask page: only a plain Ask answer, never one tied to graded work."""
+        g = store.guide(guide_id)
+        if not g:
+            raise _NotFound("That guide was not found.")
+        if g["kind"] != "answer" or (g.get("data") or {}).get("graded_item_id"):
+            return redirect(course_url(g["course_id"], "ask"), notice="That answer is kept.")
+        store.delete_guide(guide_id)
+        return redirect(course_url(g["course_id"], "ask"), notice="Not saved. The answer stays on this page until you leave it.")
 
     @app.post("/guides/{guide_id}/delete")
     def guide_delete(guide_id: int):

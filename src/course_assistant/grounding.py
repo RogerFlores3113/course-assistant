@@ -670,9 +670,25 @@ _STRUCT_VERB = re.compile(
     r"identifies?|sets\s+out|draws?|returns?|applies|applied|replies|responds?)\b", re.I)
 
 
+# "Step 2: Back-substitute from the last row." / "Step 3. Check the result": a heading that numbers the walk-through. It
+# is a signpost when what follows the label is a short title with no number, equation or "is/are" statement.
+_STEP_SIGN = re.compile(r"^\W*(?:step|part|stage|phase)\s+(?:\d{1,2}|[a-z]{3,5})\s*[:.\u2013\u2014-]\s*(?P<rest>[^.!?]{1,80})[.:]?\s*$", re.I)
+_STEP_CLAIM = re.compile(r"\b(?:is|are|was|were|has|have|equals?|means|gives|gets|becomes)\b", re.I)
+
+
+def _step_heading(plain: str) -> bool:
+    m = _STEP_SIGN.match(plain)
+    if not m:
+        return bool(re.fullmatch(r"\W*(?:step|part|stage|phase)\s+(?:\d{1,2}|[a-z]{3,5})\W*", plain, re.I))
+    rest = m.group("rest")
+    return len(rest.split()) <= 10 and not re.search(r"[0-9=$]", rest) and not _STEP_CLAIM.search(rest)
+
+
 def _signpost(plain: str, next_cited: bool) -> bool:
     """A short sentence with no number or equation that orders or introduces what follows. The topic lead-in
-    ("On AI, the syllabus says ...") counts only right before a cited sentence."""
+    ("On AI, the syllabus says ...") counts only right before a cited sentence. A "Step N: Title" heading is one too."""
+    if _step_heading(plain):
+        return True
     if len(plain.split()) > 20 or re.search(r"[0-9=$]", plain):
         return False
     if _SIGNPOST_HERE.match(plain) or _SIGNPOST_RECAP.match(plain):
@@ -766,9 +782,40 @@ def _parse(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool]:
     """parse_blocks plus a flag: True when a line that only said "the materials do not cover this" was removed."""
     token = _N_SOURCES.set(n_sources)
     try:
-        return _parse_inner(raw, n_sources)
+        blocks, used, said = _parse_inner(raw, n_sources)
+        return keep_list_markers(blocks), used, said
     finally:
         _N_SOURCES.reset(token)
+
+
+_LONE_MARKER = re.compile(r"(?:\A|\n)[ \t]*((?:\d{1,3}[.)]|[-*+]))[ \t]*\Z")
+
+
+def keep_list_markers(blocks):
+    """A list item whose text is outside material ("3. <outside>...</outside>") is cut into a text block that ends with
+    the bare marker "3." and an outside block. The marker goes with its text, so a box never leaves a stranded "3."
+    behind and the numbered list is not split. Works on Block objects and on {kind, md} dicts."""
+    def get(b, k):
+        return getattr(b, k, None) if not isinstance(b, dict) else b.get(k)
+
+    def put(b, k, v):
+        if isinstance(b, dict):
+            b[k] = v
+        else:
+            setattr(b, k, v)
+    out = []
+    for i, b in enumerate(blocks):
+        nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+        m = _LONE_MARKER.search(get(b, "md") or "") if get(b, "kind") == "text" else None
+        if m and nxt is not None and get(nxt, "kind") == "outside":
+            rest = (get(b, "md") or "")[:m.start()]
+            put(nxt, "md", f"{m.group(1)} {(get(nxt, 'md') or '').lstrip()}")
+            if rest.strip():
+                put(b, "md", rest)
+                out.append(b)
+            continue
+        out.append(b)
+    return out
 
 
 def _uncited_blocks(cleaned: str, n_sources: int, calc: bool = False) -> tuple[list[Block], bool]:
@@ -1293,6 +1340,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
                 _, raw2 = integrity.read_marker(raw2)
                 again = integrity.check_reply(store, course_id, question, raw2, force_item=sticky, sources=sources)
                 if not again:
+                    reworded = graded  # the student is told once that this is the reworded second reply
                     graded, raw = None, raw2
     if graded:
         # a soft essay hit already used its regeneration: the graded page then makes no further model call

@@ -357,8 +357,50 @@ def _clean_body(body: str) -> str:
     return body
 
 
+_SPLIT_QS = re.compile(r"(<details>.*?</details>|\n\s*\n)", re.S | re.I)
+_NUM_Q = re.compile(r"^\s*(\d+)([.)])\s")
+_SCRUB_HEAD = re.compile(r"^(?:A part|\d+ parts) of this guide (?:was|were) left out because", re.I)
+
+
+def tidy_practice(before: str, after: str, scrubbed: int, note: str) -> tuple[str, int, str]:
+    """A practice set after the graded-work scrub: a numbered question whose solution was cut is dropped too (no empty
+    stub), the questions left are numbered 1, 2, 3 again, and the note counts questions, not parts: a copied question
+    and its solution are one question. Returns (text, questions left out, note)."""
+    if not scrubbed:
+        return after, 0, note
+
+    def paras(text: str) -> list[tuple[str, bool]]:
+        segs = [x for x in _SPLIT_QS.split(text) if x.strip()]
+        out = []
+        for i, seg in enumerate(segs):
+            nxt = segs[i + 1] if i + 1 < len(segs) else ""
+            out.append((seg, nxt.lower().lstrip().startswith("<details>")))
+        return out
+    was = {seg.strip(): has_det for seg, has_det in paras(before) if _NUM_Q.match(seg)}
+    kept: list[str] = []
+    segs = paras(after)
+    gone = sum(1 for q in was if q not in {seg.strip() for seg, _ in segs})
+    for i, (seg, has_det) in enumerate(segs):
+        if _NUM_Q.match(seg) and was.get(seg.strip()) and not has_det:
+            gone += 1  # its solution was cut: the question alone is an empty stub
+            continue
+        kept.append(seg.strip())
+    if not gone:
+        return after, scrubbed, note
+    n = 0
+    renum = []
+    for seg in kept:
+        m = _NUM_Q.match(seg)
+        if m and not seg.lower().startswith("<details>"):
+            n += 1
+            seg = f"{n}{m.group(2)} " + seg[m.end():]
+        renum.append(seg)
+    new_note = _SCRUB_HEAD.sub(f"{gone} practice question{'s were' if gone != 1 else ' was'} left out because", note) if note else note
+    return "\n\n".join(renum), gone, new_note
+
+
 def _compose(store: Store, course_id: int, provider, task: str, sources: list[dict[str, Any]], *, question: str = "",
-             max_tokens: int = 4000) -> dict[str, Any]:
+             max_tokens: int = 4000, practice: bool = False) -> dict[str, Any]:
     """Ask, guard, parse. Returns {routed, blocks, body, used, outside, not_covered, sources}."""
     sources = _prepare(store, course_id, sources)
     user = f"{task}\n\nSOURCES\n\n{_sources_block(sources)}"
@@ -368,8 +410,11 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
         return {"routed": routed}
     integ = _mod("integrity")
     scrubbed, scrub_note, scrub_ids = 0, "", []
+    before = raw
     if getattr(integ, "scrub_parts", None):  # drop only the parts the item's key flags, and say which item matched
         raw, scrubbed, scrub_note = integ.scrub_parts(store, course_id, raw, question or task[:300])
+        if practice:
+            raw, scrubbed, scrub_note = tidy_practice(before, raw, scrubbed, scrub_note)
         scrub_ids = list(getattr(integ, "LAST_SCRUB_ITEMS", []) or []) if scrubbed else []
     elif getattr(integ, "scrub_markdown", None):
         raw, scrubbed = integ.scrub_markdown(store, course_id, raw, question or task[:300])
@@ -901,6 +946,13 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
     _need(provider)
     ev = _pick_event(store, course_id, event_id, "exam")
     prev, lectures = _window(store, course_id, ev)
+    # what the student typed as the exam's own topics ("Covers") decides the scope: lectures in the window that do not
+    # touch those topics are not part of this exam, so they are neither used nor warned about
+    typed = " ".join(str(ev.get("topics") or "").split())
+    typed_stems = _stem_set(typed)
+    typed_parts = [t.strip(" .") for t in re.split(r"[,;\n]|\band\b", typed) if t.strip(" .")] if typed else []
+    if typed_stems:
+        lectures = [l for l in lectures if _stem_set(f"{clean_title(l)} {l.get('topics', '')}") & typed_stems]
     chosen: list[dict[str, Any]] = []
     if material_ids:
         for mid in material_ids:
@@ -933,7 +985,10 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         link_note = ("Matched by title, not linked: " + "; ".join(x["why"] for x in suggestions[:4]) +
                      (f"; and {more} more" if more > 0 else "") + ". Link them to their lectures in Materials to make this certain.")
     topics = [" ".join(x for x in (clean_title(e), e.get("topics", "")) if x) for e in lectures]
-    topics_text = [t for t in topics if t] or [" ".join(x for x in (ev["title"], ev.get("topics", "")) if x)]
+    topics_text = [t for t in topics if t]
+    if typed_parts:
+        topics_text = typed_parts + [t for t in topics_text if not (_stem_set(t) <= typed_stems)]
+    topics_text = topics_text or [" ".join(x for x in (ev["title"], ev.get("topics", "")) if x)]
     scope_note = ""
     graded_ids = {i.get("material_id") for i in store.graded_items(course_id) if i.get("material_id")}
     graded_chosen = [m for m in chosen if m.get("graded") or m["id"] in graded_ids]
@@ -951,7 +1006,9 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         scope_note = f"Built from the materials saved for {'the lectures since ' + prev if prev else 'the course so far'}."
     else:
         mats = _relevant_materials(store, [m for m in store.materials(course_id) if _usable(m)], " ".join(topics_text))
-        scope_note = "No material is linked to the lectures before this exam, so this covers all your saved materials."
+        scope_note = ("Built from the saved materials that match the topics you typed for this exam: " + typed + "."
+                      if typed_parts else
+                      "No material is linked to the lectures before this exam, so this covers all your saved materials.")
     syllabus_rows = [f"{e['date']}: {event_label(e)}" for e in lectures if e.get("topics")]
     course_topics = " ".join(f"{clean_title(e)} {e.get('topics', '')}" for e in store.events(course_id, kinds=["lecture"]))
     mids = [m["id"] for m in mats]
@@ -997,8 +1054,9 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
             "## Study plan (one line per day from these dates: " + f"{', '.join(plan_days) or ev['date']}; spread the topics, put review and rest near the end)")
     task = (f"Write an exam study guide for {_course_name(store, course_id)}: \"{ev['title']}\" on {ev['date']} "
             f"({when}). Window: {'since the previous exam on ' + prev if prev else 'the start of the course'}.\n"
-            f"Materials used: {', '.join(m['title'] for m in mats) or 'none'}.\n"
-            f"Lecture topics in the window:\n- " + "\n- ".join(topics_text) +
+            f"Materials used: {', '.join(m['title'] for m in mats) or 'none'}.\n" +
+            ("Topics this exam covers (the student's own list):\n- " if typed_parts else "Lecture topics in the window:\n- ") +
+            "\n- ".join(topics_text) +
             ("\nSyllabus rows:\n- " + "\n- ".join(syllabus_rows) if syllabus_rows else "") +
             (("\nThese lectures have NO saved materials, so say plainly that the guide cannot cover them and do not "
               "invent their content:\n- " + "\n- ".join(missing)) if missing else "") +
@@ -1423,7 +1481,7 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
                     "the answer here\n\n</details>\n"
                     "Never show the answer outside the details block. Do not write a thesis or any paragraph of an "
                     "essay the student must submit, and do not copy a question from the materials.")
-        normal = _compose(store, course_id, provider, task, sources, question=topic, max_tokens=5000)
+        normal = _compose(store, course_id, provider, task, sources, question=topic, max_tokens=5000, practice=True)
         if normal["routed"] and not twins:
             return normal["routed"]
         if normal["routed"]:

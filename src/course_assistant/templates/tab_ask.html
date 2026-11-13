@@ -1,18 +1,20 @@
 {% from "_answer.html" import answer %}{% from "_fields.html" import fa, fe with context %}
 <h2>Ask about this course</h2>
 <p class="muted">Answers come from your saved materials and point to the exact page, slide or time. Anything the AI adds from its own knowledge is labeled.</p>
+{% set fb = namespace(note='') %}{% for m in history %}{% if m.view and m.view.feedback_note %}{% set fb.note = m.view.feedback_note %}{% endif %}{% endfor %}
+{% if fb.note %}<p class="muted small" data-feedback-note>{{ fb.note }}</p>{% endif %}
 {% if graded_count %}<p class="muted small">You have graded work marked here. If a question matches it, you get a similar problem with different numbers, not the answer.</p>{% endif %}
 {% if answer_check %}<p class="answer-check {{ answer_check.tone }}" role="status" id="answer-check">{{ answer_check.text }}</p>{% endif %}
 {% if not ai.connected %}{% include "_connect_panel.html" %}{% endif %}
-{% macro turn(m) %}{% if m.role == 'user' %}<div class="msg me"><p class="who">You asked</p><p>{{ m.content }}</p></div>
-{% else %}<div class="msg ai"><h3 class="answer-heading who" tabindex="-1" data-answer-heading>{% if m.view.heading.startswith('Feedback on') %}{{ m.view.heading }}{% elif m.view.heading %}Answer to: {{ m.view.heading }}{% else %}Answer{% endif %}</h3>{{ answer(m.view) }}</div>{% endif %}{% endmacro %}
+{% macro turn(m, foot=true) %}{% if m.role == 'user' %}<div class="msg me"><p class="who">You asked</p><p>{{ m.content }}</p></div>
+{% else %}<div class="msg ai"><h3 class="answer-heading who" tabindex="-1" data-answer-heading>{% if m.view.heading.startswith('Feedback on') %}{{ m.view.heading }}{% elif m.view.heading %}Answer to: {{ m.view.heading }}{% else %}Answer{% endif %}</h3>{{ answer(m.view, foot) }}{% if m.unsave_id %}<form method="post" action="/guides/{{ m.unsave_id }}/unsave" class="inline-form" data-dont-save><button class="btn ghost small" type="submit">Don't save this answer</button> <span class="muted small">It is saved under Guides, in Ask history, unless you press this.</span></form>{% endif %}</div>{% endif %}{% endmacro %}
 {% set ns = namespace(last=-1, answers=0) %}{% for m in history %}{% if m.role == 'user' %}{% set ns.last = loop.index0 %}{% else %}{% set ns.answers = ns.answers + 1 %}{% endif %}{% endfor %}
 {% set older = history[:ns.last] if ns.last > 0 else [] %}{% set latest = history[ns.last:] if ns.last >= 0 else history %}
 {% if ns.answers > 1 %}<p class="ask-tools"><a class="jump-link" href="#latest-answer" data-jump-latest>Jump to latest answer</a><span class="muted small">{{ ns.answers }} answers so far. Earlier ones are folded below.</span></p>{% endif %}
 {% if older %}<details class="older-turns"><summary>Earlier questions and answers ({{ older | length }} messages)</summary>
-<div class="chat" role="region" aria-label="Earlier conversation">{% for m in older %}{{ turn(m) }}{% endfor %}</div></details>{% endif %}
+<div class="chat" role="region" aria-label="Earlier conversation">{% for m in older %}{{ turn(m, false) }}{% endfor %}</div></details>{% endif %}
 <div id="chat" class="chat" role="region" aria-label="Conversation">
-{% for m in latest %}{% if loop.last and m.role != 'user' %}<div id="latest-answer" tabindex="-1" data-latest-answer>{{ turn(m) }}</div>{% else %}{{ turn(m) }}{% endif %}{% endfor %}
+{% for m in latest %}{% if loop.last and m.role != 'user' %}<div id="latest-answer" tabindex="-1" data-latest-answer>{{ turn(m, true) }}</div>{% else %}{{ turn(m, false) }}{% endif %}{% endfor %}
 {% if not history %}<p class="muted">No questions yet. Try: "What is the main idea of lecture 3?"</p>{% endif %}
 </div>
 <form method="post" action="/courses/{{ course.id }}/ask" hx-post="/courses/{{ course.id }}/ask" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" data-busy="Checking this against your graded work... then looking through your materials and writing an answer. This can take up to a minute." class="form card">

@@ -402,6 +402,71 @@ def answer_heading(question: str, data: dict[str, Any] | None) -> str:
     return cut + "..."
 
 
+NOTE_FEEDBACK = "The app points at what to improve and never writes or rewrites your draft for you."
+NOTE_FEEDBACK_PROOF = ("The app points at which steps need a reason and never supplies the missing step or a corrected "
+                       "proof for you.")
+_FAILED_FEEDBACK = "I could not write safe feedback on this draft"
+
+
+def _strip_chrome(raw: list[dict[str, str]]) -> tuple[list[dict[str, str]], str, bool]:
+    """The page says some things once, in its own chrome: the AI disclaimer (a saved body ends with it, and the page
+    adds its own) and the "never writes your draft" notice (it was the first block of every feedback answer).
+    Returns (blocks without them, the notice that was taken out or "", whether this is the failed-feedback fallback)."""
+    note, failed, out = "", False, []
+    for b in raw:
+        md = b["md"]
+        for foot in (disclaimer.FOOTER, disclaimer.AI_APP_FOOTER):
+            md = re.sub(r"(?m)^[ \t>_*]*" + re.escape(foot) + r"[ \t_*]*$", "", md)
+        for n in (NOTE_FEEDBACK, NOTE_FEEDBACK_PROOF):
+            pat = re.compile(r"(?m)^[ \t>_*]*" + re.escape(n) + r"[ \t_*]*$\n?")
+            if pat.search(md):
+                note = n
+                md = pat.sub("", md)
+        if _FAILED_FEEDBACK in md:
+            failed = True
+        md = re.sub(r"\n{3,}", "\n\n", md).strip("\n")
+        if md.strip():
+            out.append({**b, "md": md})
+    return out, note, failed
+
+
+_CALC_TABLE_WORDS = frozenset("""moles mole mol mass masses ratio ratios step steps value values quantity quantities amount amounts
+total divide divided multiply multiplied result results work working calculation calculations formula element elements
+percent percentage fraction whole number smallest simplest unit units given find found of per the and to in from by""".split())
+
+
+def _words_of(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]{2,}", text.lower()))
+
+
+def _calc_table(md: str, neighbours: list[str]) -> bool:
+    """An uncited table that only lays out working for a cited sentence next to it: a header of calculation words or
+    words the neighbouring cited text uses ("Element | Moles | Ratio"). It carries no claim of its own. A table of facts
+    (its header names something the neighbour never mentions, or has no calculation word) stays boxed."""
+    lines = [ln.strip() for ln in md.strip().splitlines() if ln.strip()]
+    if len(lines) < 2 or not all(ln.startswith("|") for ln in lines):
+        return False
+    header = _words_of(lines[0])
+    near = set().union(*(_words_of(n) for n in neighbours)) if neighbours else set()
+    return bool(header & _CALC_TABLE_WORDS) and header <= (_CALC_TABLE_WORDS | near) and bool(near)
+
+
+def _unbox_calc_tables(raw: list[dict[str, str]]) -> list[dict[str, str]]:
+    for i, b in enumerate(raw):
+        if b["kind"] != "outside":
+            continue
+        near = [raw[j]["md"] for j in (i - 1, i + 1) if 0 <= j < len(raw) and raw[j]["kind"] == "text"
+                and grounding_cited(raw[j]["md"])]
+        if near and _calc_table(b["md"], near):
+            b["kind"] = "text"
+    return raw
+
+
+def grounding_cited(md: str) -> bool:
+    from . import grounding
+    return bool(grounding.cited_numbers(md))
+
+
 def _drop_repeated_note(raw: list[dict[str, str]], note: str) -> list[dict[str, str]]:
     """The routing sentence is said once, in the page's note: the same sentence at the top of the first block goes."""
     if not note or not raw or raw[0]["kind"] != "text":
@@ -443,6 +508,10 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
     if not raw:
         raw = split_outside(body_md or "")
     data = data or {}
+    raw, feedback_note, failed_feedback = _strip_chrome(raw)
+    raw = _unbox_calc_tables(grounding.keep_list_markers(raw))
+    if failed_feedback and not data.get("feedback"):
+        data = {**data, "feedback": True}  # a fallback page that saved no guide is still feedback on the draft
     if tree_shown:
         for i, b in enumerate(raw):  # the flat list is the same graph the tree shows
             if _CONCEPT_LISTS_RE.search(b["md"]):
@@ -535,6 +604,8 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
             "not_covered_note": NOT_COVERED_NOTE + (NOT_COVERED_EXTRA if has_outside else ""),
             "removed_citations": removed, "unverified_quotes": unverified, "base_level": base_level,
             "check_line": ("Check: " + ", ".join(parts)) if parts else "",
+            "feedback": bool(data.get("feedback")), "feedback_note": feedback_note or (
+                (NOTE_FEEDBACK_PROOF if data.get("kind") == "proof" else NOTE_FEEDBACK) if data.get("feedback") else ""),
             "footer": disclaimer.AI_APP_FOOTER if ai_app else disclaimer.FOOTER}
 
 
@@ -630,8 +701,10 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
             if ch not in seen:
                 tree_edges.add(i)
                 kids.append(tree(ch, edges[i]))
+        # "parent" is the concept this one hangs from, so a chain line names where its link starts
         return {**nodes[node], "via": (via or {}).get("label", ""), "via_cites": (via or {}).get("cites", []),
-                "has_via": via is not None, "via_removed": (via or {}).get("removed", False), "children": kids}
+                "has_via": via is not None, "via_removed": (via or {}).get("removed", False), "children": kids,
+                "parent": nodes[via["a"]]["label"] if via is not None else ""}
 
     forest = [tree(r, None) for r in roots if r not in seen]
     forest += [tree(k, None) for k in nodes if k not in seen]
