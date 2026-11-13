@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}Edit {{ m.title }} - {{ course.name }} - Course Assistant{% endblock %}
 {% block body %}<section class="narrow"><h1>Edit material</h1><p class="muted">{{ course.name }}</p>
-{% if copy_of %}<p class="flash warn">This looks like a copy of <a href="/read/{{ copy_of.id }}">{{ copy_of.title }}</a>. Both are searched, so answers may repeat the same passage. If you do not need both, <a href="/materials/{{ m.id }}/delete">delete this one</a>.</p>{% endif %}
+{% if copy_of %}<p class="flash warn">This looks like a copy of <a href="/read/{{ copy_of.id }}">{{ copy_of.title }}</a>. Answers use that one only, so this copy is not searched. You can <a href="/materials/{{ m.id }}/delete">delete this one</a>, or go back to the Materials tab to keep this copy instead or mark it as not a copy.</p>{% endif %}
 <form method="post" class="form card">
   <label>Title <input name="title" required value="{{ m.title }}" {{ fa('material', 'title') }}></label>{{ fe('material', 'title') }}
   <label>What is it? <select name="kind" {{ fa('material', 'kind') }}>{% for k, l in material_kinds.items() %}<option value="{{ k }}" {% if m.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>{{ fe('material', 'kind') }}

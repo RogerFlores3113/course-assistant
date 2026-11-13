@@ -103,7 +103,37 @@ def _page_lines(page) -> list[dict[str, Any]]:
     return out
 
 
+_LIGATURES = {"\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi", "\ufb04": "ffl", "\ufb05": "st",
+              "\ufb06": "st", "\u0132": "IJ", "\u0133": "ij"}
+_SUPER = str.maketrans({"\u2070": "0", "\u00b9": "1", "\u00b2": "2", "\u00b3": "3", "\u2074": "4", "\u2075": "5",
+                        "\u2076": "6", "\u2077": "7", "\u2078": "8", "\u2079": "9", "\u207a": "+", "\u207b": "-",
+                        "\u207f": "n", "\u2071": "i"})
+_SUB = str.maketrans({"\u2080": "0", "\u2081": "1", "\u2082": "2", "\u2083": "3", "\u2084": "4", "\u2085": "5",
+                      "\u2086": "6", "\u2087": "7", "\u2088": "8", "\u2089": "9", "\u208a": "+", "\u208b": "-",
+                      "\u2099": "n", "\u1d62": "i", "\u2c7c": "j"})
+_SUPER_RUN = re.compile("[\u2070\u00b9\u00b2\u00b3\u2074-\u207b\u207f\u2071]+")
+_SUB_RUN = re.compile("[\u2080-\u208b\u2099\u1d62\u2c7c]+")
+
+
+def normalize_math_chars(text: str) -> str:
+    """Characters a PDF uses for typesetting, as plain ones the search and the reader understand: ligatures (fi, fl),
+    soft hyphens and zero-width marks, the minus sign (U+2212) between numbers or letters, and super and subscript
+    digits (x\u00b2 becomes x^2, A\u207b\u00b9 becomes A^-1, C\u2086 becomes C_6)."""
+    for k, v in _LIGATURES.items():
+        text = text.replace(k, v)
+    text = re.sub("[\u00ad\u200b\u200c\u200d\u2060\ufeff]", "", text)
+    text = text.replace("\u2009", " ").replace("\u202f", " ").replace("\u00a0", " ")
+    text = re.sub(r"(?<=[\w)\]}]) \u2212 (?=[\w(\[])", " - ", text)  # a - b
+    text = re.sub(r"(?<=[\w)\]}])\u2212(?=[\w(\[])", "-", text)  # x-1
+    text = re.sub(r"(?<![\w)])\u2212(?=[\w(])", "-", text)  # a leading minus: -3
+    text = text.replace("\u2212", "-")
+    text = _SUPER_RUN.sub(lambda m: "^" + m.group(0).translate(_SUPER), text)
+    text = _SUB_RUN.sub(lambda m: "_" + m.group(0).translate(_SUB), text)
+    return text
+
+
 def _clean_page_text(text: str) -> str:
+    text = normalize_math_chars(text)
     # a symbol that landed after the punctuation that should follow it: "scalar.λ Next" -> "scalar λ. Next"
     text = re.sub(rf"(?<=[A-Za-z0-9])([.,;:])[ \t]?([{_GREEK_MATH}])(?=\s|$)", r" \2\1", text)
     text = re.sub(rf"\$([{_GREEK_MATH}]) \$", r"$\1$", text)
@@ -524,6 +554,7 @@ def chunk_plain(text: str, title: str = "") -> list[dict[str, Any]]:
             num = n
         items.append({"text": t_, "lines": p, "start": p[0][0], "end": p[-1][0], "num": num, "front": front,
                       "words": words(t_)})
+    n_numbered = sum(1 for it in items if it["num"])  # a header and one long run of lines has no paragraph numbers
     out: list[dict[str, Any]] = []
 
     def emit(group: list[dict[str, Any]], body: str | None = None, part: int = 0, span: tuple[int, int] | None = None,
@@ -533,7 +564,7 @@ def chunk_plain(text: str, title: str = "") -> list[dict[str, Any]]:
         a_, b_ = span or (group[0]["start"], group[-1]["end"])
         rng = f"lines {a_} to {b_}" if b_ > a_ else f"line {a_}"
         nums = [g["num"] for g in group if g["num"]]
-        if len(items) == 1:  # no paragraph breaks in the file: only line ranges mean anything
+        if n_numbered <= 1:  # no paragraph breaks in the file: only line ranges mean anything
             head = "lines"
         elif group[0]["front"]:
             head = "header"

@@ -798,6 +798,18 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         return after(request, m["course_id"], "materials",
                      notice=f"{m['title']} is now treated as its own material.")
 
+    @app.post("/materials/{material_id}/keep-copy")
+    def material_keep_copy(request: Request, material_id: int):
+        """Search this copy (a PDF with page numbers) instead of the file it was matched with."""
+        m = store.material(material_id)
+        if not m:
+            raise _NotFound("That material was not found.")
+        from .importers import keep_copy
+        orig = keep_copy(store, material_id)
+        note = (f"{m['title']} is now the searched copy. The other one is skipped." if orig
+                else f"{m['title']} was not marked as a copy.")
+        return after(request, m["course_id"], "materials", notice=note)
+
     @app.post("/materials/{material_id}/process")
     async def material_process(request: Request, material_id: int):
         """Start (or retry) reading a photo or transcribing a recording now."""

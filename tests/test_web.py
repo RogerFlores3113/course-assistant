@@ -935,3 +935,12 @@ def test_no_em_dashes_in_new_templates():
     tdir = Path(web.__file__).parent / "templates"
     for f in ("setup.html", "settings.html", "material_form.html", "graded_form.html", "connect.html", "tab_materials.html"):
         assert "—" not in (tdir / f).read_text(), f
+
+
+def test_keep_copy_route_swaps_the_searched_copy(ready):
+    cid = mkcourse(ready.store)
+    a = ready.store.add_material(cid, "textbook", "Chapter 7")
+    b = ready.store.add_material(cid, "textbook", "Chapter 7 pdf")
+    ready.store.update_material(b, duplicate_of=a)
+    ready.client.post(f"/materials/{b}/keep-copy", follow_redirects=True)
+    assert ready.store.material(b)["duplicate_of"] is None and ready.store.material(a)["duplicate_of"] == b

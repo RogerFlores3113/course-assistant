@@ -608,3 +608,39 @@ def test_link_runs_after_syllabus_import(fx_env):
     import_file(s, cid, FX / "syllabus-table.md")
     ev = s.material(mid)["event_id"]
     assert ev and s.event(ev)["title"].startswith("Lecture 3")
+
+
+# ---------------------------------------------------------------- cycle 2 (fx2-retrieval)
+def test_text_without_paragraph_breaks_is_labelled_by_lines_only():
+    import textwrap
+    from course_assistant.importers.extract import chunk_plain
+    sent = ("If men were angels, no government would be necessary. In framing a government which is to be "
+            "administered by men over men, the great difficulty lies in this: you must first enable the government "
+            "to control the governed, and in the next place oblige it to control itself. ")
+    lines = ["FEDERALIST No. 51", "MADISON", "", "To the People of the State of New York:", ""]
+    for b in textwrap.wrap(sent * 40, 70):
+        lines += [b, ""]
+    chunks = chunk_plain("\n".join(lines), "Federalist No. 51")
+    assert len(chunks) > 3
+    assert all("paragraph" not in c["loc_label"] and "paragraph" not in c["heading"] and "part " not in c["heading"]
+               for c in chunks)
+    assert all(c["loc_label"].startswith("line") for c in chunks)
+
+
+def test_pdf_math_characters_are_normalised():
+    from course_assistant.importers.extract import normalize_math_chars as n
+    assert n("the ﬁrst eﬀect") == "the first effect"
+    assert n("x² and A⁻¹") == "x^2 and A^-1"
+    assert n("C₆H₁₂O₆") == "C_6H_12O_6"
+    assert n("5 − 3 and −3 and a−b") == "5 - 3 and -3 and a-b"
+
+
+def test_keep_copy_swaps_which_file_is_searched():
+    s = Store(":memory:")
+    cid = s.add_course("X")
+    md = s.add_material(cid, "textbook", "Chapter 7")
+    pdf = s.add_material(cid, "textbook", "Chapter 7 pdf")
+    s.update_material(pdf, duplicate_of=md)
+    assert _imp.keep_copy(s, pdf) == md
+    assert s.material(pdf)["duplicate_of"] is None and s.material(md)["duplicate_of"] == pdf
+    assert _imp.keep_copy(s, pdf) is None

@@ -402,8 +402,8 @@ def _import_result(mid: int) -> str:
     if m.get("duplicate_of"):
         orig = st.material(int(m["duplicate_of"]))
         if orig:
-            msg += (f" It looks like a copy of '{orig['title']}' (material {orig['id']}). Both are searched, so "
-                    "answers may repeat the same passage; the student can delete one or press Not a copy in the app.")
+            msg += (f" It looks like a copy of '{orig['title']}' (material {orig['id']}). Only the original is "
+                    "searched, so this copy is never cited; in the app the student can keep this copy instead, press Not a copy, or delete one.")
     return msg + f" Open it: {_link('/read/' + str(mid))}"
 
 
