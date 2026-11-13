@@ -342,10 +342,18 @@ def _offers_of(data: dict[str, Any], course_id: int | None) -> list[dict[str, An
 
 
 UNUSED_SOURCES_MAX = 5
+
+
+def grounding_topic(text: str) -> list[str]:
+    from . import grounding
+    return grounding.topic_stems(text)
+
+
+MAP_BRANCH_DEPTH = 2   # a concept map text list nests at most this many branch levels; deeper concepts are a flat list
 UNUSED_SHARE = 0.5   # an "also searched" passage must score at least this share of the best passage found
 
 
-def _fair_unused(smap: dict[int, dict[str, Any]], cited: set[int]) -> list[dict[str, Any]]:
+def _fair_unused(smap: dict[int, dict[str, Any]], cited: set[int], question: str = "") -> list[dict[str, Any]]:
     """The passages that were searched but not cited, worth listing: at most UNUSED_SOURCES_MAX, only those scoring
     within a fair share of the top hit when scores were saved. Without scores the first few stay."""
     rest = [smap[k] for k in sorted(smap) if k not in cited]
@@ -353,6 +361,10 @@ def _fair_unused(smap: dict[int, dict[str, Any]], cited: set[int]) -> list[dict[
     if scores and max(scores) > 0:
         floor = max(scores) * UNUSED_SHARE
         rest = [s for s in rest if not isinstance(s.get("score"), (int, float)) or float(s["score"]) >= floor]
+    q = set(grounding_topic(question))
+    if q:  # a passage that shares no real word with the question is noise (rows saved without words stay)
+        need = 2 if len(q) >= 4 else 1
+        rest = [s for s in rest if not s.get("words") or len(q & set(str(s["words"]).split())) >= need]
     return rest[:UNUSED_SOURCES_MAX]
 
 
@@ -513,7 +525,7 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
         ask_normal = {"course_id": int(course_id), "question": question or str(data.get("question"))}
     return {"blocks": out_blocks,
             "sources": _merge_sources([smap[k] for k in sorted(smap) if k in cited]),
-            "unused_sources": _merge_sources(_fair_unused(smap, cited)),
+            "unused_sources": _merge_sources(_fair_unused(smap, cited, question or str(data.get("question") or ""))),
             "twin": is_twin, "concepts": is_concepts,
             "routing_note": routing_note, "ask_normal": ask_normal,
             "offers": _offers_of(data, course_id), "offer_course_id": course_id,
@@ -624,16 +636,26 @@ def concept_graph(data: dict[str, Any]) -> dict[str, Any]:
     forest = [tree(r, None) for r in roots if r not in seen]
     forest += [tree(k, None) for k in nodes if k not in seen]
 
-    def flatten(n: dict[str, Any]) -> None:
+    def flatten(n: dict[str, Any], level: int = 1) -> None:
         """A concept with one link to the next, and that one to the next, is a chain: it reads as a flat numbered
         sequence, not as lists nested one inside the other. Only a real branch nests."""
         chain, cur = [], n
         while len(cur["children"]) == 1:
             cur = cur["children"][0]
             chain.append(cur)
-        n["chain"], n["branches"] = chain, cur["children"]
+        n["chain"], n["branches"], n["more"] = chain, cur["children"], []
+        if level >= MAP_BRANCH_DEPTH and n["branches"]:
+            # deep in a branching map: the rest of this subtree is one flat list, not more nested lists
+            def walk(b: dict[str, Any]) -> None:
+                n["more"].append(b)
+                for c in b["children"]:
+                    walk(c)
+            for b in n["branches"]:
+                walk(b)
+            n["branches"] = []
+            return
         for b in n["branches"]:
-            flatten(b)
+            flatten(b, level + 1)
     for root in forest:
         flatten(root)
     cross = [{"a": nodes[e["a"]]["label"], "b": nodes[e["b"]]["label"], "label": e["label"], "cites": e["cites"],
