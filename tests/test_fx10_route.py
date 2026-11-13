@@ -102,3 +102,125 @@ def test_d5_mcp_tools_refuse_the_two_sentence_midpoint_proof_and_save_the_method
         assert mcp_server.save_guide(c, "explain", "Notes", PROOF_OK[4], []).startswith("Saved")
     finally:
         mcp_server.set_store(None)
+
+
+# ------------------------------------------------------------------ decision 6: equation-line systems
+import fx10_world as W10
+
+
+@pytest.fixture
+def mcp10(tmp_path):
+    w = W10.world(tmp_path, lab=True)
+    mcp_server.set_store(w["s"])
+    yield w
+    mcp_server.set_store(None)
+
+
+EQ_LEAKS = ["3x + 4y + z = 15 / y + z = 3 / 3z = 6", "3x + 4y + z = 15\ny + z = 3\n3z = 6",
+            "After elimination the system becomes 3x+4y+z=15, y+z=3, 3z=6."]
+
+
+@pytest.mark.parametrize("text", EQ_LEAKS)
+def test_d6_triangular_system_as_equation_lines_names_its_item(text):
+    w = W10.world()
+    s, c, ids = w["s"], w["c"], w["ids"]
+    hit = integrity.check_reply(s, c, "what does the system look like after the exchange?", text)
+    assert hit and hit["id"] == ids["Problem 6"]
+    assert integrity.check_guide(s, c, "Notes", text)["id"] == ids["Problem 6"]
+
+
+@pytest.mark.parametrize("text", EQ_LEAKS)
+def test_d6_mcp_refuses_the_equation_lines(mcp10, text):
+    r = mcp_server.save_guide(mcp10["c"], "explain", "Notes", text, [])
+    assert r.startswith("NOT SAVED") and "Problem 6" in r
+
+
+@pytest.mark.parametrize("text", ["5x + 2y + z = 9 / 3y - z = 4 / 2z = 6", "2x + y = 5\n3y = 6",
+                                  "Back substitution solves the last equation first: from 4z = 8 you get z = 2.",
+                                  "x = 1, y = 1, z = 2"])
+def test_d6_look_alike_systems_pass(text):
+    w = W10.world()
+    assert integrity.check_reply(w["s"], w["c"], "how does back substitution work?", text) is None
+    assert integrity.check_guide(w["s"], w["c"], "Notes", text) is None
+
+
+def test_d6_equation_system_reader():
+    assert integrity.equation_system("2x + 5y + z = 0 / y - z = 3 / -z = 2") == [["2", "5", "1", "0"], ["0", "1", "-1", "3"], ["0", "0", "-1", "2"]]
+    assert integrity.equation_system("x + y = 3, x - y = 1") == []  # not triangular
+    assert integrity.equation_system("x = 1, y = 1, z = 2") == []  # a list of values, no equation with two unknowns
+
+
+# ------------------------------------------------------------------ decision 7: keyless items, data, wrong item
+def _chunk(w, which):
+    return [w["book_chunks"][0]] if which == "example" else [w["handout_chunks"][0]]
+
+
+def test_d7_textbook_worked_example_cited_to_its_chunk_is_data_in_a_guide(mcp10):
+    w = mcp10
+    body = "The textbook example: a 0.250 L broth sample holds 0.0875 mol of urea, so the molarity is 0.350 M [1]"
+    assert mcp_server.save_guide(w["c"], "explain", "Notes", body, _chunk(w, "example")).startswith("Saved")
+
+
+def test_d7_same_numbers_with_no_cited_chunk_that_prints_them_are_checked(mcp10):
+    w = mcp10
+    body = "You need 0.0125 mol, which is 3.12 g of copper sulfate pentahydrate [1]"
+    r = mcp_server.save_guide(w["c"], "explain", "Notes", body, _chunk(w, "example"))
+    assert r.startswith("NOT SAVED") and "Pre-lab" in r
+
+
+def test_d7_a_chunk_of_graded_work_never_makes_a_sentence_data(mcp10):
+    w = mcp10
+    body = "Prepare 250.0 mL of 0.0500 M, which needs 3.12 g [1]"
+    assert mcp_server.save_guide(w["c"], "explain", "Notes", body, _chunk(w, "handout")).startswith("NOT SAVED")
+
+
+def test_d7_textbook_example_card_with_its_chunk_is_saved_and_the_item_answer_is_not(mcp10):
+    w = mcp10
+    ok = {"front": "Molarity of 0.0875 mol urea in 0.250 L?", "back": "0.350 M", "chunk_id": w["book_chunks"][0]}
+    assert mcp_server.add_flashcards(w["c"], [ok]).startswith("Added")
+    bad = {"front": "Grams of copper sulfate pentahydrate for the pre-lab", "back": "3.12 g"}
+    r = mcp_server.add_flashcards(w["c"], [bad])
+    assert r.startswith("NOT ADDED") and "Pre-lab" in r
+
+
+def test_d7_data_constants_the_handout_prints_are_free_in_cards_and_guides(mcp10):
+    w = mcp10
+    assert mcp_server.add_flashcards(w["c"], [{"front": "Molar mass of CuSO4 5H2O?", "back": "249.68 g/mol"}]).startswith("Added")
+    assert mcp_server.save_guide(w["c"], "explain", "Notes", "The molar mass of copper sulfate pentahydrate is 249.68 g/mol.", []).startswith("Saved")
+    # the key's own answer is still refused
+    assert mcp_server.add_flashcards(w["c"], [{"front": "Moles of copper sulfate needed in the pre-lab", "back": "0.0125 mol"}]).startswith("NOT ADDED")
+
+
+def test_d7_a_keyless_item_is_not_named_on_a_bare_molarity_sentence(mcp10):
+    w = mcp10
+    for body in ("For example, 0.0875 mol in 250 mL is 0.350 M", "A 0.010 M solution has 0.010 mol of solute per liter, ten times weaker than 0.10 M",
+                 "2.5 g of NaCl is about 0.043 mol"):
+        assert mcp_server.save_guide(w["c"], "explain", "Notes", body, []).startswith("Saved"), body
+
+
+def test_d7_a_keyless_item_is_still_refused_when_the_text_is_about_it_and_names_the_right_item(mcp10):
+    w = mcp10
+    r = mcp_server.save_guide(w["c"], "answer", "Notes", "Plot absorbance against concentration: the slope is 0.742.", [])
+    assert r.startswith("NOT SAVED") and "Report" in r and "Pre-lab" not in r
+
+
+def test_d7_save_guide_refuses_unnamed_multipliers_like_flashcards(mcp10):
+    w = mcp10
+    assert mcp_server.save_guide(w["c"], "explain", "Notes", "The multipliers are 2, -1, 6. [1]", []).startswith("NOT SAVED")
+    assert mcp_server.add_flashcards(w["c"], [{"front": "Multipliers of problem 6", "back": "2, -1, 6"}]).startswith("NOT ADDED")
+    for ok in ("The multipliers are the numbers that clear each entry below a pivot.", "For another system the multipliers are 4, 7 and 3."):
+        assert mcp_server.save_guide(w["c"], "explain", "Notes", ok, []).startswith("Saved"), ok
+
+
+def test_d7_cited_textbook_sentence_is_not_refused_as_a_keyless_item(tmp_path):
+    w = W10.world(tmp_path, lab=True, prelab_key=False)
+    mcp_server.set_store(w["s"])
+    try:
+        for body in ("For example, 0.0875 mol in 250 mL is 0.350 M [1]",
+                     "The textbook example: a 0.250 L broth sample holds 0.0875 mol of urea, so the molarity is 0.0875 mol divided by 0.250 L, which is 0.350 M [1]"):
+            assert mcp_server.save_guide(w["c"], "explain", "Notes", body, [w["book_chunks"][0]]).startswith("Saved"), body
+        # a number the chunk does not print is still judged: the pre-lab answer is a result, not an example
+        r = mcp_server.save_guide(w["c"], "explain", "Notes", "Pre-lab 1: you need 3.12 g of copper sulfate pentahydrate [1]", [w["book_chunks"][0]])
+        assert r.startswith("NOT SAVED") and "Pre-lab" in r
+    finally:
+        mcp_server.set_store(None)

@@ -553,15 +553,15 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
             bad_chunks.append(cid)
             quote_sources.append({"text": ""})
             continue
-        quote_sources.append({"text": ch.get("text", "")})
         mat = st.material(ch["material_id"]) or {}
+        quote_sources.append({"text": ch.get("text", ""), "graded": bool(mat.get("graded"))})
         valid.add(n)
         sources.append({"n": n, "chunk_id": cid, "material_id": ch["material_id"], "label": ch.get("loc_label", ""),
                         "title": mat.get("title", ""), "href": f"/read/{ch['material_id']}?at={cid}#c{cid}"})
     from . import grounding
     ig = _integrity()
     gate = getattr(ig, "check_guide", None) or getattr(ig, "check_reply", None)
-    hit = (gate(st, c["id"], t, b, n_cites=len(ids)) if gate is getattr(ig, "check_guide", None) else gate(st, c["id"], t, b)) if gate else None
+    hit = (gate(st, c["id"], t, b, n_cites=len(ids), sources=quote_sources) if gate is getattr(ig, "check_guide", None) else gate(st, c["id"], t, b)) if gate else None
     if not hit:  # a finished thesis, outline or written answer for a graded essay or short-answer item
         from . import essay
         hit = essay.guide_hit(st, c["id"], t, b, quote_sources)
@@ -617,23 +617,26 @@ def add_flashcards(course_id: int, cards: list[dict[str, Any]], deck: str = "") 
         raise _fail(f"At most {MAX_CARDS} cards per call.")
     d = _text(deck, "deck", max_len=100, required=False)
     clean: list[tuple[str, str, int | None, str]] = []
+    card_src: list[dict[str, Any] | None] = []
     for i, card in enumerate(cards, 1):
         if not isinstance(card, dict):
             raise _fail(f"Card {i} must be an object with front and back.")
         front = _text(card.get("front"), f"Card {i} front", max_len=1000)
         back = _text(card.get("back"), f"Card {i} back", max_len=2000)
-        chunk_id, label = None, ""
+        chunk_id, label, src = None, "", None
         if card.get("chunk_id") not in (None, ""):
             ch = st.chunk(int(card["chunk_id"]))
             if ch is None or int(ch["course_id"]) != c["id"]:
                 raise _fail(f"Card {i}: chunk_id {card['chunk_id']} is not in this course.")
             chunk_id = int(ch["id"])
             label = _cite_label(ch, st.material(ch["material_id"]))
+            src = {"text": ch.get("text", ""), "graded": bool((st.material(ch["material_id"]) or {}).get("graded"))}
         clean.append((front, back, chunk_id, label))
+        card_src.append(src)
     gate = getattr(_integrity(), "check_card", None)
     from . import essay
     for i, (front, back, cid, _) in enumerate(clean, 1):
-        hit = gate(st, c["id"], front, back) if gate else None
+        hit = (gate(st, c["id"], front, back, source=card_src[i - 1]) if card_src[i - 1] else gate(st, c["id"], front, back)) if gate else None
         if not hit:  # an essay thesis or conclusion, or a finished answer to a short-answer item
             src = ((st.chunk(cid) or {}).get("text") or "") if cid else ""
             hit = essay.card_hit(st, c["id"], front, back, src)

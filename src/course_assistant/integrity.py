@@ -762,9 +762,54 @@ def mask_structure(text: str) -> str:
     return _STRUCT.sub(" ", text or "")
 
 
+_EQ_CLAUSE_SPLIT = re.compile(r"\n|;|\s/\s|\s\|\s|,\s|\.\s|\b(?:then|gives|so|and|with|becomes)\b|\\\\|&&")
+
+
+def equation_system(text: str) -> list[list[str]]:
+    """A triangular system written as equation lines ('2x + 5y + z = 0 / y - z = 3 / -z = 2', as separate lines or in one
+    sentence) as augmented rows [A | b] over the unknowns x, y, z, ... in order. [] when the lines are not a square
+    triangular system with a nonzero diagonal, or when none of them carries two unknowns (a list 'x = 1, y = 1')."""
+    eqs: list[tuple[dict[str, str], str]] = []
+    for clause in _EQ_CLAUSE_SPLIT.split(text or ""):
+        line = clause.strip().strip("`$*").strip()
+        if line.count("=") != 1:
+            continue
+        lhs, rhs = (x.strip() for x in line.split("="))
+        rhs = rhs.rstrip(",.;")
+        if not lhs or not _NUM_FULL.match(rhs.replace(" ", "")):
+            continue
+        pos, terms, ok = 0, {}, True
+        while pos < len(lhs):
+            m = _TERM.match(lhs, pos)
+            if not m or m.end() == pos:
+                ok = False
+                break
+            sign, coef, param, var = m.groups()
+            if param:
+                ok = False  # a symbol coefficient: not a numeric system
+                break
+            val = _canon(coef) if coef not in ("", ".") else "1"
+            terms[var] = _canon("-" + val) if sign == "-" and val != "0" else val
+            pos = m.end()
+        if ok and terms:
+            eqs.append((terms, _canon(rhs.replace(" ", ""))))
+    cols = [v for v in _VARS if any(v in t for t, _ in eqs)]
+    if len(eqs) < 2 or len(cols) != len(eqs) or not any(len(t) >= 2 for t, _ in eqs):
+        return []
+    rows = [[t.get(v, "0") for v in cols] + [r] for t, r in eqs]
+    return rows if _solve_triangular(rows) else []
+
+
+def with_equation_system(text: str) -> str:
+    """The text, with a triangular system written as equation lines also written as the matrix [A | b], so it is read
+    like the matrix form (whole rows, columns and the solved unknowns)."""
+    rows = equation_system(text)
+    return f"{text}\n{_bracket_rows(rows)}" if rows else text
+
+
 def _kl(text: str, item: dict[str, Any] | None, ctx: dict[str, Any] | None = None) -> list[str]:
     """key_leak on the text with the item's own givens and the method's step counts masked."""
-    return key_leak(mask_structure(mask_givens(text, item)), item, ctx)
+    return key_leak(with_equation_system(mask_structure(mask_givens(text, item))), item, ctx)
 
 
 def _overlap_score(q: str, b: str, paste_only: bool = False) -> float:
@@ -1043,6 +1088,15 @@ def topic_overlap(question: str, item: dict[str, Any]) -> int:
     have = _pfx_set(f"{item.get('title', '')} {item.get('body', '')}")
     have |= {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", f"{item.get('title', '')} {item.get('body', '')}")}
     return len(words & have)
+
+
+def _names_by_words(text: str, item: dict[str, Any]) -> bool:
+    """The text names this item by its number or label, or by three of its own content words (two beyond method words):
+    never by a number it shares."""
+    if _own_ref(text, item) or _reference_match(text, item):
+        return True
+    shared = _Text(text).tok & _Text(item.get("body") or "").tok
+    return len(shared) >= 3 and len(shared - METHOD_WORDS) >= 2
 
 
 def names_item(text: str, item: dict[str, Any]) -> bool:
@@ -1507,7 +1561,8 @@ def force_map(items: list[dict[str, Any]], force_item: dict | None) -> dict[int,
 
 
 def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with_cites: str,
-                    force_item: dict | None, n_cites: int | None = None) -> dict[str, Any] | None:
+                    force_item: dict | None, n_cites: int | None = None,
+                    data: dict[Any, set[str]] | None = None) -> dict[str, Any] | None:
     """The item whose key the reply gives away (most matches), judged with each item's own chat context."""
     best, top = None, 0
     forced = force_map(items, force_item)
@@ -1515,6 +1570,9 @@ def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with
         if not item_key(it):
             continue
         ctx = reply_ctx(it, question, reply, forced.get(it["id"]))
+        free = set((data or {}).get("*", ())) | set((data or {}).get(it.get("id"), ()))
+        if free:
+            ctx["data"] = sorted(free)
         n = len(_kl(reply, it, ctx) or _kl(_CITE_SOFT.sub("", with_cites, n_cites), it, ctx))
         if not n and ctx.get("bare_vec") and (bare_vec_leak(reply, it, question) or bare_vec_leak(_CITE_SOFT.sub("", with_cites, n_cites), it, question)):
             n = 1
@@ -1573,12 +1631,13 @@ def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str,
 
 def check_reply(store, course_id: int, question: str, raw_reply: str, force_item: dict | None = None, *,
                 sources: list[Any] | None = None, keys_only: bool = False, given_ok: bool = False,
-                n_cites: int | None = None) -> dict | None:
+                n_cites: int | None = None, data: dict[Any, set[str]] | None = None) -> dict | None:
     """Return the graded item when the reply solves it (one of its answer-key values, its numbers in worked steps, a
     finished proof, or submittable essay prose for a graded essay), else None. Callers discard the reply and route to
     twin / concepts mode. Every item's key is checked. force_item: an item the chat is already about (see
     sticky_item). keys_only: only the answer keys (used when the student turned routing off). sources: the numbered
-    sources the reply cited, so cited restatements of a source are not read as essay prose."""
+    sources the reply cited, so cited restatements of a source are not read as essay prose. data: constants that are
+    free ('*' for every item, an item id for one): a molar mass the handout prints is data, never a key value."""
     _, with_cites = read_marker(raw_reply or "")
     if n_cites is None and sources:
         n_cites = len(sources)
@@ -1592,7 +1651,7 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         reply, with_cites = _mask_asked(reply, question), _mask_asked(with_cites, question)
     if _quoted_example(items, question or "", with_cites, reply, sources, force_item):
         return None
-    k = _reply_key_item(items, question or "", reply, with_cites, force_item, n_cites)
+    k = _reply_key_item(items, question or "", reply, with_cites, force_item, n_cites, data)
     if k:
         return _hit(k, "key")
     if keys_only:
@@ -3841,17 +3900,106 @@ def _labelled_answer(it: dict[str, Any], text: str) -> bool:
     return False
 
 
-def _text_key_item(items: list[dict[str, Any]], whole: str, text: str) -> dict[str, Any] | None:
+_SENT_SPAN = re.compile(r"[^.!?\n]+(?:[.!?]+(?=\s|$)|$)|\n+")
+
+
+def _source_forms(sources: list[Any] | None, n: int) -> set[str] | None:
+    """The number forms of cited source n when it is a chunk that is not graded work, else None."""
+    if not sources or not 1 <= n <= len(sources):
+        return None
+    src = sources[n - 1]
+    text, graded = (src.get("text"), src.get("graded")) if isinstance(src, dict) else (str(src or ""), False)
+    return None if graded or not (text or "").strip() else _all_forms(text)
+
+
+def _all_in_source(text: str, source: Any) -> bool:
+    forms = _source_forms([source], 1)
+    fm = forms_map(strip_constants(text or ""))
+    return bool(fm) and forms is not None and all(fm[k] & forms or k in forms for k in fm)
+
+
+def data_sentences(text: str, sources: list[Any] | None) -> str:
+    """The text with the sentences that cite a chunk of the course materials (not graded work) and carry only numbers
+    that chunk prints blanked: a worked example or a constant quoted from the textbook is data, whatever it equals."""
+    if not sources or not text:
+        return text
+    out, last = [], 0
+    for m in _SENT_SPAN.finditer(text):
+        sent = m.group(0)
+        cites = [int(n) for cm in _CITE_RX.finditer(sent) for n in re.findall(r"\d+", cm.group(1))]
+        if cites and len(sent.split()) >= 4:
+            body = _CITE_RX.sub(" ", sent)
+            fm = forms_map(strip_constants(body))
+            forms = [f for f in (_source_forms(sources, n) for n in cites) if f is not None]
+            if fm and forms and all(any(fm[k] & f or k in f for f in forms) for k in fm):
+                out.append(text[last:m.start()])
+                out.append(re.sub(r"[^\s]", " ", sent))  # same length, so nothing shifts
+                last = m.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _source_data(sources: list[Any] | None) -> set[str]:
+    """Constants (molar masses) that the cited non-graded chunks print."""
+    out: set[str] = set()
+    for src in sources or []:
+        if isinstance(src, dict) and not src.get("graded"):
+            out |= given_constants(src.get("text") or "")
+    return out
+
+
+def item_data(store, it: dict[str, Any]) -> set[str]:
+    """Data constants the item or its handout prints (a molar mass listed under Materials): free in cards and guides."""
+    out = given_constants(it.get("body") or "")
+    mid = it.get("material_id")
+    if mid:
+        try:
+            out |= given_constants(_material_text(store, int(mid)))
+        except Exception:
+            pass
+    return out
+
+
+_QUANTITY = {"multiplier": r"[lm]\d\d", "pivot": r"u(\d)\1|p\d", "eigenvalue": r"(?:lambda|lam|ev|e)\d*"}
+_QTY_LIST = re.compile(r"\b(multipliers?|pivots?|eigenvalues?)\b[^.?!\n]{0,40}?(?:\bare\b|\bis\b|=|:|\bwere\b|\bcome\s+out\s+(?:to|as)\b|\bturn\s+out\s+to\s+be\b)"
+                       r"\s*((?:-?\d[\d./]*)(?:\s*(?:,|;|\band\b|\s)\s*-?\d[\d./]*)+)", re.I)
+
+
+def quantity_list_leak(text: str, item: dict[str, Any] | None) -> bool:
+    """A prose list of an item's own intermediate values under the name of the quantity ('The multipliers are 2, -1, -1',
+    'the pivots are 3, 1 and 3'): the numbers, in the key's order, of the key entries that quantity names."""
+    if not item or not (text or "").strip():
+        return False
+    names = key_names(item)
+    for m in _QTY_LIST.finditer(_norm_hay(text)):
+        pat = _QUANTITY.get(m.group(1).lower().rstrip("s"))
+        if not pat:
+            continue
+        keyed = sorted(n for n in names if re.fullmatch(pat, n))
+        vals = [_canon(v) for k in keyed for v in [(_KeyVal(names[k][0]).nums or [""])[0]] if v]
+        listed = [_canon(v) for v in re.findall(r"-?\d[\d./]*", m.group(2))]
+        if len(vals) >= 2 and len(listed) == len(vals) and all(num_eq(a, b) for a, b in zip(listed, vals)) \
+                and (len(vals) >= 3 or any(v not in _TRIV for v in vals)):
+            return True
+    return False
+
+
+def _text_key_item(items: list[dict[str, Any]], whole: str, text: str, data: dict[Any, set[str]] | None = None) -> dict[str, Any] | None:
     """A saved guide or card: key values judged as named (distinctive values, whole matrices and vectors, number words),
-    small values only when the text is about the item (it names it or shares its concept words)."""
+    small values only when the text is about the item (it names it or shares its concept words). data: constants that are
+    free for every item ('*') or for one item (its id): a molar mass is data, never a key value."""
     best, top = None, 0
     for it in items:
         if not item_key(it):
             continue
         about = touches(whole, it) or len(text.split()) <= 15
-        n = len(_kl(text, it, {"named": True, "guide": True, "small": about, "bare_vec": True}))
-        if not n and (bare_vec_leak(text, it, sentences=True) or (about and named_value_leak(text, it))):
-            n = 1  # 'The solution is (1, 1, 2)', 'd = 11 makes the system singular'
+        free = set((data or {}).get("*", ())) | set((data or {}).get(it.get("id"), ()))
+        ctx = {"named": True, "guide": True, "small": about, "bare_vec": True}
+        if free:
+            ctx["data"] = sorted(free)
+        n = len(_kl(text, it, ctx))
+        if not n and (bare_vec_leak(text, it, sentences=True) or (about and named_value_leak(text, it)) or quantity_list_leak(text, it)):
+            n = 1  # 'The solution is (1, 1, 2)', 'd = 11 makes the system singular', 'The multipliers are 2, -1, -1'
         if n > top:
             best, top = it, n
     return best
@@ -3898,13 +4046,28 @@ def pure_conversion(text: str) -> bool:
     return found and not re.search(r"\d", _CONV_PAIR.sub(" ", t))
 
 
-def check_guide(store, course_id: int, title: str, body: str, n_cites: int | None = None) -> dict | None:
+_VEC_FRAGMENT = re.compile(r"[=:]\s*[(\[<]\s*-?[\d./]+(?:\s*[,;]\s*-?[\d./]+){2,}\s*[)\]>]")
+
+
+def _data_map(store, items: list[dict[str, Any]], sources: list[Any] | None) -> dict[Any, set[str]]:
+    out: dict[Any, set[str]] = {"*": _source_data(sources)}
+    for it in items:
+        out[it.get("id")] = item_data(store, it)
+    return out
+
+
+def check_guide(store, course_id: int, title: str, body: str, n_cites: int | None = None, sources: list[Any] | None = None) -> dict | None:
     """The graded item a guide saved by the AI app works or gives away, or None. Every item's answer key is checked
     against the whole body however long it is, then the stricter no-key rules (a labelled answer, a bare final answer,
-    a fragment, a translation, an essay outline or prose). The hit carries `sentence`, the sentence that collided."""
+    a fragment, a translation, an essay outline or prose). The hit carries `sentence`, the sentence that collided.
+    sources: the cited chunks in order ({text, graded}): a sentence that cites a chunk of the course materials (not
+    graded work) and states only numbers that chunk prints is data, and the constants those chunks and the item's own
+    handout print (a molar mass) are free."""
     items = graded_view(store, course_id)
     if not items:
         return None
+    body = data_sentences(body or "", sources)
+    data = _data_map(store, items, sources)
     clean = _CITE_STRIP.sub("", body or "", n_cites)
 
     def out(it, reason):
@@ -3912,10 +4075,10 @@ def check_guide(store, course_id: int, title: str, body: str, n_cites: int | Non
         h["sentence"] = colliding_sentence(it, body or "")
         return h
 
-    k = _text_key_item(items, f"{title}\n{body or ''}", clean) or _text_key_item(items, f"{title}\n{body or ''}", body or "")
+    k = _text_key_item(items, f"{title}\n{body or ''}", clean, data) or _text_key_item(items, f"{title}\n{body or ''}", body or "", data)
     if k:
         return out(k, "key")
-    hit = check_reply(store, course_id, title, body, n_cites=n_cites)
+    hit = check_reply(store, course_id, title, body, n_cites=n_cites, data=data)
     if hit:
         return out(hit, hit.get("reason", "reply"))
     r = _Text(clean)
@@ -3937,10 +4100,18 @@ def check_guide(store, course_id: int, title: str, body: str, n_cites: int | Non
     has_math = bool(re.search(r"\d", clean)) and bool(re.search(r"[=≈]|\d\s*(?:ml|l|g|kg|mg|mol|mmol)\b", clean, re.I)
                                                      or r.mrows or matrix_rows(clean)) \
         or bool(matrix_rows(body or ""))  # cite stripping eats small-number rows like [3,1,0]; read the raw body too
-    topical = [it for it in nokey if len(content_tokens(clean) & _Text(it["body"]).tok) >= 1]
+    # an item with no key is never refused on numbers alone: the text must share a content word of the item that is not a
+    # method word ('molarity', 'mass'), and the refusal names the item that shares the most
+    def _topic_words(it):
+        return (content_tokens(f"{title}\n{clean}") & _Text(it["body"]).tok) - METHOD_WORDS
+    topical = [it for it in nokey if _topic_words(it) or _names_by_words(f"{title}\n{clean}", it)]
     wc = _prose_word_count(clean)
-    if nokey and wc <= 14 and not pure_conversion(clean) and ((has_math and (wc <= 4 or topical or not english)) or (topical and bool(numbers(clean)))):
-        return out((topical or nokey)[0], "answer_only")
+    free_all = set(data["*"]).union(*(data.get(it.get("id"), set()) for it in topical)) | given_constants(clean)
+    if nokey and not topical and wc <= 4 and not pure_conversion(clean) and (r.mrows or matrix_rows(clean) or _VEC_FRAGMENT.search(clean)):
+        topical = nokey  # a bare matrix, vector or equation fragment, with no prose at all: an answer fragment for the closest item
+    if topical and wc <= 14 and not pure_conversion(clean) and any(n not in free_all for n in numbers(clean)) \
+            and (has_math or bool(numbers(clean))):
+        return out(max(topical, key=lambda it: (len(_topic_words(it)), _closeness(r, it, _Text(it["body"])))), "answer_only")
     # an answer given in another language: numbers or topic words of a graded item inside a non-English body
     if not english:
         for it in problems + essays:
@@ -3961,12 +4132,18 @@ def _front_letters(it: dict[str, Any], front: str) -> set[str]:
     return {w.lower() for w in words if w.lower() in keyed and w.lower() not in ("a", "i")}
 
 
-def check_card(store, course_id: int, front: str, back: str) -> dict | None:
+def check_card(store, course_id: int, front: str, back: str, source: dict[str, Any] | None = None) -> dict | None:
     """The graded item a flashcard gives away: one of its answer-key values, or its own numbers in the card (worked or
-    not). Cards are short, so unlike check_guide this does not treat a brief back as an answer fragment."""
+    not). Cards are short, so unlike check_guide this does not treat a brief back as an answer fragment. source: the
+    chunk the card cites ({text, graded}): a card whose numbers that chunk prints (not graded work) is data, and the
+    constants it and the item's own handout print (a molar mass) are free."""
     text = f"{front}\n{back}"
     items = graded_view(store, course_id)
-    k = _text_key_item(items, text, text) or _text_key_item(items, text, f"{front} = {back}")
+    srcs = [source] if source else None
+    if srcs and _all_in_source(text, srcs[0]):
+        return None  # every number on the card is printed in the course material it cites
+    data = _data_map(store, items, srcs)
+    k = _text_key_item(items, text, text, data) or _text_key_item(items, text, f"{front} = {back}", data)
     if k:
         return _hit(k, "key")
     for it in items:  # 'x3 -> 2', 'l21 -> 2', 'd for problem 1 -> ten': the front names an unknown, the back is its value
@@ -3977,14 +4154,15 @@ def check_card(store, course_id: int, front: str, back: str) -> dict | None:
                 return _hit(it, "key")
     for it in items:  # 'd for problem 1 -> ten', 'carbon atoms in the formula -> 3': a bare value of the item's own entries
         if item_key(it) and len(back.split()) <= 3 and touches(text, it):
-            vals = {e.val for e in _index(it).entries if e.val not in _index(it).given}
+            free = data["*"] | data.get(it.get("id"), set())
+            vals = {e.val for e in _index(it).entries if e.val not in _index(it).given and e.val not in free}
             if any(num_eq(a, b) for a in _reply_numbers(back) for b in vals) and not pure_conversion(text):
                 return _hit(it, "key")
     for it in items:  # 'Problem 3 answer vector' -> '(1, 1, 2)': the front names the item or asks for a solution
         if item_key(it) and len(back.split()) <= 12 and (names_item(front, it) or (_SOLN_WORD.search(front) and touches(text, it))
                                                          or _front_letters(it, front)) and bare_vec_leak(back, it, front):
             return _hit(it, "key")
-    hit = check_reply(store, course_id, front, text)
+    hit = check_reply(store, course_id, front, text, data=data)
     if hit:
         return hit
     for it in items:
