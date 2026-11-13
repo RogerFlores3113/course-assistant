@@ -2200,6 +2200,13 @@ def _assignment_sources(store, graded: dict, limit_chars: int = 6000) -> list[di
         mids = [graded["material_id"]]
     out: list[dict] = []
     total = 0
+    if not mids and (graded.get("body") or "").strip():
+        # an essay added by hand with a pasted prompt: the item's own text is source 1 (prompt and rubric)
+        iid = graded.get("id") or 0
+        return [{"chunk_id": 0, "material_id": 0, "material_title": (graded.get("title") or "Assignment").strip(),
+                 "material_kind": "assignment", "loc_kind": "", "loc_start": 0, "loc_label": "prompt and rubric",
+                 "heading": "", "text": graded["body"].strip()[:limit_chars],
+                 "href": f"/graded/{iid}/edit" if iid else "", "score": 1.0}]
     for mid in mids[:2]:
         siblings = [i for i in store.graded_items(graded.get("course_id") or (store.material(mid) or {}).get("course_id") or 0)
                     if i.get("material_id") == mid]
@@ -2590,6 +2597,9 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     answer.routing_note = note_line
     excerpt = " ".join(problem_text.split())
     excerpt = excerpt if len(excerpt) <= 300 else excerpt[:297] + "..."
+    if feedback and any((b.md or "").startswith(essay.FEEDBACK_FAILED) for b in blocks):
+        answer.guide_id = None  # a failed essay turn saves no guide: nothing worth keeping
+        return answer
     answer.guide_id = store.add_guide(
         course_id, "twin", guide_title[:90], answer.body_md,
         sources=grounding.source_rows(sources, used),

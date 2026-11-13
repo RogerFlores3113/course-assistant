@@ -1505,10 +1505,13 @@ def make_flashcards(store: Store, course_id: int, provider, *, material_id: int 
     only = (" These sources are a graded essay assignment: make cards about concepts, key terms, requirements and what the "
             "rubric rewards only. Never write a thesis, a position on the essay question, an argument or a conclusion for "
             "the essay." if concept_only else "")
-    user = (f"Make up to {count} study flashcards from these sources. Cover the main concepts, definitions, formulas and "
-            "procedures, and spread the cards across the sources: at most 2 cards from one source. Reply with ONLY a "
+    math = has_math(store, course_id)
+    cover = ("the main concepts, definitions, formulas and procedures" if math else
+             "the key terms, people, events, ideas and arguments in the readings")
+    user = (f"Make up to {count} study flashcards from these sources. Cover {cover}, and spread the cards across the "
+            "sources: at most 2 cards from one source. Reply with ONLY a "
             "JSON list: [{\"front\":\"question or term\",\"back\":\"short answer\",\"cite\":1}]. One idea per card, "
-            "backs under 40 words, math as $...$, cite is the single source number the answer comes from. Skip anything "
+            f"backs under 40 words, {'math as $...$, ' if math else ''}cite is the single source number the answer comes from. Skip anything "
             f"the sources do not support.{only}\n\nSOURCES\n\n{_sources_block(sources)}")
     cards, _ = _ask_json(provider, _system(store, course_id), user, list)
     res = FlashcardResult()
