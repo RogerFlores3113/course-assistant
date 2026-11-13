@@ -11,7 +11,7 @@ from course_assistant.store import Store
 FIX = Path(__file__).parent / "fixtures" / "import"
 P1 = ("How many grams of sodium chloride (NaCl, molar mass 58.44 g/mol) are needed to prepare 250.0 mL of a "
       "0.350 M NaCl solution?")
-LA_P3 = ("Let A be the 3 by 3 matrix with rows (2, 1, 1), (4, -6, 0), (-2, 7, 2), and let b = (5, -2, 9). "
+LA_P3 = ("Let A be the 3 by 3 matrix with rows (1, 2, 1), (3, 8, 1), (0, 4, 1), and let b = (2, 12, 2). "
          "Find the factorization A = LU and then solve Ax = b.")
 
 
@@ -104,7 +104,7 @@ TWIN_APPEND = TWIN_OK.replace("Apply these steps", "For your own problem the res
 
 
 def test_twin_that_appends_original_result_is_rejected():
-    assert integrity.reveals_original("For your own problem the result is d = 10, x = -3/2.")
+    assert integrity.reveals_original("For your own problem the result is d = 4, x = -1/2.")
     s, c, m = course()
     g = integrity.match_graded(s, c, P1)
     a = integrity.twin(s, c, P1, FakeProvider([TWIN_APPEND, TWIN_APPEND, "concepts [1]"]), g)
@@ -129,7 +129,7 @@ def test_check_my_answer_never_confirms_and_routes_to_twin():
 
 def test_check_answer_without_problem_numbers_matches_item():
     s, c, m = course()
-    g = integrity.match_graded(s, c, "Check my answer: for my LU problem I got x=(1,1,2). Right?")
+    g = integrity.match_graded(s, c, "Check my answer: for my LU problem I got x=(2,1,-2). Right?")
     assert g and g["label"] == "Problem 3"
     g = integrity.match_graded(s, c, "My empirical formula came out C3H4O3 - confirm?")
     assert g and g["label"] == "Problem 2"
@@ -288,12 +288,12 @@ def mcp(monkeypatch):
 
 
 @pytest.mark.parametrize("body", [
-    "x = (1, 1, 2)",
-    "Problem 1: d = 10 forces a row exchange, then z = -2, y = 1, x = -3/2 [1].",
+    "x = (2, 1, -2)",
+    "Problem 1: d = 4 forces a row exchange, then z = 3/2, y = 5/2, x = -1/2 [1].",
     "You need 5.11 g of NaCl",
-    "L = [[1,0,0],[2,1,0],[-1,-1,1]]",
-    "d = 10 forces the exchange, d = 11 is singular",
-    "Pour le probleme 1 : on echange les lignes quand d = 10, puis z = -2, y = 1, x = -3/2, avec 5, 4 et 3 comme coefficients.",
+    "L = [[1,0,0],[3,1,0],[0,2,1]]",
+    "d = 4 forces the exchange, d = 14/3 is singular",
+    "Pour le probleme 1 : on echange les lignes quand d = 4, puis z = 3/2, y = 5/2, x = -1/2, avec 3, 2 et 6 comme coefficients.",
 ])
 @pytest.mark.parametrize("kind", ["answer", "explain", "practice"])
 def test_save_guide_refuses_answer_fragments(mcp, body, kind):
@@ -323,7 +323,7 @@ def test_save_guide_still_saves_a_real_concept_guide(mcp):
 
 def test_get_twin_instructions_matches_check_my_answer(mcp):
     s, c, m = mcp
-    r = mcp_server.get_twin_instructions(c, "Check my answer: for my LU problem I got x=(1,1,2). Right?")
+    r = mcp_server.get_twin_instructions(c, "Check my answer: for my LU problem I got x=(2,1,-2). Right?")
     assert r.startswith("GRADED") and "check their method" in r
 
 

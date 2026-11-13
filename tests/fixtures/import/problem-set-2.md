@@ -1,15 +1,15 @@
 # MATH 2210 Problem Set 2: Elimination and LU Factorization
 
-**Due Thursday September 17, 2026 at 11:59 pm.** Total: 60 points. Write up your own solution and list your collaborators. Problems 1 and 3 are adapted from MIT 18.06 Fall 2018 pset 1 (S. G. Johnson) and Strang, section 2.2.
+**Due Thursday September 17, 2026 at 11:59 pm.** Total: 60 points. Write up your own solution and list your collaborators.
 
 ## Problem 1 (15 points)
 
 Consider Gaussian elimination on the following system of equations.
 
 ```
-2x + 5y +  z = 0
-4x + dy +  z = 2
-     y  -  z = 3
+3x + 2y +  z = 5
+6x + dy + 4z = 13
+     y + 3z = 7
 ```
 
 (a) What number d forces you to do a row exchange during elimination, and what non-singular triangular system do you obtain for that d?
@@ -30,12 +30,12 @@ Solve both A x1 = b1 and A x2 = b2 at once by forming the augmented matrix [A | 
 
 ## Problem 3 (20 points)
 
-Let A be the 3 by 3 matrix with rows (2, 1, 1), (4, -6, 0), (-2, 7, 2), and let b = (5, -2, 9) as a column vector.
+Let A be the 3 by 3 matrix with rows (1, 2, 1), (3, 8, 1), (0, 4, 1), and let b = (2, 12, 2) as a column vector.
 
 ```
-A = [  2  1  1 ]     b = [  5 ]
-    [  4 -6  0 ]         [ -2 ]
-    [ -2  7  2 ]         [  9 ]
+A = [  1  2  1 ]     b = [  2 ]
+    [  3  8  1 ]         [ 12 ]
+    [  0  4  1 ]         [  2 ]
 ```
 
 (a) Find the factorization A = LU, with L lower triangular with ones on the diagonal and U upper triangular.

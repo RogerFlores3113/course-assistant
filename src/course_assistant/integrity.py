@@ -1356,7 +1356,8 @@ def check_guide(store, course_id: int, title: str, body: str) -> dict | None:
             return _hit(it, "guide")
     # a short body that is only results: final answers, one matrix, one vector, a number with a unit
     has_math = bool(re.search(r"\d", clean)) and bool(re.search(r"[=\u2248]|\d\s*(?:ml|l|g|kg|mg|mol|mmol)\b", clean, re.I)
-                                                     or r.mrows or matrix_rows(clean))
+                                                     or r.mrows or matrix_rows(clean)) \
+        or bool(matrix_rows(body or ""))  # cite stripping eats small-number rows like [3,1,0]; read the raw body too
     topical = [it for it in problems if len(content_tokens(clean) & _Text(it["body"]).tok) >= 1]
     if problems and _prose_word_count(clean) <= 14 and (has_math or (topical and bool(numbers(clean)))):
         return _hit((topical or problems)[0], "answer_only")
