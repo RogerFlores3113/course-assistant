@@ -36,6 +36,32 @@ def reading_kind() -> str:
     return "reading" if "reading" in MATERIAL_KINDS else "handout"
 
 
+def lecture_notes_kind() -> str:
+    """The kind for the instructor's own lecture notes or notebooks: "lecture_notes" when the store has it, else
+    "reading" (course material that is not the student's own "My notes")."""
+    from ..store import MATERIAL_KINDS
+
+    return "lecture_notes" if "lecture_notes" in MATERIAL_KINDS else "reading"
+
+
+# notes the instructor wrote (a converted lecture notebook, 'lecture notes' in the header) versus the student's own
+_INSTRUCTOR_CUES = re.compile(r"lecture notebook|pluto notebook|jupyter notebook|\.ipynb|lecture notes|"
+                              r"<!--\s*source:|converted to markdown|lecture summaries", re.I)
+_STUDENT_CUES = re.compile(r"\bmy (own )?notes\b|\bTODO\b|\bsorry\b|\bi think\b|\bprof said\b|\bidk\b|\?\?|"
+                           r"\bunfinished\b|\bhalf-?done\b|\bmess\b|\bnot sure\b", re.I)
+
+
+def notes_kind(filename: str, text_sample: str = "") -> str:
+    """'notes' (the student's own) or the instructor's lecture notes kind, for a file that is some kind of notes."""
+    name = Path(filename or "").stem.lower()
+    sample = (text_sample or "")[:1500]
+    if re.search(r"\bmy\b|cheat|half|todo|unfinished|mine", name) or _STUDENT_CUES.search(sample):
+        return "notes"
+    if _INSTRUCTOR_CUES.search(sample):
+        return lecture_notes_kind()
+    return "notes"
+
+
 def _term_year(term: str) -> str:
     m = re.search(r"(?:19|20)\d{2}", term or "")
     return m.group() if m else ""
@@ -71,11 +97,11 @@ def detect_kind(filename: str, text_sample: str = "", term: str = "") -> str:
     if has("slides", "slide", "deck"):
         return "slides"
     if has("notes", "my notes", "cheatsheet", "cheat sheet"):
-        return "notes"
+        return notes_kind(filename, text_sample)
     if has("lecture", "lec") or re.search(r"\blec\s*\d+", joined):
         if ext in AUDIO_VIDEO | CAPTIONS:
             return "recording"
-        return "notes" if ext in {".md", ".txt", ".docx", ".html", ".htm"} else "slides"
+        return notes_kind(filename, text_sample) if ext in {".md", ".txt", ".docx", ".html", ".htm"} else "slides"
     if has("textbook", "chapter", "book") or re.search(r"\bch\s*\d+", joined):
         return "textbook"
     if has("reading"):
@@ -91,11 +117,11 @@ def detect_kind(filename: str, text_sample: str = "", term: str = "") -> str:
         if re.match(r"\s*(chapter|ch\.)\s*\d+\s*(?:[:.\-\u2013\u2014](?!\d)|\n)", head):
             return "textbook"
         if re.match(r"\s*(lecture|lec\.|week)\s*\d+\s*(?:[:.\-\u2013\u2014](?!\d)|\n|$)", head):
-            return "notes" if ext in {".md", ".txt", ".docx", ".html", ".htm"} else "slides"
+            return notes_kind(filename, text_sample) if ext in {".md", ".txt", ".docx", ".html", ".htm"} else "slides"
         if re.search(r"(?m)^\W*#*\s*(lecture|week)\s*\d{1,2}\b", sample) and ext in _TEXT_EXT:
-            return "notes"
+            return notes_kind(filename, text_sample)
         if re.search(r"lecture notebook|pluto notebook|jupyter notebook|\.ipynb|lecture notes", sample[:600]):
-            return "notes"
+            return notes_kind(filename, text_sample)
         if re.match(r"\s*(federalist|the federalist)\b", sample) or re.search(
                 r"(?m)^\s*(federalist|letter|speech|address)\b.{0,12}\bno\.?\s*\d+", sample[:600]):
             return reading_kind()
@@ -277,7 +303,84 @@ def _mark_duplicate(store: Store, material_id: int) -> int | None:
     dup = find_duplicate(store, m["course_id"], material_id)
     if dup != m.get("duplicate_of"):
         store.update_material(material_id, duplicate_of=dup)
+    if dup:
+        pair_copies(store, material_id)
     return dup
+
+
+# ------------------------------------------------------------------ a file saved twice (.md and .pdf): one citation
+_PAGE_SUFFIX = re.compile(r"(?:,\s*|\s*\()pp?\.\s*\d+(?:\s*(?:to|-)\s*\d+)?\)?$")
+_PDF_PAGE_NOTE = re.compile(r"^p\. \d+(?:, .*)?$")
+
+
+def _is_pdf(m: dict[str, Any]) -> bool:
+    return str(m.get("original_name") or m.get("filename") or "").lower().endswith(".pdf")
+
+
+def _plain_key(t: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (t or "").lower())
+
+
+def pair_copies(store: Store, material_id: int) -> None:
+    """When a file is saved as both a PDF and something else (a .md chapter), make the one that is searched cite like
+    the pair: the PDF takes the other copy's title, a .md citation shows the PDF pages its section is on ('Shays'
+    Rebellion, pp. 15 to 16'), and a PDF citation shows the section heading ('p. 16, Shays' Rebellion')."""
+    m = store.material(material_id)
+    if not m:
+        return
+    other_id = m.get("duplicate_of")
+    if not other_id:
+        twins = [x for x in store.materials(m["course_id"]) if x.get("duplicate_of") == material_id]
+        if not twins:
+            return
+        other_id = twins[0]["id"]
+    other = store.material(int(other_id))
+    if not other or _is_pdf(m) == _is_pdf(other):
+        return
+    pdf, txt = (m, other) if _is_pdf(m) else (other, m)
+    if pdf["title"] != txt["title"] and _plain_key(pdf["title"]) in {
+            _plain_key(_pretty_title(pdf.get("original_name") or "")), _plain_key(Path(pdf.get("original_name") or "").stem)}:
+        store.update_material(pdf["id"], title=txt["title"])  # a file name turned into a title: the copy's is better
+    searched = pdf if not pdf.get("duplicate_of") else txt
+    pages = [c for c in store.chunks_of(pdf["id"]) if c["loc_kind"] == "page"]
+    sections = [c for c in store.chunks_of(txt["id"]) if c["loc_kind"] == "section"]
+    if not pages or not sections:
+        return
+    owner: dict[int, int] = {}
+    for c in pages:
+        for sh in _shingles(c["text"]):
+            owner[sh] = -1 if owner.get(sh, int(c["loc_start"])) != int(c["loc_start"]) else int(c["loc_start"])
+    page_text = {int(c["loc_start"]): c for c in pages}
+    best_section: dict[int, tuple[int, str]] = {}  # page -> (hits, section label)
+    ranges: dict[int, tuple[int, int]] = {}
+    for sec in sections:
+        shs = _shingles(sec["text"])
+        counts: dict[int, int] = {}
+        for sh in shs:
+            pg = owner.get(sh, -1)
+            if pg >= 0:
+                counts[pg] = counts.get(pg, 0) + 1
+        keep = [pg for pg, n in counts.items() if n >= max(3, 0.1 * len(shs))]
+        if keep:
+            ranges[sec["id"]] = (min(keep), max(keep))
+        for pg, n in counts.items():
+            if n >= 3 and n > best_section.get(pg, (0, ""))[0]:
+                best_section[pg] = (n, re.sub(_PAGE_SUFFIX, "", sec["loc_label"]))
+    if searched["id"] == txt["id"]:
+        for sec in sections:
+            rng = ranges.get(sec["id"])
+            if not rng:
+                continue
+            base = re.sub(_PAGE_SUFFIX, "", sec["loc_label"])
+            label = f"{base}, p. {rng[0]}" if rng[0] == rng[1] else f"{base}, pp. {rng[0]} to {rng[1]}"
+            if label != sec["loc_label"]:
+                store._exec("UPDATE chunks SET loc_label = ? WHERE id = ?", (label, sec["id"]))
+    else:
+        for pg, c in page_text.items():
+            sec = best_section.get(pg)
+            label = f"p. {pg}, {sec[1]}" if sec else f"p. {pg}"
+            if label != c["loc_label"] and (_PDF_PAGE_NOTE.match(c["loc_label"]) or not c["loc_label"]):
+                store._exec("UPDATE chunks SET loc_label = ? WHERE id = ?", (label, c["id"]))
 
 
 def keep_copy(store: Store, material_id: int) -> int | None:
@@ -306,6 +409,7 @@ def keep_copy(store: Store, material_id: int) -> int | None:
         moved["lecture_date"] = orig["lecture_date"]
     if moved:
         store.update_material(material_id, **moved)
+    pair_copies(store, orig_id)  # the copy now searched cites with the pair's labels
     return orig_id
 
 
@@ -315,7 +419,7 @@ _LECTURE_PREFIX = re.compile(r"^\W*(?:lecture|lec\.?|class|session|week|wk\.?)\s
 _TOPIC_STOP = {"intro", "introduction", "notes", "note", "lecture", "lectures", "slides", "slide", "captions", "caption",
                "summary", "summaries", "the", "and", "of", "for", "to", "in", "on", "a", "an", "week", "class", "part",
                "recording", "video", "audio", "handout", "chapter", "fall", "spring", "my", "with", "how", "is", "are"}
-_LINKABLE = {"slides", "recording", "notes", "handout", "other", "website", "reading"}
+_LINKABLE = {"slides", "recording", "notes", "lecture_notes", "handout", "other", "website", "reading"}
 
 
 def _stem(w: str) -> str:

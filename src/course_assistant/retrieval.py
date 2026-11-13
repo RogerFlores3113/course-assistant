@@ -303,6 +303,8 @@ scheduled calendar date dates deadline deadlines due when policy policies late p
 percent points syllabus attendance office hours textbook required extension cutoff cutoffs""".split())
 _DATE_WORDS = frozenset("when date dates deadline deadlines due schedule scheduled calendar day days time".split())
 _PRACTICE_WORDS = frozenset("exercise exercises practice homework drill drills".split())
+_ASSIGN_WORDS = frozenset("""problem problems set sets pset psets homework hw assignment assignments graded
+question questions""".split())
 _OVERVIEW_WORDS = frozenset("overview introduction intro summary preface outline objectives".split())
 _GENERIC_TOPIC = frozenset("""offering offerings term semester year course class lecture lectures week the
 past previous last""".split())
@@ -383,6 +385,7 @@ def query_intent(query: str, nq: dict[str, Any] | None = None) -> dict[str, Any]
     return {
         "admin": admin, "date": date,
         "practice": bool(toks & _PRACTICE_WORDS),
+        "assignment": bool(toks & _ASSIGN_WORDS) or bool(tstems & _stems(_ASSIGN_WORDS)),
         "overview": bool(toks & _OVERVIEW_WORDS),
         "define": bool(_DEFINE_Q.search(query or "")) or _bare_topic(query or "", tstems),
         "main_arg": bool(_MAIN_ARG.search(query or "")),
@@ -911,7 +914,9 @@ def _search_lane(store, course_id: int, query: str, intent: dict[str, Any], extr
         if not intent["admin"] and _is_admin_chunk(r):
             score -= 1.5  # schedule, grading and exam chunks answer questions about dates and grades
         if not intent["overview"] and _is_intro_chunk(r):
-            score -= 1.5
+            score -= 2.5
+        if r["material_kind"] == "assignment" and not intent["assignment"]:
+            score -= 3.0  # problem sets are graded work: a lecture primer or an explanation is not drawn from them
         if not intent["practice"] and _is_exercise_chunk(r):
             score -= 2.5
         if is_title_only(r["text"], r["heading"]) and not titles.get(r["material_id"]) == 1.0:
