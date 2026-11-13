@@ -600,7 +600,9 @@ def _inline_outside(raw: str) -> str:
         phrase = _strip_cites(inner).strip()
         if _says_gap_phrase(phrase):
             return phrase  # "the sources do not say X" is not outside knowledge: plain words, no tag
-        return f"{OUTSIDE_OPEN}{phrase}{OUTSIDE_CLOSE}"
+        # every sentence of the span carries its own label, so no marker ever has to cross a sentence or block edge
+        sents = _sentences(phrase) if "$" not in phrase else [phrase]
+        return " ".join(f"{OUTSIDE_OPEN}{x.strip()}{OUTSIDE_CLOSE}" for x in sents if x.strip()) or phrase
     return _OUTSIDE.sub(repl, raw)
 
 

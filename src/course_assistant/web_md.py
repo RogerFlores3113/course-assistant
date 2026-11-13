@@ -223,6 +223,9 @@ def _table(lines: list[str], i: int, sources) -> tuple[str, int]:
             f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>"), i
 
 
+_STEP_RE = re.compile(r"^\s*(?:\*\*|__)?Step\s+\d+\s*(?:[.:)]|\*\*)", re.I)
+
+
 def _is_mathy(line: str) -> bool:
     return "=" in line or "$" in line
 
@@ -367,6 +370,8 @@ def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1, state: d
             out.append("<hr>")
             i += 1
             continue
+        if para and _STEP_RE.match(line):  # "Step 1." / "Step 2." on single newlines are separate paragraphs
+            flush()
         para.append(line)
         i += 1
     flush()
