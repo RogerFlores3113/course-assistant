@@ -264,3 +264,20 @@ def test_user_agent_sent():
     f, _ = make(handler, user_agent="TestBot/1")
     f.get("https://example.edu/a")
     assert set(uas) == {"TestBot/1"}
+
+
+def test_private_address_message_is_not_robots():
+    f, _ = make(lambda r: httpx.Response(200, text="hi"), resolver=lambda h, p: ["127.0.0.1"])
+    with pytest.raises(FetchBlocked) as ei:
+        f.get("http://localhost/page")
+    assert ei.value.reason == "private"
+    msg = str(ei.value).lower()
+    assert "private" in msg and "not about the site" in msg
+    assert f.why_blocked("http://localhost/page")[0] == "private"
+
+
+def test_mixed_dns_answer_mentions_rebinding():
+    f, _ = make(lambda r: httpx.Response(200, text="hi"), resolver=lambda h, p: ["93.184.216.34", "10.0.0.5"])
+    with pytest.raises(FetchBlocked) as ei:
+        f.get("http://example.com/")
+    assert "rebinding" in str(ei.value).lower()

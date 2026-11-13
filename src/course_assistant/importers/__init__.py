@@ -16,17 +16,35 @@ from .common import (AUDIO_VIDEO, CAPTIONS, HTML_EXT, IMAGES, MAX_FILE_BYTES, MI
                      ImportError_, slugify)
 from .htmltext import clean_html
 
-__all__ = ["import_file", "import_text", "import_url", "reimport", "detect_kind", "SUPPORTED_EXTENSIONS",
-           "ImportError_"]
+__all__ = ["import_file", "import_text", "import_url", "reimport", "detect_kind", "find_duplicate", "link_to_lecture",
+           "SUPPORTED_EXTENSIONS", "ImportError_"]
 
 _SYLLABUS_WORDS = ("office hours", "grading", "midterm", "final exam", "prerequisite", "late policy",
                    "academic integrity", "course schedule", "learning outcomes", "course description",
                    "teaching assistant", "grade breakdown", "attendance policy", "textbook", "required reading")
+_TEXT_EXT = {".md", ".txt", ".pdf", ".docx", ".html", ".htm", ".epub"}
+# a name that says nothing about the content: the first heading of the file is a better title
+_GENERIC_NAMES = re.compile(r"^(syllabus|notes?|my notes|untitled|document|doc|scan|scanned|img|image|photo|picture|file|"
+                            r"handout|lecture|slides?|reading|readings|download|copy|new|page|text|paste|pasted)"
+                            r"([\s_-]*\(?\d+\)?)?$|^(img|scan|dsc|screenshot|image|photo)[\s_-]*\d+", re.I)
+
+
+def reading_kind() -> str:
+    """The kind for a primary source or reading: "reading" when the store has it, else "handout"."""
+    from ..store import MATERIAL_KINDS
+
+    return "reading" if "reading" in MATERIAL_KINDS else "handout"
+
+
+def _term_year(term: str) -> str:
+    m = re.search(r"(?:19|20)\d{2}", term or "")
+    return m.group() if m else ""
 
 
 # ------------------------------------------------------------------ kind detection
-def detect_kind(filename: str, text_sample: str = "") -> str:
-    """Guess a material kind from the file name, then from the first words of its text."""
+def detect_kind(filename: str, text_sample: str = "", term: str = "") -> str:
+    """Guess a material kind from the file name, then from the first words of its text. `term` ("Fall 2026")
+    lets a file named for an earlier term be recognised as a past offering."""
     name = Path(filename or "").name.lower()
     stem, ext = Path(name).stem, Path(name).suffix
     tokens = [t for t in re.split(r"[^a-z0-9]+", stem) if t]
@@ -41,6 +59,13 @@ def detect_kind(filename: str, text_sample: str = "") -> str:
 
     if has("syllabus", "course outline", "course info"):
         return "syllabus"
+    past = re.search(r"\b(fall|spring|summer|winter)\s*((?:19|20)\d{2})\b", joined)
+    if past and (not term or past.group(2) != _term_year(term) or "past" in tokens):
+        return "past_offering"
+    if has("past offering", "previous offering", "past offerings", "old exams", "past exams"):
+        return "past_offering"
+    if has("handout", "handouts"):
+        return "handout"
     if hw_name():
         return "assignment"
     if has("slides", "slide", "deck"):
@@ -48,11 +73,13 @@ def detect_kind(filename: str, text_sample: str = "") -> str:
     if has("notes", "my notes", "cheatsheet", "cheat sheet"):
         return "notes"
     if has("lecture", "lec") or re.search(r"\blec\s*\d+", joined):
-        return "recording" if ext in AUDIO_VIDEO | CAPTIONS else "slides"
+        if ext in AUDIO_VIDEO | CAPTIONS:
+            return "recording"
+        return "notes" if ext in {".md", ".txt", ".docx", ".html", ".htm"} else "slides"
     if has("textbook", "chapter", "book") or re.search(r"\bch\s*\d+", joined):
         return "textbook"
-    if has("handout", "reading", "worksheet"):
-        return "handout"
+    if has("reading"):
+        return reading_kind()
     sample = (text_sample or "")[:4000].lower()
     if sample:
         hits = sum(1 for w in _SYLLABUS_WORDS if w in sample)
@@ -61,10 +88,17 @@ def detect_kind(filename: str, text_sample: str = "") -> str:
         head = sample[:300]
         if re.search(r"\b(problem set|homework|assignment|pset)\s*#?\d*", head) and "due" in sample:
             return "assignment"
-        if re.match(r"\s*(chapter|ch\.)\s*\d+", head):
+        if re.match(r"\s*(chapter|ch\.)\s*\d+\s*(?:[:.\-\u2013\u2014](?!\d)|\n)", head):
             return "textbook"
-        if re.match(r"\s*(lecture|lec\.)\s*\d+", head):
-            return "slides"
+        if re.match(r"\s*(lecture|lec\.|week)\s*\d+\s*(?:[:.\-\u2013\u2014](?!\d)|\n|$)", head):
+            return "notes" if ext in {".md", ".txt", ".docx", ".html", ".htm"} else "slides"
+        if re.search(r"(?m)^\W*#*\s*(lecture|week)\s*\d{1,2}\b", sample) and ext in _TEXT_EXT:
+            return "notes"
+        if re.search(r"lecture notebook|pluto notebook|jupyter notebook|\.ipynb|lecture notes", sample[:600]):
+            return "notes"
+        if re.match(r"\s*(federalist|the federalist)\b", sample) or re.search(
+                r"(?m)^\s*(federalist|letter|speech|address)\b.{0,12}\bno\.?\s*\d+", sample[:600]):
+            return reading_kind()
     if ext == ".pptx":
         return "slides"
     if ext == ".epub":
@@ -72,6 +106,8 @@ def detect_kind(filename: str, text_sample: str = "") -> str:
     if ext in AUDIO_VIDEO or ext in CAPTIONS:
         return "recording"
     if ext in IMAGES:
+        return "notes"
+    if ext in _TEXT_EXT and len((text_sample or "").split()) >= 150:
         return "notes"
     return "other"
 
@@ -85,11 +121,52 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+_NUMBERED = re.compile(r"^(week|lecture|lec|chapter|ch|hw|ps|pset|problem set|lab|ex|exam|quiz|unit|part)[\s_-]*0*(\d+)\b",
+                       re.I)
+_LABELS = {"ch": "Chapter", "lec": "Lecture", "ps": "Problem set", "pset": "Problem set", "hw": "HW", "ex": "Exercise"}
+
+
 def _pretty_title(name: str) -> str:
+    """A readable title from a file name: "week-04-seam-carving.md" -> "Week 4 seam carving"."""
     stem = Path(name).stem
     stem = re.sub(r"[_]+", " ", stem)
     stem = re.sub(r"\s+", " ", stem).strip()
-    return stem or "Untitled"
+    if not stem:
+        return "Untitled"
+    spaced = re.sub(r"(?<=[a-z0-9])[-.](?=[a-z0-9])", " ", stem)
+    spaced = re.sub(r"\s+", " ", spaced).strip()
+    m = _NUMBERED.match(spaced)
+    if m:
+        label = _LABELS.get(m.group(1).lower(), m.group(1).capitalize())
+        rest = spaced[m.end():].strip(" -")
+        spaced = f"{label} {int(m.group(2))}" + (f" {rest}" if rest else "")
+    elif "-" in stem or " " not in stem:
+        spaced = spaced[:1].upper() + spaced[1:]
+    return spaced
+
+
+def _clean_title(title: str) -> str:
+    t = extract.strip_markdown(title or "")
+    return t[:150].strip()
+
+
+def _is_generic(name: str) -> bool:
+    return bool(_GENERIC_NAMES.match(Path(name).stem.strip()))
+
+
+def _choose_title(orig: str, meta: dict[str, Any], given: str | None) -> str:
+    """Explicit title, then the document's own title, then (for a name that says nothing) its first heading,
+    then the file name made readable."""
+    if given and given.strip():
+        return _clean_title(given) or given.strip()
+    t = _clean_title(meta.get("title", ""))
+    if t:
+        return t
+    if _is_generic(orig):
+        t = _clean_title(meta.get("first_heading", ""))
+        if t:
+            return t
+    return _pretty_title(orig)
 
 
 def _safe_name(name: str) -> str:
@@ -144,19 +221,160 @@ def _year_hint(store: Store, material: dict[str, Any]) -> int | str | None:
     return None
 
 
+# ------------------------------------------------------------------ near-duplicate materials
+_SHINGLE = 5
+DUP_CONTAINMENT = 0.75    # this much of the smaller text is found in the other
+DUP_JACCARD = 0.5         # and they share a good part of their text both ways
+DUP_PAST_OFFERING = 0.95  # two past offerings of a course (other years) must be almost identical to count
+DUP_SIZE_RATIO = 0.5      # and the two are of a similar size
+DUP_MIN_WORDS = 40
+
+
+def _shingles(text: str) -> set[int]:
+    ws = re.findall(r"[^\W_]+", re.sub(r"\$[^$]*\$", " ", text.lower()))
+    if len(ws) < _SHINGLE:
+        return set()
+    return {hash(tuple(ws[i:i + _SHINGLE])) for i in range(len(ws) - _SHINGLE + 1)}
+
+
+def _material_shingles(store: Store, material_id: int) -> set[int]:
+    return _shingles("\n".join(c["text"] for c in store.chunks_of(material_id)))
+
+
+def find_duplicate(store: Store, course_id: int, material_id: int) -> int | None:
+    """The id of an earlier material in the course whose text is near-identical to this one (a chapter as .md and
+    .pdf, a syllabus as .md and .docx), or None. If that material is itself a copy, the original is returned."""
+    mine = _material_shingles(store, material_id)
+    mine_kind = (store.material(material_id) or {}).get("kind", "")
+    if len(mine) < DUP_MIN_WORDS - _SHINGLE:
+        return None
+    best: tuple[float, int] | None = None
+    for other in store.materials(course_id):
+        oid = int(other["id"])
+        if oid >= material_id:
+            continue
+        theirs = _material_shingles(store, oid)
+        if len(theirs) < DUP_MIN_WORDS - _SHINGLE:
+            continue
+        small, big = sorted((len(mine), len(theirs)))
+        if small / big < DUP_SIZE_RATIO:
+            continue
+        score = len(mine & theirs) / small
+        jaccard = len(mine & theirs) / len(mine | theirs)
+        need = DUP_PAST_OFFERING if other["kind"] == "past_offering" and mine_kind == "past_offering" else DUP_CONTAINMENT
+        if score >= need and jaccard >= DUP_JACCARD and (best is None or score > best[0]):
+            best = (score, oid)
+    if best is None:
+        return None
+    canon = store.material(best[1])
+    return int(canon["duplicate_of"]) if canon and canon.get("duplicate_of") else best[1]
+
+
+def _mark_duplicate(store: Store, material_id: int) -> int | None:
+    m = store.material(material_id)
+    if not m:
+        return None
+    dup = find_duplicate(store, m["course_id"], material_id)
+    if dup != m.get("duplicate_of"):
+        store.update_material(material_id, duplicate_of=dup)
+    return dup
+
+
+# ------------------------------------------------------------------ linking a material to its lecture
+_LECTURE_REF = re.compile(r"(?:lecture|lec|class|session|week|wk)[\s._-]*0*(\d{1,2})(?!\d)", re.I)
+_LECTURE_PREFIX = re.compile(r"^\W*(?:lecture|lec\.?|class|session|week|wk\.?)\s*0*(\d{1,2})\b", re.I)
+_TOPIC_STOP = {"intro", "introduction", "notes", "note", "lecture", "lectures", "slides", "slide", "captions", "caption",
+               "summary", "summaries", "the", "and", "of", "for", "to", "in", "on", "a", "an", "week", "class", "part",
+               "recording", "video", "audio", "handout", "chapter", "fall", "spring", "my", "with", "how", "is", "are"}
+_LINKABLE = {"slides", "recording", "notes", "handout", "other", "website", "reading"}
+
+
+def _stem(w: str) -> str:
+    for suf in ("ization", "ations", "ation", "ings", "ing", "es", "s"):
+        if w.endswith(suf) and len(w) - len(suf) >= 4:
+            return w[:-len(suf)]
+    return w
+
+
+def _topic_tokens(text: str) -> set[str]:
+    return {_stem(w) for w in re.findall(r"[a-z][a-z0-9]+", text.lower()) if w not in _TOPIC_STOP and len(w) > 2}
+
+
+def link_to_lecture(store: Store, material_id: int) -> int | None:
+    """Link a material to the lecture event it belongs to, when its title, file name or first heading names the
+    lecture number, or names the topic of exactly one lecture. Sets materials.event_id and, when the material has
+    no lecture date, lecture_date from the event. Returns the event id, or None when no single lecture fits.
+    A material the student already linked by hand is left alone."""
+    m = store.material(material_id)
+    if not m or m.get("event_id") or m["kind"] not in _LINKABLE:
+        return None
+    lectures = [e for e in store.events(m["course_id"], kinds=["lecture"])]
+    if not lectures:
+        return None
+    first = next((c for c in store.chunks_of(material_id)), None)
+    heading = (first or {}).get("heading", "") if first else ""
+    names = [m["title"], Path(m.get("original_name") or "").stem, heading]
+    event: dict[str, Any] | None = None
+    nums = {int(n) for t in names for n in _LECTURE_REF.findall(t)}
+    if len(nums) == 1:
+        n = nums.pop()
+        hit = [e for e in lectures if (mm := _LECTURE_PREFIX.match(e["title"])) and int(mm.group(1)) == n]
+        if len(hit) == 1:
+            event = hit[0]
+    if event is None:
+        mine: set[str] = set()
+        for t in names[:3]:
+            mine |= _topic_tokens(t)
+        if mine and any(len(t) >= 5 for t in mine):
+            hits = []
+            for e in lectures:
+                topic = re.sub(r"^\W*(?:lecture|lec\.?|class|week)\s*\d+\s*[:.-]?\s*", "", e["title"], flags=re.I)
+                if mine <= _topic_tokens(topic):
+                    hits.append(e)
+            if len(hits) == 1:
+                event = hits[0]
+    if event is None:
+        return None
+    values: dict[str, Any] = {"event_id": event["id"]}
+    if not m.get("lecture_date"):
+        values["lecture_date"] = event["date"]
+    store.update_material(material_id, **values)
+    return int(event["id"])
+
+
+def _link_all(store: Store, course_id: int) -> int:
+    n = 0
+    for m in store.materials(course_id):
+        if not m.get("event_id") and link_to_lecture(store, int(m["id"])):
+            n += 1
+    return n
+
+
 def _process_syllabus(store: Store, material_id: int) -> int:
+    """Put a syllabus's dates on the calendar. A copy of a syllabus already saved adds nothing, and a date that is
+    already on the calendar (same day, kind and similar title) is not added again."""
     m = store.material(material_id)
     if not m or m["kind"] != "syllabus":
         return 0
-    text = "\n".join(c["text"] for c in store.chunks_of(material_id))
+    old_ids = {e["id"] for e in store.events(m["course_id"]) if e["source_material_id"] == material_id
+               and e["added_by"] == "syllabus"}
     store.clear_syllabus_events(material_id)
+    for other in store.materials(m["course_id"]):  # lectures linked to a date that is about to be re-read
+        if other.get("event_id") in old_ids:
+            store.update_material(other["id"], event_id=None)
     n = 0
-    for ev in calendar.extract_events(text, _year_hint(store, m)):
-        store.add_event(m["course_id"], ev["kind"], ev["title"], ev["date"], time=ev.get("time", ""),
-                        topics=ev.get("notes", ""), source_material_id=material_id, added_by="syllabus")
-        n += 1
+    if not m.get("duplicate_of"):
+        text = "\n".join(c["text"] for c in store.chunks_of(material_id))
+        existing = store.events(m["course_id"])
+        for ev in calendar.extract_events(text, _year_hint(store, m)):
+            if any(calendar.similar_event(e, ev) for e in existing):
+                continue
+            store.add_event(m["course_id"], ev["kind"], ev["title"], ev["date"], time=ev.get("time", ""),
+                            topics=ev.get("notes", ""), source_material_id=material_id, added_by="syllabus")
+            existing.append(ev)
+            n += 1
+    _link_all(store, m["course_id"])
     return n
-
 
 
 def _caption_sibling(media_path: Path) -> Path | None:
@@ -227,25 +445,32 @@ def import_file(store: Store, course_id: int, src: Path, *, kind: str | None = N
         if tmp_dir is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    course = store.course(course_id) or {}
     if kind is None:
-        kind = detect_kind(orig, _sample(chunks))
-    final_title = (title or meta.get("title") or _pretty_title(orig)).strip()
+        kind = detect_kind(orig, (meta.get("raw_head", "") + "\n" + _sample(chunks)).strip(), course.get("term", ""))
+        if kind == "other" and meta.get("structured_title"):
+            kind = reading_kind()  # a primary source with a header such as "FEDERALIST No. 10"
+    final_title = _choose_title(orig, meta, title)
     values: dict[str, Any] = {
         "filename": f"{course_id}/{dest.name}", "original_name": orig, "mime": MIME.get(ext, ""), "sha256": sha,
         "lecture_date": lecture_date, "added_by": added_by, "page_count": meta.get("page_count"),
         "duration_seconds": meta.get("duration_seconds"), "status": "ready"}
+    from .. import transcribe  # imported here: transcribe itself imports importers.common
+
     if ext in AUDIO_VIDEO and not chunks:
         values["status"] = "needs_transcription"
-        values["status_note"] = "Waiting to be transcribed on this computer."
+        values["status_note"] = transcribe.pending_note(store, "transcribe")
     elif ext in IMAGES:
         values["status"] = "needs_transcription"
-        values["status_note"] = "Photo of notes: waiting for its text to be read (OCR)."
+        values["status_note"] = transcribe.pending_note(store, "ocr")
     mid = store.add_material(course_id, kind, final_title, **values)
     if chunks:
         store.replace_chunks(mid, chunks)
+        _mark_duplicate(store, mid)
     if values["status"] == "needs_transcription":
         store.add_job("ocr" if ext in IMAGES else "transcribe", mid, note=final_title)
     _process_syllabus(store, mid)
+    link_to_lecture(store, mid)
     return mid
 
 
@@ -264,10 +489,13 @@ def import_text(store: Store, course_id: int, title: str, text: str, *, kind: st
     chunks = extract.chunk_markdown(text)
     if not chunks:
         raise ImportError_("There is no text to save. Paste or type something first.")
-    mid = store.add_material(course_id, kind, title or "Pasted text", mime="text/markdown", sha256=sha,
+    final_title = _clean_title(title) or extract.top_title(text) or "Pasted text"
+    mid = store.add_material(course_id, kind, final_title, mime="text/markdown", sha256=sha,
                              added_by=added_by, status="ready")
     store.replace_chunks(mid, chunks)
+    _mark_duplicate(store, mid)
     _process_syllabus(store, mid)
+    link_to_lecture(store, mid)
     return mid
 
 
@@ -335,7 +563,11 @@ def reimport(store: Store, material_id: int) -> None:
     ext = path.suffix.lower()
     if ext in IMAGES:
         if not store.chunks_of(material_id) and not _has_open_job(store, material_id, "ocr"):
+            from .. import transcribe
+
             store.add_job("ocr", material_id, note=m["title"])
+            store.update_material(material_id, status="needs_transcription",
+                                  status_note=transcribe.pending_note(store, "ocr"))
         return
     if ext in AUDIO_VIDEO:
         sib = _caption_sibling(path)
@@ -343,14 +575,21 @@ def reimport(store: Store, material_id: int) -> None:
             chunks, meta = extract.extract_captions(sib)
             store.replace_chunks(material_id, chunks)
             store.update_material(material_id, status="ready", status_note="", duration_seconds=meta.get("duration_seconds"))
+            link_to_lecture(store, material_id)
         elif not store.chunks_of(material_id) and not _has_open_job(store, material_id, "transcribe"):
+            from .. import transcribe
+
             store.add_job("transcribe", material_id, note=m["title"])
+            store.update_material(material_id, status="needs_transcription",
+                                  status_note=transcribe.pending_note(store, "transcribe"))
         return
     chunks, meta = _extract(path, ext)
     store.replace_chunks(material_id, chunks)
     store.update_material(material_id, status="ready", status_note="", page_count=meta.get("page_count"),
                           **({"duration_seconds": meta["duration_seconds"]} if "duration_seconds" in meta else {}))
+    _mark_duplicate(store, material_id)
     _process_syllabus(store, material_id)
+    link_to_lecture(store, material_id)
 
 
 def _has_open_job(store: Store, material_id: int, kind: str) -> bool:

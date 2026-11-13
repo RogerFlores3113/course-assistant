@@ -74,41 +74,175 @@ def unique_slug(text: str, seen: set[str], fallback: str = "section") -> str:
     return slug
 
 
-def split_text(text: str, max_words: int = MAX_WORDS) -> list[str]:
-    """Split text into pieces of at most max_words, on paragraph then sentence then word boundaries."""
-    text = text.strip()
-    if not text:
-        return []
-    if words(text) <= max_words:
-        return [text]
-    units: list[str] = []
-    for para in re.split(r"\n\s*\n", text):
-        para = para.strip()
-        if not para:
+# ------------------------------------------------------------------ code-safe block splitting
+_FENCE_OPEN = re.compile(r"^(\s*)(`{3,}|~{3,})(.*)$")
+HARD_CODE_WORDS = 1500       # a single fenced block longer than this may be split at a blank line (fence reopened)
+INTRO_WORDS = 90             # a paragraph this short right before a code block stays with it
+
+_JUNK_MARKERS = ("PLUTO_PROJECT_TOML_CONTENTS", "PLUTO_MANIFEST_TOML_CONTENTS", "This file is machine-generated",
+                 "# This file is machine generated", "lockfileVersion", "\"lockfileVersion\"")
+_LOCK_LINE = re.compile(r"^\s*(git-tree-sha1|uuid|version|resolved|integrity|checksum|sha\d+|hash)\s*[=:]", re.I)
+_BASE64_LINE = re.compile(r"^[A-Za-z0-9+/=_-]{200,}$")
+
+
+class Block:
+    """A run of lines: either a fenced code block (kept verbatim) or a paragraph. Line numbers are 1-based."""
+
+    __slots__ = ("kind", "text", "start", "end")
+
+    def __init__(self, kind: str, text: str, start: int, end: int):
+        self.kind, self.text, self.start, self.end = kind, text, start, end
+
+    @property
+    def words(self) -> int:
+        return len(self.text.split())
+
+
+def is_junk_block(text: str) -> bool:
+    """Machine-generated blobs that only waste search and prompt space: Pluto manifests, lockfiles, base64."""
+    if any(m in text for m in _JUNK_MARKERS):
+        return True
+    if "base64," in text and re.search(r"data:[\w/+.-]+;base64,[A-Za-z0-9+/=]{100,}", text):
+        return True
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    if not lines:
+        return False
+    if any(_BASE64_LINE.match(ln.strip()) for ln in lines):
+        return True
+    lock = sum(1 for ln in lines if _LOCK_LINE.match(ln))
+    return len(lines) >= 12 and lock / len(lines) >= 0.4
+
+
+def parse_blocks(text: str, first_line: int = 1) -> list[Block]:
+    """Split text into fenced code blocks (verbatim, never split on blank lines) and paragraphs."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks: list[Block] = []
+    para: list[str] = []
+    para_start = 0
+
+    def flush_para(end: int) -> None:
+        nonlocal para
+        if para:
+            blocks.append(Block("para", "\n".join(para).rstrip(), para_start, end))
+            para = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _FENCE_OPEN.match(line)
+        if m:
+            flush_para(first_line + i - 1)
+            fence, indent = m.group(2), m.group(1)
+            j = i + 1
+            while j < len(lines):
+                mc = re.match(r"^\s*(" + re.escape(fence[0]) + r"{%d,})\s*$" % len(fence), lines[j])
+                if mc:
+                    break
+                j += 1
+            closed = j < len(lines)
+            body = lines[i:j + 1] if closed else lines[i:] + [indent + fence]
+            blocks.append(Block("code", "\n".join(body), first_line + i, first_line + min(j, len(lines) - 1)))
+            i = j + 1
             continue
-        if words(para) <= max_words:
-            units.append(para)
-            continue
-        for sent in re.split(r"(?<=[.!?])\s+|\n", para):
-            if words(sent) <= max_words:
-                units.append(sent)
-            else:
-                toks = sent.split()
-                for i in range(0, len(toks), max_words):
-                    units.append(" ".join(toks[i:i + max_words]))
-    pieces: list[str] = []
-    cur: list[str] = []
+        if line.strip():
+            if not para:
+                para_start = first_line + i
+            para.append(line)
+        else:
+            flush_para(first_line + i - 1)
+        i += 1
+    flush_para(first_line + len(lines) - 1)
+    return [b for b in blocks if b.text.strip()]
+
+
+def _split_big_code(b: Block) -> list[Block]:
+    """Only for a fenced block over HARD_CODE_WORDS: cut at a blank line and give each part its own fence."""
+    lines = b.text.split("\n")
+    open_line, close_line, body = lines[0], lines[-1], lines[1:-1]
+    parts: list[list[str]] = [[]]
     n = 0
-    for u in units:
-        uw = words(u)
+    for ln in body:
+        parts[-1].append(ln)
+        n += len(ln.split())
+        if n >= HARD_CODE_WORDS // 2 and not ln.strip():
+            parts.append([])
+            n = 0
+    return [Block("code", "\n".join([open_line, *p, close_line]), b.start, b.end) for p in parts if "".join(p).strip()]
+
+
+def _sentence_groups(para: str, max_words: int) -> list[str]:
+    """Pack the sentences (and lines) of one long paragraph into pieces of at most max_words. A piece never ends
+    mid-sentence unless a single sentence is longer than max_words. Original line breaks are kept."""
+    parts = re.split(r"((?<=[.!?])[ \t]*\n|(?<=[.!?])[ \t]+|\n)", para)
+    units: list[tuple[str, str]] = []  # (sentence, separator that followed it)
+    for k in range(0, len(parts), 2):
+        sent = parts[k]
+        sep = parts[k + 1] if k + 1 < len(parts) else ""
+        if not sent.strip():
+            continue
+        if words(sent) > max_words:
+            toks = sent.split()
+            chunks_ = [" ".join(toks[i:i + max_words]) for i in range(0, len(toks), max_words)]
+            units.extend((c, " ") for c in chunks_[:-1])
+            units.append((chunks_[-1], sep))
+        else:
+            units.append((sent, sep))
+    out: list[str] = []
+    cur = ""
+    n = 0
+    for sent, sep in units:
+        sw = words(sent)
+        if cur and n + sw > max_words:
+            out.append(cur.rstrip())
+            cur, n = "", 0
+        cur += sent + (sep if "\n" in sep else " ")
+        n += sw
+    if cur.strip():
+        out.append(cur.rstrip())
+    return out
+
+
+def pack_blocks(blocks: list[Block], max_words: int = MAX_WORDS) -> list[tuple[str, int, int]]:
+    """Group blocks into chunks of about max_words. Returns (text, first_line, last_line).
+    Code blocks are never cut. A short paragraph that introduces a code block stays with it. Paragraphs are
+    cut between sentences only when one paragraph alone is longer than max_words."""
+    blocks = [b for b in blocks if not is_junk_block(b.text)]
+    units: list[list[Block]] = []
+    for b in blocks:
+        if b.kind == "code" and b.words > HARD_CODE_WORDS:
+            for part in _split_big_code(b):
+                units.append([part])
+            continue
+        if b.kind == "para" and b.words > max_words:
+            for sent_group in _sentence_groups(b.text, max_words):
+                units.append([Block("para", sent_group, b.start, b.end)])
+            continue
+        if b.kind == "code" and units and len(units[-1]) == 1 and units[-1][0].kind == "para" \
+                and units[-1][0].words <= INTRO_WORDS:
+            units[-1].append(b)  # keep the explaining paragraph with its code
+            continue
+        units.append([b])
+    out: list[tuple[str, int, int]] = []
+    cur: list[Block] = []
+    n = 0
+    for unit in units:
+        uw = sum(b.words for b in unit)
         if cur and n + uw > max_words:
-            pieces.append("\n\n".join(cur))
+            out.append(("\n\n".join(b.text for b in cur), cur[0].start, cur[-1].end))
             cur, n = [], 0
-        cur.append(u)
+        cur.extend(unit)
         n += uw
     if cur:
-        pieces.append("\n\n".join(cur))
-    return pieces
+        out.append(("\n\n".join(b.text for b in cur), cur[0].start, cur[-1].end))
+    return out
+
+
+def split_text(text: str, max_words: int = MAX_WORDS) -> list[str]:
+    """Split text into pieces of about max_words, on block boundaries: fenced code is kept verbatim and whole,
+    paragraphs are cut only between sentences, and machine-generated blobs (Pluto manifests, lockfiles) are dropped."""
+    if not text or not text.strip():
+        return []
+    return [t for t, _, _ in pack_blocks(parse_blocks(text), max_words)]
 
 
 def chunk(text: str, loc_kind: str, loc_start: Any, *, heading: str = "", loc_end: Any = "") -> dict[str, Any]:
@@ -147,31 +281,64 @@ def section_chunks(sections: Iterable[tuple[str, str, str]]) -> list[dict[str, A
     return out
 
 
-def chunk_cues(cues: list[tuple[float, float, str]], window: float = TIME_WINDOW_SECONDS,
-               max_words: int = MAX_WORDS) -> list[dict[str, Any]]:
-    """Group caption cues (start, end, text) into chunks of about a minute and a half. loc_start is in seconds."""
-    out: list[dict[str, Any]] = []
-    cur: list[str] = []
-    start = end = 0.0
-    n = 0
+CUE_MIN_SECONDS = 30      # do not cut before this much speech (unless the next cue starts a long pause)
+CUE_TARGET_SECONDS = 45   # cut as soon as a sentence ends after this many seconds
+CUE_MAX_SECONDS = 60      # cut by here, at the last sentence end if there was one
+CUE_MAX_WORDS = 170
+_SENT_END = re.compile(r"[.!?][\"')\]]*\s*$")
 
-    def flush() -> None:
-        if cur:
-            s = int(start) if float(start).is_integer() else round(start, 1)
-            e = int(end) if float(end).is_integer() else round(end, 1)
-            out.append(chunk(" ".join(cur), "time", s, loc_end=e))
 
+def _num(x: float) -> int | float:
+    return int(x) if float(x).is_integer() else round(x, 1)
+
+
+def chunk_cues(cues: list[tuple[float, float, str]], window: float = CUE_MAX_SECONDS,
+               max_words: int = CUE_MAX_WORDS) -> list[dict[str, Any]]:
+    """Group caption cues (start, end, text) into chunks of about 30 to 60 seconds, cut on cue boundaries at
+    sentence ends where possible, so a time citation lands close to the claim. loc_start and loc_end are seconds;
+    the label shows the range ("1:27 to 1:58")."""
+    clean = []
     for s, e, text in cues:
         text = " ".join(text.split())
-        if not text:
-            continue
-        if cur and (s - start >= window or n + words(text) > max_words):
-            flush()
-            cur, n = [], 0
-        if not cur:
-            start = s
-        cur.append(text)
+        if text:
+            clean.append((float(s), max(float(e), float(s)), text))
+    out: list[dict[str, Any]] = []
+
+    def emit(group: list[tuple[float, float, str]]) -> None:
+        if not group:
+            return
+        start, end = group[0][0], max(g[1] for g in group)
+        label = locations.time_label(start)
+        if end - start >= 5:
+            label += f" to {locations.time_label(end)}"
+        c = chunk(" ".join(g[2] for g in group), "time", _num(start), loc_end=_num(end))
+        c["loc_label"] = label
+        out.append(c)
+
+    cur: list[tuple[float, float, str]] = []
+    n = 0
+    cut = -1  # index in cur after which a sentence ended and at least CUE_MIN_SECONDS had passed
+    for cue in clean:
+        s, e, text = cue
+        if cur and (s - cur[0][0] >= window or n + words(text) > max_words):
+            if cut >= 0:
+                emit(cur[:cut + 1])
+                cur = cur[cut + 1:]
+            else:
+                emit(cur)
+                cur = []
+            n = sum(words(c[2]) for c in cur)
+            cut = -1
+            if cur:  # the carried cues may already be long enough to cut again
+                for k, c in enumerate(cur):
+                    if c[1] - cur[0][0] >= CUE_MIN_SECONDS and _SENT_END.search(c[2]):
+                        cut = k
+        cur.append(cue)
         n += words(text)
-        end = max(e, s)
-    flush()
+        if e - cur[0][0] >= CUE_TARGET_SECONDS and _SENT_END.search(text):
+            emit(cur)  # long enough and the sentence is finished: cut here
+            cur, n, cut = [], 0, -1
+        elif e - cur[0][0] >= CUE_MIN_SECONDS and _SENT_END.search(text):
+            cut = len(cur) - 1
+    emit(cur)
     return out

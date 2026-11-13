@@ -75,3 +75,49 @@ def test_invalid_dates_and_duplicates_dropped():
 def test_empty():
     assert extract_events("") == []
     assert extract_events("No dates at all here.") == []
+
+
+# ---- fx-import: dedupe, cleanup, kinds, ranges, weeks ---------------------------------------------------------
+from course_assistant.calendar import similar_event
+
+
+def test_table_rows_get_clean_titles_and_kinds():
+    ev = extract_events((__import__("pathlib").Path(__file__).parent / "fixtures" / "import" / "syllabus-table.md").read_text(), 2026)
+    kinds = {e["title"]: e["kind"] for e in ev}
+    assert not any("|" in t for t in kinds)
+    assert any(t.startswith("Lecture 3") and k == "lecture" for t, k in kinds.items())
+    assert any(t.startswith("Midterm 1") and k == "exam" for t, k in kinds.items())
+    assert any(t.startswith("Problem Set 1") and k == "assignment" for t, k in kinds.items())
+    final = [e for e in ev if e["title"].startswith("Final")][0]
+    assert (final["date"], final["time"]) == ("2026-12-15", "09:00")
+    assert any(e["date"] == "2026-11-26" and e["title"].startswith("No class") for e in ev)
+
+
+def test_same_event_in_two_places_is_listed_once():
+    ev = extract_events("Midterm 1: Oct 1\nMIDTERM 1 (in class, covers Lectures 1-8): Oct 1\nHW 2 due Sep 17\nHW 2 due Sep 17\n", 2026)
+    assert len([e for e in ev if e["date"] == "2026-10-01"]) == 1
+    assert len([e for e in ev if e["date"] == "2026-09-17"]) == 1
+
+
+def test_time_range_and_due_vs_released():
+    ev = extract_events("Final Exam: December 15, 2026, 9:00 AM to 11:00 AM\nHW 3 released Sep 10, due Sep 17\n", 2026)
+    fin = by_title(ev, "Final")
+    assert fin["time"] == "09:00"
+    assert by_title(ev, "HW 3")["date"] == "2026-09-17"
+
+
+def test_labs_are_not_exams():
+    ev = extract_events("Lab 2: Atomic structure and flame tests: Sep 17\n", 2026)
+    assert by_title(ev, "Lab 2")["kind"] != "exam"
+
+
+def test_week_schedule_rows():
+    ev = extract_events("Week 1 (Sep 2): Intro\nWeek 2 (Sep 9): Vectors\n", 2026)
+    assert [e["date"] for e in ev] == ["2026-09-02", "2026-09-09"]
+
+
+def test_similar_event_matches_reworded_duplicates():
+    a = {"date": "2026-10-01", "title": "Midterm 1", "kind": "exam"}
+    b = {"date": "2026-10-01", "title": "MIDTERM 1 (in class, covers Lectures 1-8)", "kind": "exam"}
+    c = {"date": "2026-10-02", "title": "Midterm 1", "kind": "exam"}
+    assert similar_event(a, b) and not similar_event(a, c)
