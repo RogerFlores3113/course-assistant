@@ -253,7 +253,7 @@ def test_split_items_titles_and_twin_uses_only_matched_problem():
     a = integrity.twin(s, ch, "problem 2 of problem set 3", p, g)
     sent = p.calls[0]["messages"][0]["content"]
     assert "40.92" in sent and "0.350" not in sent
-    assert s.guide(a.guide_id)["title"] == "Twin of Problem 2 (Problem Set 3)"
+    assert s.guide(a.guide_id)["title"] == "Similar problem to Problem 2"
     kinds = {i["label"]: i["kind"] for i in integrity.graded_view(s, la)}
     assert kinds["Problem 4"] == "essay" and kinds["Problem 1"] == "problem"
 

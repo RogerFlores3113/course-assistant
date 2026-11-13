@@ -1089,9 +1089,17 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         return after(request, course_id, "study", notice=ready, result_guide=guide,
                      result_view=guide_view(guide, base_level=4, store=store) if guide else None)
 
+    def _safe_fill_keys(cid: int, p) -> None:
+        """Lazily make the answer key of graded numeric items that have none (one model call each, once)."""
+        try:
+            _mod("integrity").ensure_keys(store, cid, p)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ ask
     @app.post("/courses/{course_id}/ask")
-    async def ask(request: Request, course_id: int, question: str = Form(""), depth: str = Form("standard")):
+    async def ask(request: Request, course_id: int, question: str = Form(""), depth: str = Form("standard"),
+                  normal: str = Form("")):
         require_course(course_id)
         q = question.strip()
         if not q:
@@ -1103,7 +1111,12 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         history = [{"role": m["role"], "content": m["content"]} for m in store.chat_messages(course_id, 6)]
 
         try:
-            await work(lambda: _mod("grounding").ask(store, course_id, q, p, depth=depth, history=history))
+            def run():
+                _safe_fill_keys(course_id, p)
+                return _mod("grounding").ask(store, course_id, q, p, depth=depth, history=history,
+                                             route=normal.strip() != "1")
+
+            await work(run)
         except Exception as e:
             if _is_no_provider(e):
                 return after(request, course_id, "ask", error="Connect an AI first. See the panel below.", draft=q)
