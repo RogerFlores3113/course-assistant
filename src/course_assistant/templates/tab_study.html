@@ -3,7 +3,7 @@
 {% if not ai.connected %}{% include "_connect_panel.html" %}{% endif %}
 {% if not has_materials %}<p class="flash warn">Add some materials first. The study tools only use what you have saved.</p>{% endif %}
 {% if next_exam %}<p class="exam-line"><strong>{{ next_exam.label }}</strong>: {{ next_exam.title }}, {{ next_exam.date | day }}. <a href="/courses/{{ course.id }}/study?exam={{ next_exam.id }}#exam-form">Start an exam guide</a></p>
-{% else %}<p class="exam-line muted"><a href="/courses/{{ course.id }}/calendar">Add your exam date</a> to see how many days are left.</p>{% endif %}
+{% else %}<p class="exam-line muted"><a href="/courses/{{ course.id }}/calendar?add=exam#add-event">Add an exam</a> to see how many days are left.</p>{% endif %}
 {% set pre_exam = (request.query_params.get('exam', '') if request else '') %}
 <div id="study-result">
 {% if result_view %}<div class="card result"><h3>{{ result_guide.title }}</h3>{{ answer(result_view) }}<p><a href="/guides/{{ result_guide.id }}">Open this guide on its own page</a></p></div>{% endif %}

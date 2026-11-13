@@ -122,8 +122,8 @@ def test_dashboard_and_study_tab_show_exam_countdown_and_prefill(ready):
 def test_no_exam_offers_add_your_exam_date(ready):
     s, c = ready.store, ready.client
     cid = course(s)
-    assert "Add your exam date" in c.get("/").text
-    assert "Add your exam date" in c.get(f"/courses/{cid}/study").text
+    assert "Add exam" in c.get("/").text
+    assert "Add an exam" in c.get(f"/courses/{cid}/study").text
 
 
 # ---- 3. upload lecture picker
