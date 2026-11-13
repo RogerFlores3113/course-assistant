@@ -188,3 +188,68 @@ def test_find_running_verifies_health_proof(monkeypatch):
     paths.port_file().write_text("8123")
     monkeypatch.setattr(cli.httpx, "get", fake_get(True))
     assert cli.find_running() == 8123
+
+
+def test_health_check_ignores_proxy_env(monkeypatch):
+    seen = {}
+
+    def fake_get(url, **kw):
+        seen.update(kw)
+        raise httpx.ConnectError("no")
+
+    monkeypatch.setattr(cli.httpx, "get", fake_get)
+    assert cli._answers(8766) is False
+    assert seen["trust_env"] is False
+
+
+def test_import_kind_is_validated(data, monkeypatch, capsys):
+    imported = fake_importers(monkeypatch)
+    f = data / "a.pdf"
+    f.write_text("x")
+    assert run("import", "X", str(f), "--create", "--kind", "bogus") == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err and "slides" in err
+    assert imported == []
+    assert run("import", "X", str(f), "--create", "--kind", "syllabus") == 0
+
+
+def test_repeat_import_says_already_saved(data, monkeypatch, capsys):
+    mod = types.ModuleType("course_assistant.importers")
+    mod.ImportError_ = type("ImportError_", (Exception,), {})
+
+    def import_file(store, course_id, src, **kw):
+        for m in store.materials(course_id):
+            if m["title"] == src.name:
+                return m["id"]
+        return store.add_material(course_id, "notes", src.name)
+
+    mod.import_file = import_file
+    monkeypatch.setitem(sys.modules, "course_assistant.importers", mod)
+    f = data / "syllabus.md"
+    f.write_text("x")
+    assert run("import", "C", str(f), "--create") == 0
+    assert "Saved syllabus.md" in capsys.readouterr().out
+    assert run("import", "C", str(f)) == 0
+    out = capsys.readouterr().out
+    assert "Already saved" in out and "Saved syllabus.md" not in out
+
+
+def test_serve_help_shows_default_port(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["serve", "--help"])
+    out = capsys.readouterr().out
+    assert "--port" in out and str(paths.DEFAULT_PORT) in out and "port to listen on" in out
+
+
+def test_serve_starts_background_jobs(monkeypatch):
+    seen = {}
+    web = types.ModuleType("course_assistant.web")
+    web.create_app = lambda store, **kw: seen.update(kw) or object()
+    monkeypatch.setitem(sys.modules, "course_assistant.web", web)
+    uv = types.ModuleType("uvicorn")
+    uv.run = lambda app, **kw: None
+    monkeypatch.setitem(sys.modules, "uvicorn", uv)
+    monkeypatch.setattr(cli, "find_running", lambda: None)
+    monkeypatch.setattr(cli, "_pick_port", lambda p: 8999)
+    cli.run_app(port=8766, open_browser=False)
+    assert seen.get("start_jobs") is True

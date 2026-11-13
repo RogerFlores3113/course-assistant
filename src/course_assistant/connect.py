@@ -291,11 +291,30 @@ def skill_targets(home: Path | None = None) -> dict[str, Path]:
     return {"Claude Code": h / ".claude" / "skills", "Codex": h / ".agents" / "skills"}
 
 
-def list_skills(src: Path | None = None) -> list[Path]:
-    src = src or skills_source_dir()
-    if not src.is_dir():
+APP_SKILL_FOLDERS = {"Claude Code": "claude", "Codex": "codex"}
+
+
+def _skills_in(folder: Path) -> list[Path]:
+    if not folder.is_dir():
         return []
-    return sorted(p for p in src.iterdir() if p.is_dir() and (p / "SKILL.md").is_file())
+    return sorted(p for p in folder.iterdir() if p.is_dir() and (p / "SKILL.md").is_file())
+
+
+def list_skills(src: Path | None = None, app: str | None = None) -> list[Path]:
+    """Skill folders under src. The repo keeps one folder per app (skills/claude/<skill>, skills/codex/<skill>), so
+    when `app` is given and its folder exists those are used; skills placed directly under src are shared by both."""
+    src = src or skills_source_dir()
+    shared = _skills_in(src)
+    per_app: list[Path] = []
+    if app is None:
+        for sub in APP_SKILL_FOLDERS.values():
+            per_app += _skills_in(src / sub)
+    elif app in APP_SKILL_FOLDERS:
+        per_app = _skills_in(src / APP_SKILL_FOLDERS[app])
+    seen: dict[str, Path] = {}
+    for p in [*shared, *per_app]:
+        seen.setdefault(p.name, p)
+    return sorted(seen.values())
 
 
 def _copy_skill(skill: Path, dest: Path) -> str:
@@ -323,13 +342,18 @@ def _copy_skill(skill: Path, dest: Path) -> str:
 
 def install_skills(home: Path | None = None, src: Path | None = None, only: list[str] | None = None) -> dict[str, Any]:
     """Copy every bundled skill into each AI app's skills folder. A missing skills/ folder is not an error."""
-    skills = list_skills(src)
-    result: dict[str, Any] = {"found": [s.name for s in skills], "targets": {}}
-    if not skills:
-        result["message"] = "No skills were bundled with this copy of the app, so none were installed."
+    src = src or skills_source_dir()
+    result: dict[str, Any] = {"found": [s.name for s in list_skills(src)], "targets": {}}
+    if not result["found"]:
+        result["message"] = ("This copy of the app has no skill files to install (looked in "
+                             f"{src}). Connecting still works; your AI app just won't get the "
+                             "extra study instructions.")
         return result
     for app, base in skill_targets(home).items():
         if only and app not in only:
+            continue
+        skills = list_skills(src, app)
+        if not skills:
             continue
         base.mkdir(parents=True, exist_ok=True)
         result["targets"][app] = {"path": str(base), "skills": {s.name: _copy_skill(s, base / s.name) for s in skills}}

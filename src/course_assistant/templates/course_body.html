@@ -1,7 +1,7 @@
-<div id="course-body" style="--accent-c: {{ accent }}">
+<div id="course-body" data-title="{{ 'Error: ' if error }}{{ page_title }} - Course Assistant" style="{{ accent_style(accent) }}">
   {% include "_flash.html" %}
   <nav class="tabs" aria-label="Course sections">
-  {% for t, label in tabs %}<a href="{{ '/courses/%d' % course.id if t == 'materials' else '/courses/%d/%s' % (course.id, t) }}" hx-get="{{ '/courses/%d' % course.id if t == 'materials' else '/courses/%d/%s' % (course.id, t) }}" hx-target="#course-body" hx-swap="outerHTML" hx-push-url="true" {% if t == tab %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+  {% for t, label in tabs %}<a href="{{ '/courses/%d' % course.id if t == 'materials' else '/courses/%d/%s' % (course.id, t) }}" hx-get="{{ '/courses/%d' % course.id if t == 'materials' else '/courses/%d/%s' % (course.id, t) }}" hx-target="#course-body" hx-swap="outerHTML" hx-push-url="true" data-tab-link {% if t == tab %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
   </nav>
-  <section id="tab-panel" aria-label="{{ tab | capitalize }}">{% include "tab_" ~ tab ~ ".html" %}</section>
+  <section id="tab-panel" aria-label="{{ tab_label }}">{% include "tab_" ~ tab ~ ".html" %}</section>
 </div>

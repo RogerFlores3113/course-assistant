@@ -182,3 +182,33 @@ def test_connect_all_in_fake_home(home, monkeypatch, tmp_path):
     assert (home / ".claude/skills/course-assistant-study/SKILL.md").is_file()
     assert all(line for r in results for line in connect.describe(r))
     assert all(r["already_connected"] for r in connect.connect("all", with_skills=False))
+
+
+def make_app_skills(root: Path):
+    """The repo layout: skills/<app>/<skill>/SKILL.md."""
+    for app in ("claude", "codex"):
+        d = root / app / "course-assistant"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(f"---\nname: course-assistant\ndescription: {app}\n---\nbody\n")
+    return root
+
+
+def test_skills_found_in_per_app_folders_regression(home, tmp_path):
+    """Panel p3: 'No skills were bundled' was printed although skills/claude and skills/codex exist."""
+    src = make_app_skills(tmp_path / "skills")
+    assert [p.name for p in connect.list_skills(src)] == ["course-assistant"]
+    res = connect.install_skills(home, src)
+    assert "message" not in res and res["found"] == ["course-assistant"]
+    assert "description: claude" in (home / ".claude/skills/course-assistant/SKILL.md").read_text()
+    assert "description: codex" in (home / ".agents/skills/course-assistant/SKILL.md").read_text()
+
+
+def test_repo_skills_folder_is_found():
+    assert connect.list_skills(), "the repo's own skills/ folder must be found"
+    assert connect.list_skills(app="Claude Code") and connect.list_skills(app="Codex")
+
+
+def test_no_skills_message_explains_and_does_not_fail(home, tmp_path):
+    res = connect.install_skills(home, tmp_path / "empty")
+    lines = connect.describe({"app": "Skills", **res})
+    assert lines and "no skill files" in lines[0] and "Connecting still works" in lines[0]

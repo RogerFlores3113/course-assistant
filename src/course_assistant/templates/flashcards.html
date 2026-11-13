@@ -1,21 +1,26 @@
-{% extends "base.html" %}{% block title %}Flashcards - Course Assistant{% endblock %}
+{% extends "base.html" %}{% block title %}Flashcards - {{ course.name }} - Course Assistant{% endblock %}
 {% block body %}
-<div class="course-head" style="--accent-c: {{ accent }}"><p class="crumbs"><a href="/courses/{{ course.id }}/study">{{ course.name }}</a> &rsaquo; Flashcards</p><h1>Flashcards</h1>
+<div class="course-head" style="{{ accent_style(accent) }}"><p class="crumbs"><a href="/courses/{{ course.id }}/study">{{ course.name }}</a> &rsaquo; Flashcards</p><h1>Flashcards: {{ course.name }}</h1>
 <p class="muted">{{ due }} due now, {{ total }} in total.</p></div>
 {% if card %}
 <section class="card flashcard" data-flashcards>
-  <h2 class="visually-hidden">Card</h2>
+  <h2>Card 1 of {{ due }} due</h2>
   <p class="label">Front</p><p class="big">{{ card.front }}</p>
-  <button type="button" class="btn" id="reveal" hidden>Show answer (space)</button>
+  <button type="button" class="btn" id="reveal" hidden>Show answer</button>
   <div id="answer" class="answerbox">
-    <p class="label">Back</p><p class="big">{{ card.back }}</p>
-    {% if card.source_label %}<p class="muted small">From: {{ card.source_label }}</p>{% endif %}
+    <div id="answer-text" tabindex="-1"><p class="label">Back</p><p class="big">{{ card.back }}</p>
+    {% if card.source_label %}<p class="muted small">From: {{ card.source_label }}</p>{% endif %}</div>
     <form method="post" action="/flashcards/{{ course.id }}/review" class="grades"><input type="hidden" name="card_id" value="{{ card.id }}">
-      <button class="btn ghost" name="grade" value="again" data-key="1">Again (1)</button>
-      <button class="btn ghost" name="grade" value="hard" data-key="2">Hard (2)</button>
-      <button class="btn" name="grade" value="good" data-key="3">Good (3)</button>
-      <button class="btn ghost" name="grade" value="easy" data-key="4">Easy (4)</button></form></div>
+      <button class="btn ghost" name="grade" value="again" data-key="1">Again<span class="key-hint"> (1)</span></button>
+      <button class="btn ghost" name="grade" value="hard" data-key="2">Hard<span class="key-hint"> (2)</span></button>
+      <button class="btn" name="grade" value="good" data-key="3">Good<span class="key-hint"> (3)</span></button>
+      <button class="btn ghost" name="grade" value="easy" data-key="4">Easy<span class="key-hint"> (4)</span></button></form></div>
 </section>
+<form method="post" action="/settings/shortcuts" class="shortcut-toggle">
+  <input type="hidden" name="next" value="/flashcards/{{ course.id }}">
+  <input type="hidden" name="on" value="{{ '0' if shortcuts_enabled() else '1' }}">
+  <p class="muted small">Keyboard shortcuts are {{ 'on' if shortcuts_enabled() else 'off' }}.{% if shortcuts_enabled() %} Space shows the answer, 1 to 4 grade it.{% endif %}
+  <button class="btn small ghost" type="submit">{{ 'Turn shortcuts off' if shortcuts_enabled() else 'Turn shortcuts on' }}</button></p></form>
 {% else %}<div class="card empty"><h2>{{ 'All caught up' if total else 'No flashcards yet' }}</h2>
 <p>{% if total %}Nothing is due right now. Come back later, or make more cards.{% else %}Make cards from your materials on the Study tab.{% endif %}</p>
 <p><a class="btn" href="/courses/{{ course.id }}/study">Go to Study</a></p></div>{% endif %}

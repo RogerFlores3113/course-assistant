@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import os
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -12,6 +14,21 @@ ALLOWED_MODELS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 DEFAULT_LOCAL_URL = "http://127.0.0.1:1234"
 BETAS = ["server-side-fallback-2026-07-01"]
 TIMEOUT_SECONDS = 180.0
+
+
+def is_loopback_url(url: str) -> bool:
+    """True when the address points at this computer (127.x, ::1, localhost). Such calls must never go through
+    HTTP(S)_PROXY, or a school or work proxy would see (and break) the traffic to the student's own model."""
+    try:
+        host = (urlsplit(url if "//" in url else f"//{url}").hostname or "").lower()
+    except ValueError:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class ProviderError(Exception):
@@ -95,23 +112,42 @@ class LocalProvider(Provider):
     def _post(self, messages: list[dict], max_tokens: int) -> str:
         url = f"{self.base_url}/v1/chat/completions"
         body = {"model": self.model, "messages": messages, "max_tokens": max_tokens, "stream": False}
+        loopback = is_loopback_url(self.base_url)
         try:
-            with httpx.Client(transport=self._transport, timeout=self._timeout) as c:
+            with httpx.Client(transport=self._transport, timeout=self._timeout, trust_env=not loopback) as c:
                 r = c.post(url, json=body)
         except httpx.TimeoutException as e:
             raise ProviderError("The local model took too long to answer. Try a smaller model or a shorter question.") from e
         except httpx.HTTPError as e:
-            raise ProviderError(f"Could not reach the local model server at {self.base_url}. "
-                                "Start LM Studio (or your server) and load a model, then try again.") from e
+            raise ProviderError(f"Course Assistant couldn't reach your local model at {self.base_url}. "
+                                "Is LM Studio running with a model loaded?") from e
         if r.status_code >= 400:
-            raise ProviderError(f"The local model server returned an error ({r.status_code}). "
-                                "Check that a model is loaded and the model name in Settings is right.")
+            raise ProviderError(self._status_message(r.status_code))
         try:
             data = r.json()
             text = data["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as e:
-            raise ProviderError("The local model server sent a reply the app could not read.") from e
+            raise ProviderError(f"Something answered at {self.base_url}, but it did not look like a model server. "
+                                "Check the address in Settings.") from e
         return (text or "").strip()
+
+    def _status_message(self, code: int) -> str:
+        where = self.base_url
+        if code in (502, 503, 504):
+            return (f"The address {where} answered with error {code} instead of a model reply. That usually means "
+                    "something between this app and your model (a proxy, or a program that is not LM Studio) is "
+                    "answering, or the server is not ready. Check that LM Studio is running with a model loaded "
+                    "and that the address in Settings is right.")
+        if code in (401, 403):
+            return (f"The server at {where} refused the request (error {code}). If it needs a key or has "
+                    "restricted access, turn that off for local use.")
+        if code == 404:
+            return (f"The server at {where} does not know the address the app asked for (error 404). Check that "
+                    "the address in Settings is your model server, and that the model name is right.")
+        if code == 400:
+            return (f"The server at {where} did not accept the request (error 400). The model name in Settings "
+                    "may not match the model that is loaded.")
+        return f"The server at {where} returned error {code}. Check that a model is loaded and the model name in Settings is right."
 
     def complete(self, system: str, messages: list[dict], *, max_tokens: int = 4000) -> str:
         return self._post([{"role": "system", "content": system}, *messages], max_tokens)

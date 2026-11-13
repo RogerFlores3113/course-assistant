@@ -1,11 +1,14 @@
 <!doctype html>
-<html lang="en" data-theme="{{ theme() }}">
+<html lang="en" data-theme="{{ theme() }}" data-shortcuts="{{ 'on' if shortcuts_enabled() else 'off' }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Course Assistant{% endblock %}</title>
+  <title>{% if error %}Error: {% endif %}{% block title %}{{ page_title ~ ' - ' if page_title }}Course Assistant{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/katex/katex.min.css"><link rel="stylesheet" href="/static/content.css">
   <script src="/static/htmx.min.js" defer></script>
+  <script defer src="/static/katex/katex.min.js"></script><script defer src="/static/katex/auto-render.min.js"></script>
+  <script defer src="/static/content.js"></script>
   <script src="/static/app.js" defer></script>
 </head>
 {% set path = request.url.path %}
@@ -16,7 +19,7 @@
     <nav aria-label="Main">
       <a href="/" {% if path == '/' %}aria-current="page"{% endif %}>Courses</a>
       <a href="/courses/new" {% if path == '/courses/new' %}aria-current="page"{% endif %}>Add a course</a>
-      <a href="/connect" {% if path == '/connect' %}aria-current="page"{% endif %}>Connect an AI</a>
+      <a href="/setup" {% if path in ('/setup', '/connect') %}aria-current="page"{% endif %}>Connect an AI</a>
       <a href="/settings" {% if path == '/settings' %}aria-current="page"{% endif %}>Settings</a>
     </nav>
   </header>
@@ -24,7 +27,9 @@
     {% block flash %}{% include "_flash.html" %}{% endblock %}
     {% block body %}{% endblock %}
   </main>
-  <p id="busy" class="busy" role="status" aria-live="polite" hidden></p>
+  <div id="sr-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div id="sr-alert" class="visually-hidden" role="alert" aria-live="assertive" aria-atomic="true"></div>
+  <p id="busy" class="busy" aria-hidden="true" hidden></p>
   <footer class="foot">
     Runs on this computer. Your materials stay here. <a href="/privacy">Privacy</a> &middot; v{{ version }}
   </footer>

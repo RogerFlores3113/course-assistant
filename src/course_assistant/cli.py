@@ -29,6 +29,7 @@ from pathlib import Path
 import httpx
 
 from . import __version__, paths
+from .store import MATERIAL_KINDS
 
 COMMANDS = ("serve", "open", "mcp", "connect", "import", "version")
 
@@ -79,8 +80,9 @@ def _answers(port: int) -> bool:
 
     nonce = secrets.token_urlsafe(24)
     try:
+        # trust_env=False: this is this computer talking to itself, never through HTTP(S)_PROXY
         r = httpx.get(f"http://127.0.0.1:{port}/api/health", params={"nonce": nonce}, timeout=0.7,
-                      follow_redirects=False)
+                      follow_redirects=False, trust_env=False)
         body = r.json()
     except (httpx.HTTPError, ValueError):
         return False
@@ -144,7 +146,8 @@ def run_app(port: int = paths.DEFAULT_PORT, open_browser: bool = True) -> None:
     port = _pick_port(port)
     if port != wanted:
         log.warning("Port %s is in use by another program, starting on port %s instead.", wanted, port)
-    app = create_app(Store(paths.db_path()))
+    # start_jobs=True: the app itself starts the background worker that reads photos and transcribes recordings
+    app = create_app(Store(paths.db_path()), start_jobs=True)
     _write_port_file(port)
     if open_browser:
         threading.Timer(1.2, lambda: webbrowser.open(launch_url(port))).start()
@@ -235,6 +238,7 @@ def cmd_import(args: argparse.Namespace) -> int:
               + (", ".join(c["name"] for c in store.courses()) or "(no courses yet)"), file=sys.stderr)
         return 1
     bad = 0
+    known = {m["id"] for m in store.materials(course["id"])}
     for name in args.files:
         src = Path(name).expanduser()
         if not src.is_file():
@@ -247,7 +251,11 @@ def cmd_import(args: argparse.Namespace) -> int:
             print(f"Could not import {src.name}: {exc}", file=sys.stderr)
             bad += 1
             continue
-        print(f"Saved {src.name} to {course['name']} (material {material_id}).")
+        if material_id in known:
+            print(f"Already saved: {src.name} is already in {course['name']} (material {material_id}). Nothing was added.")
+        else:
+            print(f"Saved {src.name} to {course['name']} (material {material_id}).")
+            known.add(material_id)
     return 1 if bad else 0
 
 
@@ -262,7 +270,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     serve = sub.add_parser("serve", help="start the app and open it in your browser (the default)")
-    serve.add_argument("--port", type=int, default=paths.DEFAULT_PORT)
+    serve.add_argument("--port", type=int, default=paths.DEFAULT_PORT,
+                       help="port to listen on (default: %(default)s; a free one is used if it is taken)")
     serve.add_argument("--no-browser", action="store_true", help="do not open the browser")
     serve.set_defaults(func=cmd_serve)
 
@@ -278,7 +287,8 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("course", help="course name or id")
     imp.add_argument("files", nargs="+")
     imp.add_argument("--create", action="store_true", help="make the course if it doesn't exist")
-    imp.add_argument("--kind", default=None, help="slides, syllabus, textbook, notes ... (guessed when left out)")
+    imp.add_argument("--kind", default=None, choices=sorted(MATERIAL_KINDS), metavar="KIND",
+                     help="what the files are: " + ", ".join(sorted(MATERIAL_KINDS)) + " (guessed when left out)")
     imp.add_argument("--lecture-date", default="", help="YYYY-MM-DD, for lecture slides or recordings")
     imp.set_defaults(func=cmd_import)
 
