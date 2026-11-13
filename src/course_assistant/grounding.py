@@ -539,7 +539,7 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
         answer.guide_id = store.add_guide(
             course_id, "answer", title, answer.body_md, sources=source_rows(sources, answer.used),
             data={"blocks": block_dicts(answer.blocks), "used": answer.used, "outside": answer.outside, "depth": normalize_depth(depth),
-                  "no_sources": not sources},
+                  "no_sources": not sources, "mode": "answer", "not_covered": answer.not_covered},
             question=question, model=getattr(provider, "model", ""))
     if record_chat:
         store.add_chat_message(course_id, "user", question)

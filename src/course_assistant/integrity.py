@@ -30,7 +30,7 @@ from .grounding import Answer, Block
 _WORD = re.compile(r"[a-z]+|\d+(?:\.\d+)?")
 
 PROOF_CUES = re.compile(r"\b(prove|proof|show that|demonstrate that|verify that|derive)\b", re.I)
-ESSAY_CUES = re.compile(r"\b(essay|discuss|argue|argument|reflect|reflection|thesis|critique|compare and contrast|"
+ESSAY_CUES = re.compile(r"\b(explain in words|explain why|explain how|describe|essay|discuss|argue|argument|reflect|reflection|thesis|critique|compare and contrast|"
                         r"write (?:a|an|about)|paragraph|opinion|in your own words|short answer)\b", re.I)
 
 DOC_GROUPS = {"hw": "hw", "homework": "hw", "pset": "hw", "ps": "hw", "assignment": "hw", "problem set": "hw",
@@ -131,7 +131,7 @@ _TENS_UNITS = re.compile(r"\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|nin
 _CARDINAL = re.compile(r"\b(" + "|".join(sorted(_WORDNUM, key=len, reverse=True)) + r")\b", re.I)
 _DOZEN = re.compile(r"\b(?:a\s+)?dozen\b", re.I)
 
-_NUM = re.compile(r"(?<![A-Za-z_\d.])(?:(?<![\w)\]])[-−])?(?:\d{1,3},\d{3}(?![\d,])|\d+(?:\.\d+)?|\.\d+)(?:/\d+)?")
+_NUM = re.compile(r"(?<![A-Za-z_\d.])(?:(?<![\w)\]])[-−])?(?:\d{1,3},\d{3}(?![\d,])|\d+\.\d+(?!\d)|\d+(?:/\d+(?![\d.]))?|\.\d+)")
 _POINTS = re.compile(r"\(\s*\d+\s*(?:points?|pts?|marks?)\s*\)", re.I)
 _UNIT_NUM = re.compile(r"(" + _NUM.pattern + r")\s*(ml|l|liters?|litres?|kg|g|mg|mol|mmol)\b", re.I)
 
@@ -216,11 +216,15 @@ def _all_forms(text: str) -> set[str]:
 
 def classify(text: str) -> str:
     """'proof', 'essay' or 'problem' for the text of a graded task."""
-    if PROOF_CUES.search(text or ""):
-        return "proof"
-    if ESSAY_CUES.search(text or ""):
+    t = text or ""
+    if re.search(r"\b(essay|thesis|paper|paragraph)\b", t, re.I):
         return "essay"
-    return "problem" if numbers(text) else "essay"
+    if PROOF_CUES.search(t):
+        return "proof"
+    if ESSAY_CUES.search(t):
+        return "essay"
+    body = re.sub(r"^[#>\s*]*(?:Problem|Question|Exercise|Q)\s*\d+[^\n]*\n", "", t, count=1, flags=re.I)
+    return "problem" if significant_numbers(body) else "essay"
 
 
 # --------------------------------------------------------------------------- tokens
@@ -471,7 +475,7 @@ def _overlap_score(q: str, b: str) -> float:
         score = max(score, jaccard)
     if len(bt) >= 6 and of_graded >= 0.6:
         score = max(score, of_graded)
-    if len(qt) >= 5 and of_question >= 0.8 and (not qn or nums_inside):
+    if ((len(qt) >= 5 and qn) or len(qt) >= 8) and of_question >= 0.8 and (not qn or nums_inside):
         score = max(score, of_question)
     if len(qn) >= 2 and nums_inside and of_question >= 0.5 and len(inter) >= 4:
         score = max(score, of_question)
@@ -947,7 +951,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict) -> Answer
     question = (question or "").strip()
     problem_text = body or question
     kind = graded.get("kind") or classify(problem_text)
-    sources = _sources_for(store, course_id, question, problem_text, graded, assignment=(kind == "essay"))
+    sources = _sources_for(store, course_id, question, problem_text, graded, assignment=(kind == "essay" and bool(ESSAY_CUES.search(problem_text))))
     src_block = grounding.format_sources(sources)
     depth_rule = grounding.DEPTH_RULES["standard"]
     mode, twin_problem, blocks, used, fell_back = "concepts", "", [], [], False
@@ -993,7 +997,8 @@ def twin(store, course_id: int, question: str, provider, graded: dict) -> Answer
         course_id, "twin", guide_title[:90], answer.body_md,
         sources=grounding.source_rows(sources, used),
         data={"blocks": grounding.block_dicts(blocks), "original_excerpt": excerpt, "twin_problem": twin_problem,
-              "mode": mode, "graded_title": title, "graded_item_id": graded.get("id"), "kind": kind},
+              "mode": mode, "graded_title": title, "graded_item_id": graded.get("id"), "kind": kind,
+              "not_covered": answer.not_covered},
         question=question, model=getattr(provider, "model", ""))
     return answer
 

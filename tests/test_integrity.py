@@ -130,7 +130,7 @@ def test_twin_falls_back_to_concepts_after_two_bad_twins():
     g = integrity.match_graded(s, c, ORIG)
     p = FakeProvider([BAD, BAD, "Newton's second law links force, mass and acceleration [1]."])
     a = integrity.twin(s, c, ORIG, p, g)
-    assert len(p.calls) == 3 and a.twin
+    assert len(p.calls) == 3 and a.mode == "concepts" and not a.twin
     guide = s.guide(a.guide_id)
     assert guide["data"]["mode"] == "concepts" and guide["data"]["twin_problem"] == ""
     assert "could not write a safe twin" in a.blocks[0].md
@@ -155,7 +155,7 @@ def test_essay_and_proof_get_concepts_only():
     assert g["kind"] == "essay"
     p = FakeProvider(["Start from the law itself [1]. Plan: define terms, then apply them [1]."])
     a = integrity.twin(s, c, q, p, g)
-    assert len(p.calls) == 1 and a.twin
+    assert len(p.calls) == 1 and a.mode == "concepts" and not a.twin
     assert "must NOT write" in p.calls[0]["system"] and "essay" in p.calls[0]["system"]
     guide = s.guide(a.guide_id)
     assert guide["data"]["mode"] == "concepts" and guide["data"]["twin_problem"] == ""
@@ -181,3 +181,33 @@ def test_reference_only_with_empty_body_uses_concepts():
     p = FakeProvider(["Review force and acceleration [1]."])
     a = integrity.twin(s, c, q, p, g)
     assert len(p.calls) == 1 and s.guide(a.guide_id)["data"]["mode"] == "concepts"
+
+
+# ----------------------------------------------------------------- MCP and prompts (cycle 1 integrity fixes)
+def test_mcp_not_matched_lists_graded_items_and_save_guide_refuses_solutions():
+    import sys
+    sys.path.insert(0, "tests")
+    from test_integrity_probe import PS3, SOLUTION
+    from course_assistant import mcp_server as m
+    s = Store(":memory:")
+    m.set_store(s)
+    try:
+        c = s.add_course("Chem")
+        ps = s.add_material(c, "assignment", "Problem Set 3")
+        s.replace_chunks(ps, [{"text": PS3, "loc_kind": "page", "loc_start": 1, "loc_label": "p. 1"}])
+        assert "split into 2 graded item" in m.mark_graded(c, "", material_id=ps)
+        out = m.get_twin_instructions(c, "my friend wants the weigh-out mass for a salty solution")
+        assert out.startswith("NOT MATCHED") and "compare the request yourself" in out and "NaCl" in out
+        assert "Problem 1 (Problem Set 3)" in m.list_graded(c)
+        res = m.save_guide(c, "answer", "Salt solution", SOLUTION["c1"], [])
+        assert res.startswith("NOT SAVED") and s.guides(c) == []
+        ok = m.save_guide(c, "answer", "Molarity", "Molarity is moles of solute per liter of solution.", [])
+        assert ok.startswith("Saved guide")
+        assert "ungraded practice" in m.INSTRUCTIONS
+    finally:
+        m.set_store(None)
+
+
+def test_numbers_normalised():
+    assert integrity.numbers("0.350 and .35 and 250.0 and 1,556 and 40.92/12.01") == ["0.35", "0.35", "250", "1556", "40.92", "12.01"]
+    assert integrity.significant_numbers("10 points, x^2, 0, 1") == set()
