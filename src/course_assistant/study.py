@@ -713,13 +713,70 @@ def _clean_graph(graph: dict[str, Any], n_sources: int) -> dict[str, Any]:
     return {"nodes": nodes, "edges": edges}
 
 
+_FILLER_WORDS = frozenset("""about after again also because before being between could does during each from have having
+into more most other over same should since some such than that their them then there these they this those through
+under until very were what when where which while will with would your""".split())
+
+
+def _vocab(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]{5,}", (text or "").lower()) if w not in _FILLER_WORDS}
+
+
+def _scoped_sources(store: Store, pool: list[dict[str, Any]], scope: str, cap: int = MAX_SOURCES) -> list[dict[str, Any]]:
+    """Sources for a map scoped to named documents ('Federalist No. 10 and 51 and Chapters 7 and 8'): every named
+    document gets its share of the slots, taken from its body passages that share the most vocabulary with the other
+    named documents (and with any topic words in the scope), so 'The status of women' does not crowd out Fed 51."""
+    r = _mod("retrieval")
+    if not hasattr(r, "query_doc_ids") or not hasattr(r, "is_scaffold_chunk"):
+        return []
+    ids = r.query_doc_ids(scope)
+    named = [m for m in pool if r.title_doc_id(m["title"]) in ids] if ids else []
+    if len(named) < 2:
+        return []
+    texts: dict[int, list[dict[str, Any]]] = {}
+    for m in named:
+        chunks = [c for c in store.chunks_of(m["id"]) if not _is_noise(c["text"])
+                  and not r.is_scaffold_chunk(c["text"], c.get("heading", ""))
+                  and not r.is_title_only(c["text"], c.get("heading", ""))
+                  and not r.is_header_chunk(c["text"], m.get("title", ""))]
+        texts[m["id"]] = chunks or [c for c in store.chunks_of(m["id"]) if not _is_noise(c["text"])]
+    df: dict[str, int] = {}
+    for m in named:
+        for w in set().union(*(_vocab(c["text"] + " " + c.get("heading", "")) for c in texts[m["id"]])) if texts[m["id"]] else set():
+            df[w] = df.get(w, 0) + 1
+    topic = _vocab(re.sub(r"\b(federalist|chapters?|papers?|no|and)\b|\d+", " ", scope.lower()))
+    picks: dict[int, list[dict[str, Any]]] = {}
+    for m in named:
+        def score(c, m=m):
+            words = _vocab(c["text"] + " " + c.get("heading", ""))
+            shared = sum(1 for w in words if df.get(w, 0) >= 2)
+            return (shared + 3 * len(words & topic)) / (len(words) ** 0.5 + 1)
+        ranked = sorted(texts[m["id"]], key=score, reverse=True)
+        picks[m["id"]] = ranked
+    quota = {m["id"]: 0 for m in named}
+    left = cap
+    while left > 0 and any(quota[i] < len(picks[i]) for i in quota):  # one slot at a time, so a short paper gives its unused share away
+        for i in quota:
+            if left > 0 and quota[i] < len(picks[i]):
+                quota[i] += 1
+                left -= 1
+    lists = []
+    for m in named:
+        chosen = sorted(picks[m["id"]][:quota[m["id"]]], key=lambda c: c["ord"] if "ord" in c else c["id"])
+        lists.append([_source_from_chunk(c, m["title"], m["kind"]) for c in chosen])
+    return _interleave(lists, cap=cap)
+
+
 def concept_map(store: Store, course_id: int, provider, *, scope: str = "", material_ids: list[int] | None = None) -> int:
     _need(provider)
     scope = scope.strip()
     pool = [m for m in store.materials(course_id) if _usable(m)]
     if material_ids:
         pool = [m for m in store.materials(course_id) if m["id"] in {int(i) for i in material_ids}]
-    if scope:
+    scoped = _scoped_sources(store, pool, scope) if scope else []
+    if scoped:
+        sources = scoped
+    elif scope:
         mine = [m["id"] for m in pool if scope.casefold() in m["title"].casefold()]
         sources = _merge(_spread_materials(store, mine, 8, per=4) if mine else [],
                          _search(store, course_id, scope, MAX_SOURCES, exclude_graded=True,
