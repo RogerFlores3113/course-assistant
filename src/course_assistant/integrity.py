@@ -1751,9 +1751,12 @@ _ANGLE_VEC = re.compile(r"[<\u27e8\u2329\u3008]\s*(-?[\d./]+(?:\s*[,;]\s*-?[\d./
 _COUNT_NOUN = (r"(?:unknowns?|pivots?|solutions?|variables?|equations?|steps?|rows?|columns?|cols?|entr(?:y|ies)|components?|"
                r"parameters?|constraints?|dimensions?|times?|ways?|cases?|degrees?|operations?|terms?|iterations?|elements?|"
                r"vectors?|matri(?:x|ces)|systems?|lines?|planes?|values?|answers?|numbers?|things?|zeros?|nonzeros?|"
+               r"examples?|problems?|questions?|exercises?|hours?|minutes?|days?|weeks?|credits?|lectures?|sections?|chapters?|"
+               r"pages?|sentences?|paragraphs?|words?|sources?|reasons?|ideas?|options?|methods?|types?|kinds?|parts?|items?|rules?|"
+               r"facts?|digits?|places?|assignments?|exams?|quizz?(?:es)?|students?|copies|"
                r"at\s+a\s+time|by\s+one|per\b)")
 _COUNT_MOD = r"(?:(?:more|other|free|extra|additional|nonzero|distinct|different|separate|independent|dependent|unique|"
-_COUNT_MOD += r"single|pivot|basic)\s+)*"
+_COUNT_MOD += r"single|pivot|basic|worked|solved|practice|sample|typical|short|key|main|small|big|large|real|useful|fully)\s+)*"
 _COUNT_PHRASE = re.compile(r"(?<![\w.])(?<![\d,;/\-]\s)(?<![\d,;/\-])(" + "|".join(sorted(_WORDNUM, key=len, reverse=True)) +
                            r"|\d{1,2})(?![\d.]|\s*[,;/])(?=\s+" + _COUNT_MOD + _COUNT_NOUN + r"\b)", re.I)
 
@@ -2290,6 +2293,18 @@ def _build_matrix_from_entries(letter: str, cells: dict[tuple[int, int], str]) -
     return None
 
 
+def _mult_comps(rows: list[list[str]]) -> list[_Comp]:
+    """The multipliers of a unit lower triangular factor as one list, in reading order and in column order: 'the
+    multipliers are 2, -1, -1' names them without a letter."""
+    n = len(rows)
+    by_row = [rows[i][j] for i in range(1, n) for j in range(i)]
+    by_col = [rows[i][j] for j in range(n - 1) for i in range(j + 1, n)]
+    out = [_Comp("mult", "vec", [by_row])]
+    if by_col != by_row:
+        out.append(_Comp("mult", "vec", [by_col]))
+    return out
+
+
 @lru_cache(maxsize=256)
 def _build_index(raws: tuple[str, ...], body: str) -> _Index:
     """The item's key as named entries and whole values, derived both ways: 'x = (1, 1, 2)' gives x1..x3, 'L = [[..]]'
@@ -2318,6 +2333,8 @@ def _build_index(raws: tuple[str, ...], body: str) -> _Index:
                     ix.entries.append(_Entry(f"{nm}{i}{j}", v, "", True))
             if nm == "u" and len(kv.rows) >= 3 and all(len(r) == len(kv.rows) for r in kv.rows):
                 ix.comps.append(_Comp("diag", "vec", [[kv.rows[i][i] for i in range(len(kv.rows))]]))
+            if nm == "l" and len(kv.rows) >= 3 and all(len(r) == len(kv.rows) for r in kv.rows):
+                ix.comps.extend(_mult_comps(kv.rows))
         elif kv.kind == "num":
             ix.entries.append(_Entry(nm, kv.nums[0], kv.unit, sig=kv.sig))
             if nm:
@@ -2340,6 +2357,8 @@ def _build_index(raws: tuple[str, ...], body: str) -> _Index:
             ix.comps.append(_Comp(letter, "mat", rows))
             if letter == "u":
                 ix.comps.append(_Comp("diag", "vec", [[rows[i][i] for i in range(len(rows))]]))
+            if letter == "l" and len(rows) >= 3:
+                ix.comps.extend(_mult_comps(rows))
     if {"x", "y", "z"} <= set(explicit) and "x" not in have and not any(c.kind == "vec" and c.name == "x" for c in ix.comps):
         ix.comps.append(_Comp("x", "vec", [[explicit["x"], explicit["y"], explicit["z"]]]))  # x, y, z given one by one
     for letter, vs in vec.items():
@@ -2407,7 +2426,10 @@ _LABEL_NUM = re.compile(r"\b(?:row|rows|column|columns|col|entry|entries|compone
                         r"step|steps|part|item|equation|pivot|number|no\.|eq\.?)\s*#?\s*\d+|#\s*\d+", re.I)
 _QREF = re.compile(
     r"\b(?:first|second|third|fourth|last|middle|next|previous|top|bottom)\b[^.?!]{0,30}\b(?:entry|entries|component|"
-    r"row|column|one|unknown|solution|pivot|multiplier|diagonal|element|value|number|answer)\b|\bwhich\b|"
+    r"row|column|one|unknown|solution|pivot|multiplier|diagonal|element|value|number|answer)\b|"
+    r"\bwhich\s+(?:one|entry|entries|component|components|row|rows|column|columns|unknown|unknowns|value|values|number|"
+    r"numbers|answer|answers|solution|solutions|pivot|pivots|multiplier|multipliers|variable|variables|"
+    r"[a-z]\d{0,3})\b|"
     r"\bin\s+(?:milli|kilo|micro)?(?:gram|mole|liter|litre)s?\b|\bin\s+(?:mg|g|kg|mol|mmol|ml|l)\b|"
     r"\bhow\s+many\s+(?:\w+\s+)?(?:atoms?|carbons?|hydrogens?|oxygens?|nitrogens?|sulfurs?|moles?|grams?)\b|"
     r"\bdiagonal\b|\bthe\s+(?:first|second|third|last)\b|"
@@ -2449,7 +2471,15 @@ def _is_const(n: str) -> bool:
     return any(n == c or (_sig(n) >= 3 and num_eq(n, c) and _sig(n) <= _sig(c)) for c in _CONSTANTS)
 
 
+_BRACKET_CITE = re.compile(r"(?<![\[,=:(\d])(?<![\[,=:]\s)\[\s*\d{1,2}(?:\s*[,;\u2013-]\s*\d{1,2})*\s*\](?!\s*[\]\[(])")
+
+
 def _reply_numbers(text: str) -> list[str]:
+    # a lone '[1]' or '[2, 3]' after words is a source marker, never a value ('... pm [1], but ...')
+    text = text or ""
+    text = _BRACKET_CITE.sub(lambda m: m.group(0) if re.search(r"\d\s*[,;\u2013-]", m.group(0)) and re.search(
+        r"(?:\b(?:rows?|columns?|cols?|vector|vectors|matrix|is|are|equals?|gives?|be)|[=:])[ \t]*$", text[max(0, m.start() - 12):m.start()],
+        re.I) else " ", text)
     t = _LABEL_NUM.sub(" ", _blank_logistics(_strip_pct(_norm_hay(blank_counts(text)))))
     return [_canon(m.group(0)) for m in _NUM.finditer(t)]
 
@@ -2482,6 +2512,16 @@ def _near_answer(h: "_Hay", pos: int) -> bool:
     return bool(_ANSWER_NEAR.search(h.low[max(0, pos - 60):pos]))
 
 
+# a list of intermediate values leaks when the reply names the quantity the key names ('the multipliers are 2, -1, -1')
+_QUANTITY = {"mult": re.compile(r"(?<![a-z0-9_])(?:multipliers?|l\d\d|elimination\s+factors?|l\s+(?:entries|below))(?![a-z0-9_])"),
+             "diag": re.compile(r"(?<![a-z0-9_])(?:pivots?|diagonal|u\d\d)(?![a-z0-9_])")}
+
+
+def _quantity_before(h: "_Hay", comp: _Comp, pos: int) -> bool:
+    rx = _QUANTITY.get(comp.name)
+    return bool(rx and rx.search(h.low[max(0, pos - 70):pos]))
+
+
 def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None, loose: int = 0) -> bool:
     """given: the vectors and rows the problem itself states; a whole value or a piece of one that the problem gives
     ('A has rows (2,1,3)', which is also row 1 of U) is data, never a leaked value."""
@@ -2495,8 +2535,11 @@ def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None,
             return False
         # loose: the chat or the text is already about this item, so an exact-order run equal to the vector is the vector in
         # any rendering (1 = anywhere in the text when the chat is touched, 2 = only right after 'solution', 'answer' ...)
+        if comp.name == "mult":  # small whole multipliers: a hit when named by their quantity (or the chat is about the item)
+            return any(_vec_hit(s, comp.rows[0], True, True) for p, s in live
+                       if loose == 2 or _quantity_before(h, comp, p) or h.named_before("mult", p))
         return any(_vec_hit(s, comp.rows[0], True, (bool(comp.name) and h.named_before(comp.name, p)) or loose == 2
-                            or (loose == 1 and _near_answer(h, p))) for p, s in live)
+                            or (loose == 1 and _near_answer(h, p)) or _quantity_before(h, comp, p)) for p, s in live)
     if comp.kind == "sys":  # a row of the triangular system that the problem does not state itself
         return any(sum(1 for x in r if x not in ("0", "-0")) >= 2 and not _stated(r, given)
                    and any(_vec_hit(sq, r, True) for sq in seqs) for r in comp.rows)
@@ -2533,13 +2576,13 @@ def _ordinal_pairs(text: str) -> list[tuple[int, str, str]]:
     return out
 
 
-def _bound_small(h: "_Hay", ix: _Index, reply: str) -> list[str]:
+def _bound_small(h: "_Hay", ix: _Index, reply: str, data: frozenset | set = frozenset()) -> list[str]:
     """A small value the reply gives to one of the key's own names ('x3 = 2', 'l21 is minus one', 'two carbons',
     'the last entry of x is 2')."""
     t = h.low
     found: list[str] = []
     for e in ix.entries:
-        if not _is_small(e.val):
+        if not _is_small(e.val) or e.val in data:
             continue
         if e.unit == "atom":
             sym = e.name[5:]
@@ -2592,6 +2635,57 @@ def _entry_in(h: "_Hay", e: _Entry) -> bool:
         if "." in e.val and _sig(e.val) >= 3 or (e.name and h.named(e.name, e.val)):
             return True
     return False
+
+
+_ALIAS_LETTERS = "xyzw"
+
+
+def _alias_bound(h: "_Hay", ix: _Index, data: frozenset | set = frozenset()) -> list[str]:
+    """The unknown vector x of the key written one letter per entry: 'z = 2, then y = 1, then x = 1' for x = (1, 1, 2). The
+    letters x, y, z, w stand for its entries in order. Returns the letters bound to their entry's value, in any order and
+    with any connective between them."""
+    out: list[str] = []
+    for comp in ix.comps:
+        if comp.kind != "vec" or comp.name != "x" or not 2 <= len(comp.rows[0]) <= 4:
+            continue
+        if any(e.name in tuple(_ALIAS_LETTERS) for e in ix.entries):
+            continue  # the key already names x, y, z one by one
+        for i, v in enumerate(comp.rows[0]):
+            if v not in data and h.named(_ALIAS_LETTERS[i], v):
+                out.append(_ALIAS_LETTERS[i])
+    return list(dict.fromkeys(out))
+
+
+# the words that stand for a family of the key's own names (lambda1, lambda2 ...): 'lambda = 5', 'the eigenvalues are 5 and 2'
+_FAMILY_WORDS = {"lambda": r"lambda|\u03bb|eigen\s*values?|eigenvalues?", "sigma": r"sigma|\u03c3|singular\s+values?",
+                 "mu": r"mu|\u03bc", "eig": r"eig|eigen\s*values?"}
+_ORD_WORD = r"(?:(?:first|second|third|fourth|larger|largest|smaller|smallest|other|dominant|remaining)\s+)?"
+
+
+def _family_bound(h: "_Hay", ix: _Index, data: frozenset | set = frozenset()) -> list[str]:
+    """A value of the key's own symbol family stated for that symbol: 'lambda = 5', 'lambda1 is 5 and lambda2 is 2', 'the
+    eigenvalues are 5 and 2'. Works for small values too. Returns the family names that were bound."""
+    fams: dict[str, set[str]] = {}
+    for e in ix.entries:
+        if e.name and e.unit != "atom" and e.val not in data and not _is_const(e.val):
+            fam = re.sub(r"\d+$", "", e.name)
+            if len(fam) >= 3 and fam.isalpha():
+                fams.setdefault(fam, set()).add(e.val)
+    out: list[str] = []
+    for fam, vals in fams.items():
+        words = _FAMILY_WORDS["lambda"] if fam.startswith("eigen") else _FAMILY_WORDS.get(fam, re.escape(fam) + r"s?")
+        plural = bool(re.search(r"s\??$|values", words)) or fam in ("lambda", "sigma")
+        head = _ORD_WORD + r"(?:" + words + r")(?![a-z])(?:\s+of\s+(?:the\s+)?(?:matrix\s+)?[a-z]\w{0,2}(?![a-z]))?\s*\d{0,2}\s*"
+        item = r"(-?\d[\d./]*)"
+        # 'W = 5', 'W is 5 and 2', 'W: 5, 2'; the plural words also read 'eigenvalues 5 and 2' with nothing between
+        pat = re.compile(head + r"(?:" + _CONNECT + (r"|" if plural else r"") + r")\s*(?:about\s+|approximately\s+)?" + item
+                         + r"((?:\s*(?:,|;|\band\b|\bor\b|\bthen\b)\s*(?:(?:" + words + r")\s*\d{0,2}\s*(?:" + _CONNECT + r")\s*)?-?\d[\d./]*)*)")
+        for m in pat.finditer(h.low):
+            nums = [_canon(x.rstrip("./")) for x in re.findall(r"-?\d[\d./]*", m.group(1) + " " + m.group(2))]
+            if any(num_eq(a, b) for a in nums for b in vals):
+                out.append(fam)
+                break
+    return out
 
 
 def _echoed(vec, asked) -> bool:
@@ -2654,12 +2748,19 @@ def key_leak(reply, item=None, ctx=None):
         return bound
     gate = bool(c.get("small", named)) or sticky
     if gate or named:
-        b = _bound_small(h, ix, reply)
+        letters = _alias_bound(h, ix, data)  # 'z = 2, then y = 1, then x = 1' for x = (1, 1, 2)
+        if len(set(letters) | set(bound)) >= 2 and letters:
+            return letters
+        fam = _family_bound(h, ix, data)  # 'lambda = 5', 'the eigenvalues are 5 and 2'
+        if fam:
+            return fam
+    if gate or named:
+        b = _bound_small(h, ix, reply, data)
         if b and (gate or len(b) >= 2):  # a text not clearly about the item needs two of its names bound to its values
             return b
     if gate:
         if c.get("short") and c.get("question_refs"):
-            svals = {e.val for e in ix.entries if _is_small(e.val)}
+            svals = {e.val for e in ix.entries if _is_small(e.val) and e.val not in data}
             if any(n in svals for n in _reply_numbers(reply) if _is_small(n)):
                 return ["value"]
     return []
