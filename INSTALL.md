@@ -81,7 +81,7 @@ If the installer ends with "Already connected. Restart Claude Desktop to use the
 version.", Course Assistant was already linked to Claude Desktop. Tell them to restart
 Claude Desktop and skip Connect.
 
-If Claude Desktop is not installed: Connect still works for Codex and Claude Code skills.
+If Claude Desktop is not installed: Connect still works for Codex and Claude Code, and it writes nothing for an app that is not installed. It lists the files it will change and asks first (`--yes` skips the question).
 If the person wants Claude Desktop, they should install it from claude.ai/download first,
 open it once, then connect again.
 

@@ -44,6 +44,15 @@ def guess_term(text: str) -> str:
     return y.group(1) if y else ""
 
 
+def source_label(material: dict[str, Any] | None) -> str | None:
+    """'Past offering: Fall 2018' for a material saved as a past offering (just 'Past offering' when no term can be
+    read from its title, file name or address); None for this term's own materials. For grounding.format_sources."""
+    if not material or material.get("kind") != "past_offering":
+        return None
+    term = guess_term(" ".join(str(material.get(k) or "") for k in ("title", "original_name", "source_url")))
+    return f"Past offering: {term}" if term else "Past offering"
+
+
 def looks_like_offering(text: str) -> bool:
     return bool(guess_term(text) or _ARCHIVE_RE.search(text or ""))
 
@@ -180,9 +189,10 @@ def candidates_from_urls(store: Store, course_id: int, urls: list[str], *, fetch
 
 
 def crawl(store: Store, course_id: int, seed_url: str, *, max_pages: int = DEFAULT_MAX_PAGES,
-          fetcher: Any = None, found_by: str = "crawl") -> list[dict[str, Any]]:
+          fetcher: Any = None, found_by: str = "crawl", report: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Walk outward from seed_url on the same host and under the same path prefix, following links whose text or
-    address looks like a term, a year or an archive. Returns the candidates stored by this run."""
+    address looks like a term, a year or an archive. Returns the candidates stored by this run. When `report` is
+    given, the start page's outcome is added to report["seeds"] as (url, "ok" | "blocked" | "unreachable", note)."""
     if store.course(course_id) is None:
         raise ValueError(f"No course with id {course_id}.")
     seed = clean_url(seed_url)
@@ -209,12 +219,18 @@ def crawl(store: Store, course_id: int, seed_url: str, *, max_pages: int = DEFAU
             res = f.get(url)
             html = _page_text(res)
         except Exception as exc:
+            if url == seed and report is not None:
+                report.setdefault("seeds", []).append(
+                    (url, "blocked" if _is_blocked(exc) else "unreachable",
+                     _block_note(exc, f, url) if _is_blocked(exc) else str(exc).strip()[:200]))
             if _is_blocked(exc) and url != seed and guess_term(f"{link_text} {url}"):
                 cid = store.add_offering_candidate(course_id, url, title=link_text,
                                                    term_label=guess_term(f"{link_text} {url}"), found_by=found_by,
                                                    status="blocked", note=_block_note(exc, f, url))
                 found.append(store.offering_candidate(cid))  # type: ignore[arg-type]
             continue
+        if url == seed and report is not None:
+            report.setdefault("seeds", []).append((url, "ok", ""))
         title, links = parse_page(html)
         term = guess_term(f"{title} {link_text} {url}")
         if url != seed and term:
@@ -277,6 +293,78 @@ def pick(store: Store, course_id: int, candidate_id: int, *, fetcher: Any = None
 
 
 _URL_IN_TEXT = re.compile(r"https?://[^\s<>\"')\]]+")
+_OTHER_SCHEME = re.compile(r"(?<![A-Za-z0-9+.-])(?!https?://)([A-Za-z][A-Za-z0-9+.-]*)://[^\s<>\"')\]]+")
+
+
+def find_past_offerings_report(store: Store, course_id: int, query_or_urls: str = "", *, fetcher: Any = None,
+                               found_by: str = "paste") -> dict[str, Any]:
+    """Like find_past_offerings, but says what happened to everything it was given.
+
+    {"found": [candidates stored by this call],
+     "skipped": [{"url", "reason"}]  links that were not used, each with the reason (not a web address, listed twice,
+                                      already on the list),
+     "unreachable": [{"url", "reason"}]  start pages that could not be read (site down, blocked, wrong address),
+     "message": a plain sentence when nothing was found and a reason is known, else ""}"""
+    course = store.course(course_id)
+    if course is None:
+        raise ValueError(f"No course with id {course_id}.")
+    text = query_or_urls or ""
+    skipped: list[dict[str, str]] = []
+    urls: list[str] = []
+    for u in _URL_IN_TEXT.findall(text):
+        key = urldefrag(u)[0]
+        if key in urls:
+            skipped.append({"url": u, "reason": "this link was listed more than once"})
+        else:
+            urls.append(key)
+    for m in _OTHER_SCHEME.finditer(text):
+        skipped.append({"url": m.group(0), "reason": f"{m.group(1).lower()}:// links can't be read; "
+                                                    "only addresses that start with http:// or https:// work"})
+    out: dict[str, Any] = {"found": [], "skipped": skipped, "unreachable": [], "message": ""}
+    if urls:
+        existing = {c["url"] for c in store.offering_candidates(course_id)}
+        fresh = []
+        for u in urls:
+            if u in existing:
+                skipped.append({"url": u, "reason": "already on the list below"})
+            else:
+                fresh.append(u)
+        if fresh:
+            out["found"] = candidates_from_urls(store, course_id, fresh, fetcher=fetcher, found_by=found_by)
+        elif not skipped:
+            raise ValueError("Give at least one link.")
+        return out
+    if skipped and not urls:
+        out["message"] = "None of those links could be used: " + "; ".join(f"{x['url']} ({x['reason']})" for x in skipped) + "."
+        return out
+    seeds = guess_course_urls(course)
+    if not seeds:
+        raise ValueError("No links given and the course has no website saved. Paste links to older course pages, "
+                         "or add the course website in the course settings.")
+    crawl_by = "crawl" if found_by == "paste" else found_by
+    rep: dict[str, Any] = {}
+    found = crawl(store, course_id, seeds[0], fetcher=fetcher, found_by=crawl_by, report=rep)
+    for guess in seeds[1:4]:
+        if found:
+            break
+        try:
+            found = crawl(store, course_id, guess, max_pages=5, fetcher=fetcher, found_by=crawl_by, report=rep)
+        except Exception:
+            continue
+    out["found"] = found
+    seed_results = rep.get("seeds", [])
+    first = seed_results[0] if seed_results else None
+    if first and first[1] != "ok":
+        out["unreachable"].append({"url": first[0], "reason": first[2] or "no answer"})
+        if not found:
+            host = urlsplit(first[0]).hostname or first[0]
+            why = first[2] or "it did not answer"
+            if first[1] == "blocked":
+                out["message"] = f"I couldn't open {host}: {why}"
+            else:
+                out["message"] = (f"I couldn't reach {host} ({why}). Check the course website address in the course "
+                                  "settings and your internet connection, or paste links to older course pages instead.")
+    return out
 
 
 def find_past_offerings(store: Store, course_id: int, query_or_urls: str = "", *, fetcher: Any = None,
@@ -285,27 +373,13 @@ def find_past_offerings(store: Store, course_id: int, query_or_urls: str = "", *
 
     Links in the text are stored as candidates (candidates_from_urls). With no links, crawl from the course website
     and likely archive pages under it (guess_course_urls). Raises ValueError with a plain message when there is
-    nothing to start from."""
-    course = store.course(course_id)
-    if course is None:
-        raise ValueError(f"No course with id {course_id}.")
-    urls: list[str] = []
-    for u in _URL_IN_TEXT.findall(query_or_urls or ""):
-        if u not in urls:
-            urls.append(u)
-    if urls:
-        return candidates_from_urls(store, course_id, urls, fetcher=fetcher, found_by=found_by)
-    seeds = guess_course_urls(course)
-    if not seeds:
-        raise ValueError("No links given and the course has no website saved. Paste links to older course pages, "
-                         "or add the course website in the course settings.")
-    crawl_by = "crawl" if found_by == "paste" else found_by
-    found = crawl(store, course_id, seeds[0], fetcher=fetcher, found_by=crawl_by)
-    for guess in seeds[1:4]:
-        if found:
-            break
-        try:
-            found = crawl(store, course_id, guess, max_pages=5, fetcher=fetcher, found_by=crawl_by)
-        except Exception:
-            continue
-    return found
+    nothing to start from. Use find_past_offerings_report to also learn what was skipped or unreachable."""
+    return find_past_offerings_report(store, course_id, query_or_urls, fetcher=fetcher, found_by=found_by)["found"]
+
+
+def report_lines(report: dict[str, Any]) -> list[str]:
+    """Plain sentences about skipped links and unreachable pages, for the page or an AI app."""
+    lines = [f"Skipped {x['url']}: {x['reason']}." for x in report.get("skipped", [])]
+    if not report.get("found") and report.get("message"):
+        lines.append(report["message"])
+    return lines

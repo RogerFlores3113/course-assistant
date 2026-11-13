@@ -1,4 +1,5 @@
 {% from "_fields.html" import fa, fe with context %}
+{% macro ftype(m) %}{% set name = m.original_name or m.filename or '' %}{% set ext = (name.rsplit('.', 1)[-1] | lower) if '.' in name else '' %}{% set labels = {'docx': 'Word', 'doc': 'Word', 'md': 'Markdown', 'markdown': 'Markdown', 'pdf': 'PDF', 'pptx': 'PowerPoint', 'txt': 'Plain text', 'vtt': 'Captions', 'srt': 'Captions', 'epub': 'EPUB', 'ipynb': 'Notebook', 'html': 'Web page', 'htm': 'Web page', 'png': 'Photo', 'jpg': 'Photo', 'jpeg': 'Photo'} %}{% if m.source_url %}Web page{% elif ext in labels %}{{ labels[ext] }}{% elif ext %}{{ ext | upper }}{% else %}Typed note{% endif %}{% endmacro %}
 <h2>Materials</h2>
 {% if not materials %}<div class="card empty"><p><strong>Nothing saved yet.</strong> Start with the syllabus: add it below with the kind set to Syllabus and the app pulls your exam and assignment dates into the Calendar. Then add lecture slides, readings and notes.</p></div>{% endif %}
 <div class="card">
@@ -23,10 +24,14 @@
   <button class="btn" type="submit">Save note</button></form></div>
 </div>
 {% if materials %}<h3>Saved materials</h3>
-<ul class="plain list">
-{% for m in materials %}<li class="row-item">
+{% set q_raw = (request.query_params.get('q', '') if request else '') | trim %}{% set q = q_raw | lower %}
+<form method="get" action="/courses/{{ course.id }}/materials" role="search" class="form row"><label>Search your materials <input type="search" name="q" value="{{ q_raw }}" placeholder="Title or file name"></label> <button class="btn small" type="submit">Search</button>{% if q %} <a class="btn small ghost" href="/courses/{{ course.id }}/materials">Show all</a>{% endif %}</form>
+<p class="muted small">Grouped by kind. "Mark as graded" is offered only for assignments, handouts and other items, not for the syllabus, lectures or readings.</p>
+{% set shown = namespace(n=0) %}
+{% for kind, klabel in material_kinds.items() %}{% set grp = namespace(n=0) %}
+{% for m in materials if m.kind == kind %}{% set hay = (m.title ~ ' ' ~ (m.original_name or '') ~ ' ' ~ klabel) | lower %}{% if not q or q in hay %}{% if grp.n == 0 %}<h4 class="kind-group">{{ klabel }}</h4><ul class="plain list">{% endif %}{% set grp.n = grp.n + 1 %}{% set shown.n = shown.n + 1 %}<li class="row-item">
   <div class="grow"><a href="/read/{{ m.id }}"><strong>{{ m.title }}</strong></a>
-  <span class="badge kind-{{ m.kind }}">{{ m.kind_label }}</span>
+  <span class="badge kind-{{ m.kind }}">{{ m.kind_label }}</span> <span class="muted small file-type">{{ ftype(m) }}{% if m.original_name %}: {{ m.original_name }}{% endif %}</span>
   {% if m.graded %}<span class="badge warn-b">Graded work</span>{% endif %}
   {% if m.added_by == 'ai_app' %}<span class="badge">Added by your AI app</span>{% endif %}<br>
   <span class="muted small">{{ m.chunk_count }} passage{{ '' if m.chunk_count == 1 else 's' }}{% if m.lecture_date %} &middot; lecture {{ m.lecture_date | day }}{% endif %}</span>
@@ -38,8 +43,9 @@
   <div class="actions">
     {% if m.job_retry %}<form method="post" action="/materials/{{ m.id }}/process" hx-post="/materials/{{ m.id }}/process" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" data-busy="Working on {{ m.title }}. A long recording can take several minutes."><button class="btn small" type="submit">{{ 'Try again' if m.job_text.endswith('finish') or 'did not finish' in m.job_text else 'Start now' }}<span class="visually-hidden"> {{ m.title }}</span></button></form>{% endif %}
     <a class="btn small ghost" href="/materials/{{ m.id }}/edit">Edit<span class="visually-hidden"> {{ m.title }}</span></a>
-    <form method="post" action="/materials/{{ m.id }}/graded" hx-post="/materials/{{ m.id }}/graded" hx-target="#course-body" hx-swap="outerHTML"><input type="hidden" name="graded" value="{{ 0 if m.graded else 1 }}"><button class="btn small ghost" type="submit">{{ 'Unmark graded' if m.graded else 'Mark as graded' }}<span class="visually-hidden"> {{ m.title }}</span></button></form>
-    <a class="btn small ghost" href="/materials/{{ m.id }}/delete">Delete<span class="visually-hidden"> {{ m.title }}</span></a></div></li>{% endfor %}</ul>{% endif %}
+    {% if m.graded or m.kind in ('assignment', 'handout', 'other') %}<form method="post" action="/materials/{{ m.id }}/graded" hx-post="/materials/{{ m.id }}/graded" hx-target="#course-body" hx-swap="outerHTML"><input type="hidden" name="graded" value="{{ 0 if m.graded else 1 }}"><button class="btn small ghost" type="submit">{{ 'Unmark graded' if m.graded else 'Mark as graded' }}<span class="visually-hidden"> {{ m.title }}</span></button></form>{% endif %}
+    <a class="btn small ghost" href="/materials/{{ m.id }}/delete">Delete<span class="visually-hidden"> {{ m.title }}</span></a></div></li>{% endif %}{% endfor %}{% if grp.n %}</ul>{% endif %}{% endfor %}
+{% if q and not shown.n %}<div class="card empty"><p><strong>No materials match "{{ q_raw }}".</strong> Check the spelling or press Show all.</p></div>{% endif %}{% endif %}
 {% if graded and graded.items %}<section aria-labelledby="graded-h"><h3 id="graded-h">Graded work the app protects ({{ graded.count }})</h3>
 <p class="muted small">The app found these in the materials you marked as graded. It will explain the ideas and write similar problems for them, never solve them. Check that the list is right: fix a label or kind, or remove anything that is not graded.</p>
 <ul class="plain list">{% for i in graded['items'] %}<li class="row-item"><div class="grow"><strong>{{ i.label or i.title }}</strong> <span class="badge">{{ i.kind_label }}</span>{% if i.material_title %} <span class="muted small">in {{ i.material_title }}</span>{% endif %}{% if i.excerpt %}<br><span class="muted small">{{ i.excerpt }}</span>{% endif %}</div>

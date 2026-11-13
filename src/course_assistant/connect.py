@@ -10,6 +10,8 @@ Safety rules, the same as the sister app Talent Search:
   * If the app isn't installed (its settings folder doesn't exist) nothing is created.
   * Running it twice changes nothing the second time.
   * A skills folder that we didn't create (no marker file) is never overwritten.
+  * Nothing is written for an AI app that isn't installed (no settings folder, no program on the PATH), and
+    write_plan() lists every path outside the app's own folder before anything is written.
 """
 from __future__ import annotations
 
@@ -340,8 +342,55 @@ def _copy_skill(skill: Path, dest: Path) -> str:
     return status
 
 
-def install_skills(home: Path | None = None, src: Path | None = None, only: list[str] | None = None) -> dict[str, Any]:
-    """Copy every bundled skill into each AI app's skills folder. A missing skills/ folder is not an error."""
+def detect_clients(home: Path | None = None) -> dict[str, bool]:
+    """Which AI apps look installed here. Claude Desktop and Codex: their settings folder exists (Codex also: a
+    `codex` program on the PATH). Claude Code: ~/.claude exists or a `claude` program is on the PATH."""
+    h = _home(home)
+    return {
+        "Claude Desktop": claude_config_path(home=h).parent.is_dir(),
+        "Codex": codex_config_path(h).parent.is_dir() or shutil.which("codex") is not None,
+        "Claude Code": (h / ".claude").is_dir() or shutil.which("claude") is not None,
+    }
+
+
+_TARGET_APPS = {"claude": ("Claude Desktop", "Claude Code"), "codex": ("Codex",), "all": ("Claude Desktop", "Claude Code", "Codex")}
+
+
+def write_plan(target: str = "all", *, with_skills: bool = True, home: Path | None = None) -> dict[str, Any]:
+    """What connecting would write outside the app's own folder, for installed apps only.
+    {"writes": [{"app", "path", "what"}], "skipped": [apps that aren't installed, so nothing is written for them]}"""
+    h = _home(home)
+    found = detect_clients(h)
+    writes: list[dict[str, str]] = []
+    skipped: list[str] = []
+    for app in _TARGET_APPS[target]:
+        if app == "Claude Code" and not with_skills:
+            continue
+        if not found[app]:
+            skipped.append(app)
+            continue
+        if app == "Claude Desktop":
+            writes.append({"app": app, "path": str(claude_config_path(home=h)), "what": "add Course Assistant to its settings"})
+        elif app == "Codex":
+            writes.append({"app": app, "path": str(codex_config_path(h)), "what": "add Course Assistant to its settings"})
+            if with_skills:
+                writes.append({"app": app, "path": str(skill_targets(h)["Codex"]), "what": "add the study skills"})
+        else:
+            writes.append({"app": app, "path": str(skill_targets(h)["Claude Code"]), "what": "add the study skills"})
+    return {"writes": writes, "skipped": skipped}
+
+
+def plan_lines(plan: dict[str, Any]) -> list[str]:
+    lines = [f"{w['app']}: {w['what']} ({w['path']})" for w in plan["writes"]]
+    if plan["skipped"]:
+        lines.append("Not installed here, so nothing will be written for: " + ", ".join(plan["skipped"]) + ".")
+    return lines
+
+
+def install_skills(home: Path | None = None, src: Path | None = None, only: list[str] | None = None,
+                   only_installed: bool = False) -> dict[str, Any]:
+    """Copy every bundled skill into each AI app's skills folder. A missing skills/ folder is not an error.
+    With only_installed, an app that doesn't look installed gets nothing (it is listed under "skipped")."""
     src = src or skills_source_dir()
     result: dict[str, Any] = {"found": [s.name for s in list_skills(src)], "targets": {}}
     if not result["found"]:
@@ -349,8 +398,13 @@ def install_skills(home: Path | None = None, src: Path | None = None, only: list
                              f"{src}). Connecting still works; your AI app just won't get the "
                              "extra study instructions.")
         return result
+    found = detect_clients(home) if only_installed else {}
+    result["skipped"] = []
     for app, base in skill_targets(home).items():
         if only and app not in only:
+            continue
+        if only_installed and not found.get(app):
+            result["skipped"].append(app)
             continue
         skills = list_skills(src, app)
         if not skills:
@@ -361,16 +415,17 @@ def install_skills(home: Path | None = None, src: Path | None = None, only: list
 
 
 # ------------------------------------------------------------ everything
-def connect(target: str = "all", *, with_skills: bool = True) -> list[dict[str, Any]]:
-    """Connect `claude`, `codex` or `all`. Returns one result dict per app (plus skills)."""
+def connect(target: str = "all", *, with_skills: bool = True, home: Path | None = None) -> list[dict[str, Any]]:
+    """Connect `claude`, `codex` or `all`. Returns one result dict per app (plus skills). Only installed apps are
+    touched; an app that isn't installed is reported and nothing is written for it."""
     results: list[dict[str, Any]] = []
     if target in ("claude", "all"):
-        results.append(connect_claude())
+        results.append(connect_claude(claude_config_path(home=home)))
     if target in ("codex", "all"):
-        results.append(connect_codex())
+        results.append(connect_codex(codex_config_path(home)))
     if with_skills:
         only = {"claude": ["Claude Code"], "codex": ["Codex"], "all": None}[target]
-        results.append({"app": "Skills", **install_skills(only=only)})
+        results.append({"app": "Skills", **install_skills(home=home, only=only, only_installed=True)})
     return results
 
 
@@ -379,6 +434,8 @@ def describe(result: dict[str, Any]) -> list[str]:
     app = result["app"]
     if app == "Skills":
         if not result["targets"]:
+            if result.get("skipped"):
+                return ["No skills were installed: " + " and ".join(result["skipped"]) + " doesn't seem to be installed here."]
             return [result.get("message", "No skills installed.")]
         lines = []
         for name, info in result["targets"].items():

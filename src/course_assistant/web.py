@@ -1000,32 +1000,48 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         return after(request, course_id, "ask", notice="Answer ready. It is the last message below.")
 
     # ------------------------------------------------------------------ past offerings
+    def _offering_report(off, st, course_id: int, text: str, **kw) -> dict[str, Any]:
+        fn = getattr(off, "find_past_offerings_report", None)
+        if callable(fn):
+            return fn(st, course_id, text, **kw)
+        return {"found": off.find_past_offerings(st, course_id, text, **kw), "skipped": [], "unreachable": [], "message": ""}
+
     @app.post("/courses/{course_id}/offerings/paste")
     async def offerings_paste(request: Request, course_id: int, links: str = Form(""), term_label: str = Form("")):
         require_course(course_id)
         if not re.search(r"https?://\S+", links):
             return after(request, course_id, "offerings", error="Paste one or more web addresses that start with http:// or https://.")
+        off = _mod("offerings")
         try:
-            found = await work(lambda: _mod("offerings").find_past_offerings(store, course_id, links))
+            rep = await work(lambda: _offering_report(off, store, course_id, links))
         except Exception as e:
             return after(request, course_id, "offerings", error=f"Those links did not work: {_friendly(e)}")
+        found = rep["found"]
         label = term_label.strip()
         if label:
             for c in found:
                 if not c.get("term_label"):
                     store.update_offering_candidate(c["id"], term_label=label)
         n = len(found)
+        skipped = " ".join(off.report_lines(rep)) if hasattr(off, "report_lines") else ""
+        if not n and skipped:
+            return after(request, course_id, "offerings", error=f"Nothing was added. {skipped}")
         return after(request, course_id, "offerings",
-                     notice=f"Added {n} link{'s' if n != 1 else ''} to the list below. Tick the ones to save.")
+                     notice=f"Added {n} link{'s' if n != 1 else ''} to the list below. Tick the ones to save."
+                            + (f" {skipped}" if skipped else ""))
 
     @app.post("/courses/{course_id}/offerings/search")
     async def offerings_search(request: Request, course_id: int):
         course = require_course(course_id)
+        off = _mod("offerings")
         try:
-            found = await work(lambda: _mod("offerings").find_past_offerings(store, course_id, "", found_by="crawl"))
+            rep = await work(lambda: _offering_report(off, store, course_id, "", found_by="crawl"))
         except Exception as e:
             return after(request, course_id, "offerings", error=f"The search did not work: {_friendly(e)}")
+        found = rep["found"]
         if not found:
+            if rep.get("message"):
+                return after(request, course_id, "offerings", error=rep["message"])
             return after(request, course_id, "offerings",
                          notice=f"Nothing new turned up for {course['name']}. You can paste links you know of instead.")
         return after(request, course_id, "offerings", notice=f"Found {len(found)} possible page{'s' if len(found) != 1 else ''}. Tick the ones to save.")
@@ -1368,6 +1384,11 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
             out["snippet"] = c.codex_snippet()
         except Exception:
             out["available"] = False
+        try:  # what pressing each button would write outside the app folder (shown before the button)
+            for t in ("claude", "codex"):
+                out["plan_" + t] = _mod("connect").write_plan(t)
+        except Exception:
+            pass
         return out
 
     @app.get("/connect", response_class=HTMLResponse)

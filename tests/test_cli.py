@@ -100,18 +100,52 @@ def test_serve_when_already_running_only_opens(monkeypatch):
     assert not opened
 
 
-def test_connect_dispatch(monkeypatch, capsys):
+@pytest.fixture
+def temp_home(tmp_path, monkeypatch):
+    h = tmp_path / "home"
+    h.mkdir()
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(h))
+    monkeypatch.setenv("APPDATA", str(h / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(h / "Local"))
+    monkeypatch.setenv("CODEX_HOME", str(h / ".codex"))
+    monkeypatch.setenv("PATH", str(tmp_path / "emptybin"))
+    return h
+
+
+def test_connect_dispatch(monkeypatch, capsys, temp_home):
     from course_assistant import connect
 
     calls = []
     monkeypatch.setattr(connect, "connect", lambda target, with_skills=True: calls.append((target, with_skills)) or
                         [{"app": "Skills", "targets": {}, "message": "none"}])
-    assert run("connect") == 0
+    assert run("connect", "--yes") == 0
     assert run("connect", "codex", "--no-skills") == 0
     assert calls == [("all", True), ("codex", False)]
 
 
-def test_connect_reports_failure(monkeypatch):
+def test_connect_all_writes_nothing_when_no_app_is_installed(temp_home, capsys):
+    assert run("connect", "all", "--yes") == 1  # Claude Desktop and Codex are reported as not installed
+    out = capsys.readouterr().out
+    assert "doesn't seem to be installed" in out
+    assert not (temp_home / ".claude").exists() and not (temp_home / ".agents").exists()
+    assert not (temp_home / ".codex").exists() and not (temp_home / ".config").exists()
+
+
+def test_connect_says_what_it_writes_and_asks_first(temp_home, monkeypatch, capsys):
+    (temp_home / ".codex").mkdir()
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+    assert run("connect", "codex") == 1
+    out = capsys.readouterr().out
+    assert str(temp_home / ".codex" / "config.toml") in out and str(temp_home / ".agents" / "skills") in out
+    assert "Nothing was changed" in out and not (temp_home / ".codex" / "config.toml").exists()
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    assert run("connect", "codex") == 0
+    assert (temp_home / ".codex" / "config.toml").exists()
+    assert (temp_home / ".agents" / "skills" / "course-assistant").exists()
+
+
+def test_connect_reports_failure(monkeypatch, temp_home):
     from course_assistant import connect
 
     monkeypatch.setattr(connect, "connect", lambda *a, **k: [{"app": "Codex", "installed": False, "ok": False, "message": "nope"}])
