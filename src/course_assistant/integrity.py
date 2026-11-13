@@ -2313,6 +2313,14 @@ def _sources_for(store, course_id: int, question: str, problem_text: str, graded
         found = sorted(seen.values(), key=lambda s: -s["score"])[:6]
         return _assignment_sources(store, graded) + found
     # a numeric problem's twin: the passages that teach its topic, never due dates, the schedule or unrelated chunks
+    ts = getattr(retrieval, "topic_sources", None)
+    if callable(ts) and graded.get("body"):
+        try:
+            found = ts(store, dict(graded, course_id=graded.get("course_id") or course_id), k=6)
+        except Exception:
+            found = []
+        if found:
+            return list(found)[:6]
     query, topic = topic_query(store, graded)
     if not query:
         query = " ".join(sorted(content_tokens(problem_text)))[:300] or (graded.get("title") or "")
@@ -2470,11 +2478,12 @@ def _feedback_reply(provider, store, course_id: int, graded: dict, src_block: st
     return essay.feedback_reply(provider, graded, kind, src_block, question, depth_rule, n_sources, sources)
 
 
-def twin_fallback(name: str, reason: str, check: bool = False) -> str:
+def twin_fallback(name: str, reason: str, check: bool = False, practice_button: bool = False) -> str:
     """The fixed page for a graded numeric request when two tries did not give a safe twin. One sentence of real reason,
     no claim that a similar problem is shown, and next steps."""
     why = f"I tried twice to write a similar problem with different numbers for {name}, but {reason or 'it did not come out right'}."
-    steps = ("- Press Practice below or ask again for a similar problem; a new try often works.\n"
+    steps = (("- Press Practice below or ask again for a similar problem; a new try often works.\n" if practice_button else
+              "- Ask again for a similar problem; a new try often works.\n") +
              "- Ask me about one concept, definition or technique at a time.\n"
              "- Re-read the assignment and find the lecture or reading that teaches the method (the Materials tab searches "
              "your saved files).")
@@ -2500,6 +2509,8 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
                            assignment=(kind == "essay" and bool(ESSAY_CUES.search(problem_text))) or feedback)
     src_block = grounding.format_sources(sources)
     depth_rule = grounding.DEPTH_RULES["standard"]
+    offers = [{"id": graded["id"], "label": _item_name(graded), "title": graded.get("title", "")}] \
+        if graded.get("id") and kind == "problem" else []  # a Practice button on the page (data["graded_offers"])
     mode, twin_problem, blocks, used, fell_back = "concepts", "", [], [], False
     fail_reason = ""
     item_for_key = dict(graded, answer_key=graded.get("answer_key") or (store.graded_item(graded["id"]) or {}).get("answer_key")) \
@@ -2540,7 +2551,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
         else:
             fell_back = True
     if fell_back:  # no more model calls: a fixed, honest page that says why there is no similar problem
-        blocks, used = [Block("text", twin_fallback(_item_name(graded), fail_reason, check), [])], []
+        blocks, used = [Block("text", twin_fallback(_item_name(graded), fail_reason, check, bool(offers)), [])], []
     elif mode != "twin" and not feedback and model_calls <= 0:
         # the caller already spent the request's calls (reply plus one regeneration): fixed text, no more calls
         blocks, used = [Block("text", SAFE_CHECK if check and kind != "essay" else
@@ -2581,7 +2592,8 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
               "mode": shown_mode, "graded_title": title, "graded_item_id": graded.get("id"), "kind": kind,
               "not_covered": False, "routing_note": note_line, "routed_by": why or graded.get("reason") or "match",
               "ask_normally": why not in ("key", "normal_reply") and not graded.get("by_key"), "question": question,
-              "feedback": feedback, "answer_check": bool(key)},
+              "feedback": feedback, "answer_check": bool(key),
+              "graded_offers": offers if (mode != "twin" and not feedback) else []},
         question=question, model=getattr(provider, "model", ""))
     return answer
 

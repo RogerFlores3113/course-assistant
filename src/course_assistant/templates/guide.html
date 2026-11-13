@@ -20,7 +20,6 @@
 {% if l.lines %}<text class="edge-label" text-anchor="middle">{% for ln in l.lines %}<tspan x="{{ l.lx }}" y="{{ l.ly + loop.index0 * 12 }}">{{ ln }}</tspan>{% endfor %}</text>{% endif %}{% endfor %}
 {% for b in graph.boxes %}<g><rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}" rx="8"/><text text-anchor="middle">{% for ln in b.lines %}<tspan x="{{ b.x + b.w // 2 }}" y="{{ b.ty + loop.index0 * 15 }}">{{ ln }}</tspan>{% endfor %}</text></g>{% endfor %}
 </svg></div>{% endif %}</section>{% endif %}
-{% if g.data and g.data.graded_offers %}<div class="graded-offers">{% for o in g.data.graded_offers %}<form method="post" action="/courses/{{ g.course_id }}/study/practice" class="inline-form"><input type="hidden" name="topic" value="{{ o.label }}"><input type="hidden" name="count" value="3"><button class="btn ghost small" type="submit">Practice on a problem like graded {{ o.label }}</button></form> {% endfor %}</div>{% endif %}
 {% if g.body_md.strip() %}{{ answer(view) }}{% elif view.sources or view.unused_sources %}{{ answer(view) }}{% endif %}
 <p class="actions"><a class="btn ghost" href="/guides/{{ g.id }}/delete">Delete this guide</a></p>
 {% endblock %}
