@@ -1305,6 +1305,8 @@ def _leaks_forced(it: dict[str, Any], reply: str, question: str, sources: list[A
         return False
     if kind == "essay" and body:
         lvl = essay.level(it, reply, question, True, sources)
+        if lvl == 1 and not essay.is_short_answer(it):
+            lvl = essay.soft_leaks(it, reply, question, sources)  # an honest cited 'X because Y [2]' sentence is no leak
         return lvl >= 2 or (lvl == 1 and not essay.is_short_answer(it))
     return False
 
@@ -3153,7 +3155,8 @@ def twin_fallback(name: str, reason: str, check: bool = False, practice_button: 
     return f"I can't work {name} out for you because it is marked as graded. {why}\n\n{steps}"
 
 
-def twin(store, course_id: int, question: str, provider, graded: dict, why: str = "", *, model_calls: int = 2) -> Answer:
+def twin(store, course_id: int, question: str, provider, graded: dict, why: str = "", *, model_calls: int = 2,
+         keep_sources: list[dict] | None = None) -> Answer:
     """Answer graded work safely and save a guide of kind 'twin' (data["mode"] is 'twin' or 'concepts'). why is how it
     was routed here (match, marker, sticky, key, reply, soft_essay); it only changes the sentence the page shows."""
     title = (graded.get("title") or "this item").strip()
@@ -3167,6 +3170,11 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     feedback = graded.get("intent") == "feedback" and kind in ("essay", "proof")
     sources = _sources_for(store, course_id, question, problem_text, graded,
                            assignment=(kind == "essay" and bool(ESSAY_CUES.search(problem_text))) or feedback)
+    if keep_sources and kind == "essay" and not feedback:
+        # the chat's own answer was thrown away: its sources (the chapter the student asked about) stay, and the essay's own
+        # prompt and rubric are added after them, never swapped in for them
+        seen_ids = {s.get("chunk_id") for s in keep_sources}
+        sources = list(keep_sources)[:6] + [s for s in sources if s.get("chunk_id") not in seen_ids or not s.get("chunk_id")]
     src_block = grounding.format_sources(sources)
     depth_rule = grounding.DEPTH_RULES["standard"]
     offers = [{"id": graded["id"], "label": _item_name(graded), "title": graded.get("title", "")}] \
