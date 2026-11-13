@@ -7,7 +7,7 @@ How a reply is judged (parse_answer):
     stripped, and the web shows it under "Not from your materials".
   * A text paragraph left with no valid citation is also treated as 'outside', except for things that make no claim:
     headings, horizontal rules, a lead-in line that ends with a colon (up to 25 words), and very short lines
-    (6 words or fewer, such as "Here is the idea."). Those stay 'text' with no citations.
+    (4 words or fewer with no digits, "=" or math, such as "Here is the idea."). Those stay 'text' with no citations.
   * `used` holds the sorted, unique source numbers (1-based, the same as the [n] marks) cited by text blocks.
   * `outside` is True when any block is 'outside'.
   * body_md is the cleaned markdown (outside blocks shown as quoted "Not from your materials" notes) and always ends
@@ -178,7 +178,11 @@ def _makes_no_claim(p: str) -> bool:
     words = len(plain.split())
     if "\n" not in p and plain.endswith(":") and words <= 25:
         return True
-    return "\n" not in p and words <= 6
+    # A short closing or transition line with no facts in it ("Hope that helps!", "Let's start.") makes no claim.
+    # Anything with a digit, an equals sign or a math span could be a fact, so it needs a citation.
+    if "\n" not in p and words <= 4 and not re.search(r"[0-9=$]", plain):
+        return True
+    return False
 
 
 def parse_blocks(raw: str, n_sources: int) -> tuple[list[Block], list[int]]:
@@ -206,7 +210,8 @@ def parse_blocks(raw: str, n_sources: int) -> tuple[list[Block], list[int]]:
                 continue
             elif found:
                 blocks.append(Block("text", cleaned, sorted(set(found))))
-            elif _makes_no_claim(cleaned) and n_sources > 0:
+            elif _makes_no_claim(cleaned) and n_sources > 0 and not _CITE.search(para):
+                # A line that tried to cite a source that doesn't exist is a claim, so it is never exempt.
                 blocks.append(Block("text", cleaned, []))
             elif _makes_no_claim(cleaned) and cleaned.lstrip().startswith("#"):
                 blocks.append(Block("text", cleaned, []))
@@ -230,7 +235,7 @@ def render_body(blocks: list[Block], prefix: str = "") -> str:
         else:
             out.append(b.md)
             prev_outside = False
-    out.append(f"_{disclaimer.FOOTER}_")
+    out.append(disclaimer.FOOTER)
     return "\n\n".join(out)
 
 
