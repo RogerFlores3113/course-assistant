@@ -446,21 +446,11 @@ def add_event(course_id: int, kind: str, title: str, date: str, time: str = "", 
 
 
 # ------------------------------------------------------------------ guides and flashcards
-_CITE_RE = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
-
-
 def _drop_bad_cites(body: str, valid_numbers: set[int]) -> tuple[str, list[int]]:
-    """Remove [n] marks whose n is not a valid position. Returns the text and the numbers dropped."""
-    dropped: list[int] = []
-
-    def repl(m: re.Match) -> str:
-        nums = [int(x) for x in re.split(r"[,;]", m.group(1))]
-        for n in nums:
-            if n not in valid_numbers and n not in dropped:
-                dropped.append(n)
-        return "".join(f"[{n}]" for n in nums if n in valid_numbers)
-
-    return _CITE_RE.sub(repl, body), sorted(dropped)
+    """Remove [n] marks whose n is not a valid position (leaving a visible marker). Brackets inside math, code and
+    nested or numeric lists such as [[4,1],[2,3]] are not citations and are left alone."""
+    from . import grounding
+    return grounding.drop_cites(body, valid_numbers)
 
 
 @_tool(WRITE)
@@ -480,12 +470,15 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
         raise _fail(f"At most {MAX_CITED} cited chunks per guide.")
     sources: list[dict[str, Any]] = []
     valid: set[int] = set()
+    quote_sources: list[dict[str, Any]] = []
     bad_chunks: list[int] = []
     for n, cid in enumerate(ids, 1):
         ch = st.chunk(cid)
         if ch is None or int(ch["course_id"]) != c["id"]:
             bad_chunks.append(cid)
+            quote_sources.append({"text": ""})
             continue
+        quote_sources.append({"text": ch.get("text", "")})
         mat = st.material(ch["material_id"]) or {}
         valid.add(n)
         sources.append({"n": n, "chunk_id": cid, "material_id": ch["material_id"], "label": ch.get("loc_label", ""),
@@ -493,6 +486,7 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
     from . import grounding
     cleaned, dropped = _drop_bad_cites(b, valid)
     blocks, used = grounding.parse_blocks(cleaned, len(ids))
+    grounding.verify_quotes(blocks, quote_sources)
     kept = set(used)
     outside = sum(1 for blk in blocks if blk.kind == "outside")
     sources = [s for s in sources if s["n"] in kept] or sources

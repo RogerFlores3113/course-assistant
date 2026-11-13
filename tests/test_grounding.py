@@ -156,3 +156,99 @@ def test_ask_routes_graded_to_twin():
                   "<solution>Use F = ma [1]. a = 35/7 = 5 m/s^2 [1].</solution>")
     a = grounding.ask(s, c, "A 5 kg block is pushed with 20 N. Find the acceleration of the block.", FakeProvider([twin_reply]))
     assert a.twin and s.guide(a.guide_id)["kind"] == "twin"
+
+
+# ---- cycle 1 render fixes (panel p3, p4, p1, p2)
+def test_matrices_are_not_citations_p3():
+    t = "The matrix A = [[4,1],[2,3]] and [[1,1],[0,1]] stay as written [1]."
+    cleaned, found = grounding.clean_citations(t, 5)
+    assert "[[4,1],[2,3]]" in cleaned and "[[1,1],[0,1]]" in cleaned and found == [1]
+    blocks, used = grounding.parse_blocks("Use [[1,1],[0,1]] here, as in the notes [2].", 3)
+    assert "[[1,1],[0,1]]" in blocks[0].md and used == [2]
+
+
+def test_math_and_code_are_never_cited():
+    t = "Take $[1, 2]$ and $$x[3]$$ and `a[1]` then\n```\nb = [1]\n```\nend [2]."
+    cleaned, found = grounding.clean_citations(t, 2)
+    assert cleaned == t and found == [2]
+    cleaned, _ = grounding.clean_citations("Vector [2, 1, 1] and [0.5, 3] and [0-1] and [9] gone.", 4)
+    assert "[2, 1, 1]" in cleaned and "[0.5, 3]" in cleaned and "[0-1]" in cleaned and "[9]" not in cleaned
+    assert grounding.cited_numbers("matrix [[1],[2]] and $[1]$ and real [3]") == [3]
+
+
+def test_whitespace_in_code_survives_cleaning():
+    t = "```python\nx   = 1\n    y = [1]\n```\nTrue [1] ."
+    cleaned, _ = grounding.clean_citations(t, 2)
+    assert "x   = 1" in cleaned and "    y = [1]" in cleaned and cleaned.endswith("True [1].")
+
+
+def test_invalid_citation_leaves_visible_marker_p3():
+    cleaned, found = grounding.clean_citations("A claim [9].", 3)
+    assert grounding.REMOVED_MARK in cleaned and found == []
+    a = grounding.parse_answer("Eigenvalues matter [1]. Exam favourite [10].", srcs(2))
+    assert any(grounding.REMOVED_MARK in b.md for b in a.blocks)
+    assert "(citation removed)" in a.body_md and grounding.REMOVED_MARK not in a.body_md
+
+
+def test_outside_labelling_skips_structural_lines_p1_p3():
+    raw = ("# Plan\n\nStep 2:\n\n**Step 3: Subtract the rows**\n\nAnswer:\n\n$$x = 5$$\n\n7x + 3y + 6z = 8\n\n"
+           "```python\nprint(1)\n```\n\nSolve it carefully with the rule from lecture [1].")
+    a = grounding.parse_answer(raw, srcs(1))
+    assert [b.kind for b in a.blocks] == ["text"] * 8 and a.used == [1]
+    b = grounding.parse_answer("Step 4: Subtract row 1 from row 2.", srcs(1)).blocks
+    assert b[0].kind == "outside"  # a sentence with a claim in it is still labelled
+    assert grounding.parse_answer("The eigenvalue is 3 and the vector is 7x.", srcs(1)).blocks[0].kind == "outside"
+
+
+def test_not_covered_lines_become_the_note_p3():
+    a = grounding.parse_answer("The materials do not cover week 8.\n\nDoors close at noon [1].", srcs(1))
+    assert [b.md for b in a.blocks] == ["Doors close at noon [1]."] and a.not_covered
+    b = grounding.parse_answer("Real claim [1].", srcs(1))
+    assert not b.not_covered
+    c = grounding.parse_answer("<outside>The notes don't mention this at all.</outside>", srcs(1))
+    assert c.blocks == [] and c.not_covered
+    d = grounding.parse_answer("<outside>The materials do not cover it. In general it is true.</outside>", srcs(1))
+    assert d.blocks and d.blocks[0].kind == "outside"  # more than the note: kept
+    assert grounding.parse_answer("Something general.", []).not_covered
+    assert grounding.parse_answer("Mostly general words here and there for a long while now.\n\nTiny [1].", srcs(1)).not_covered
+
+
+def test_empty_reply_still_gets_a_message():
+    assert grounding.parse_answer("", srcs(1)).blocks[0].kind == "outside"
+
+
+QUOTE_SRC = [{"text": "The  ordinary course of public life\nrequires that merely judg-\nment be exercised by the people always."}]
+
+
+def test_verify_quotes_flags_a_misquote_p4():
+    good = 'Madison writes "the ordinary course of public life requires that merely judgment be exercised" [1].'
+    bad = 'He says "the ordinary course of public life requires that neither force nor will exercised" [1].'
+    ok = grounding.verify_quotes([grounding.Block("text", good, [1])], QUOTE_SRC)[0]
+    assert grounding.QUOTE_OPEN not in ok.md
+    flagged = grounding.verify_quotes([grounding.Block("text", bad, [1])], QUOTE_SRC)[0]
+    assert flagged.md.count(grounding.QUOTE_OPEN) == 1 and flagged.md.count(grounding.QUOTE_CLOSE) == 1
+    assert "quote not found in the cited source" in grounding.render_body([flagged])
+
+
+def test_verify_quotes_details():
+    curly = "He says \u201cthe ordinary course of public life requires that merely judgment be exercised\u201d [1]."
+    assert grounding.QUOTE_OPEN not in grounding.verify_quotes([grounding.Block("text", curly, [1])], QUOTE_SRC)[0].md
+    ell = 'He says "the ordinary course of public life ... be exercised by the people always" [1].'
+    assert grounding.QUOTE_OPEN not in grounding.verify_quotes([grounding.Block("text", ell, [1])], QUOTE_SRC)[0].md
+    short = 'The word "not in there" appears [1].'
+    assert grounding.QUOTE_OPEN not in grounding.verify_quotes([grounding.Block("text", short, [1])], QUOTE_SRC)[0].md
+    other = 'He says "a completely different eight word quote goes here now" [2].'
+    assert grounding.QUOTE_OPEN in grounding.verify_quotes([grounding.Block("text", other, [2])], QUOTE_SRC + [{"text": "x"}])[0].md
+    nocite = 'He says "a completely different eight word quote goes here now".'
+    assert grounding.QUOTE_OPEN not in grounding.verify_quotes([grounding.Block("text", nocite, [])], QUOTE_SRC)[0].md
+
+
+def test_parse_answer_verifies_quotes():
+    s = [{**srcs(1)[0], "text": "Liberty is to faction what air is to fire, an aliment without which it instantly expires."}]
+    a = grounding.parse_answer('Madison: "Liberty is to faction what water is to fire, an aliment without which it dies" [1].', s)
+    assert grounding.QUOTE_OPEN in a.blocks[0].md
+
+
+def test_system_prompt_has_format_rules():
+    p = grounding.system_prompt()
+    assert grounding.FORMAT_RULES in p and "bmatrix" in p and "[[4,1],[2,3]]" in p

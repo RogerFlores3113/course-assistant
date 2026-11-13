@@ -1,8 +1,14 @@
-"""A small, safe markdown renderer for AI answers and guides.
+"""A small, safe markdown renderer for AI answers, guides and the reader.
 
-Everything is escaped first. Only these things become markup: headings, paragraphs, bullet and numbered lists
-(nested by indent), block quotes, fenced and inline code, bold, italic, details/summary, links that point into the
-app (/read/...) or to http(s) pages, math ($...$ kept as text in a span with class "math") and citation chips [n].
+Everything is escaped first. Only these things become markup: headings (# is an h2 and ## an h3 under the page's h1;
+heading_offset moves them), paragraphs, bullet and numbered lists (nested by indent), pipe tables, block quotes,
+fenced code (indentation kept, class "language-x") and inline code, bold, italic, details/summary (one line or
+several), links that point into the app (/read/...) or to http(s) pages, math and citation chips [n].
+
+Math: $...$ and $$...$$ are kept as plain escaped text inside span.math / div.math-block, untouched by bold and
+italic rules, and static/content.js turns them into KaTeX (with MathML for screen readers). Without JS the LaTeX
+shows as text. Markers written by grounding become: a "(citation removed)" note where an out-of-range [n] was
+dropped, and a flag on a quotation the cited source does not contain.
 """
 from __future__ import annotations
 
@@ -12,12 +18,19 @@ from typing import Any
 
 from markupsafe import Markup
 
+from .grounding import QUOTE_CLOSE, QUOTE_FLAG_TEXT, QUOTE_OPEN, REMOVED_MARK
+
+REMOVED_LABEL = "a citation here pointed to a source that doesn't exist and was removed"
 OUTSIDE_RE = re.compile(r"<outside>(.*?)</outside>", re.S | re.I)
-FENCE_RE = re.compile(r"^\s*```")
+FENCE_RE = re.compile(r"^(\s*)(```|~~~)\s*([\w+#.-]*)[^\n]*$")
 HEAD_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 ITEM_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
 SUMMARY_RE = re.compile(r"^\s*<summary>(.*?)</summary>\s*$", re.I)
+DETAILS_OPEN_RE = re.compile(r"^\s*<details(?:\s[^>]*)?>\s*$", re.I)
+DETAILS_CLOSE_RE = re.compile(r"^\s*</details>\s*$", re.I)
+TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$")
 SAFE_URL_RE = re.compile(r"^(/read/\d+[^\s\"'<>]*|https?://[^\s\"'<>]+)$")
+_TAG_SPLIT = re.compile(r"(?i)\s*(<details(?:\s[^>]*)?>|</details>|<summary>.*?</summary>)\s*")
 
 
 def safe_url(url: str) -> str | None:
@@ -47,7 +60,14 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
         return f"\x00{len(stash) - 1}\x00"
 
     text = text.replace("\x00", "")
+    text = text.replace(REMOVED_MARK, hold(
+        f'<span class="cite-removed" role="img" aria-label="{escape(REMOVED_LABEL)}">(citation removed)</span>'))
+    text = text.replace(QUOTE_OPEN, hold('<mark class="quote-unverified">'))
+    text = text.replace(QUOTE_CLOSE, hold(f'</mark> <span class="quote-flag">({QUOTE_FLAG_TEXT})</span>'))
     text = re.sub(r"`([^`\n]+)`", lambda m: hold(f"<code>{escape(m.group(1))}</code>"), text)
+    text = re.sub(r"\$\$(.+?)\$\$", lambda m: hold(f'<span class="math">$${escape(m.group(1))}$$</span>'), text)
+    # sub/superscript-only math inside a word, as in the formula C$_6$H$_{12}$O$_6$
+    text = re.sub(r"\$([_^][^$\n]*)\$", lambda m: hold(f'<span class="math">${escape(m.group(1))}$</span>'), text)
     text = re.sub(r"(?<![\w$\\])\$(?=\S)([^$\n]+?)(?<=\S)\$(?![\w$])",
                   lambda m: hold(f'<span class="math">${escape(m.group(1))}$</span>'), text)
 
@@ -62,6 +82,10 @@ def inline(text: str, sources: dict[int, dict[str, Any]] | None = None) -> str:
     text = re.sub(r"\[([^\]\n]+)\]\(([^)\s]+)\)", link, text)
 
     def cite(m: re.Match) -> str:
+        before = m.string[m.start() - 1] if m.start() else ""
+        after = m.string[m.end()] if m.end() < len(m.string) else ""
+        if before == "[" or after == "]":  # part of a matrix or list such as [[1],[2]], not a citation
+            return m.group(0)
         n = int(m.group(1))
         s = sources.get(n)
         if not s or not s.get("href"):
@@ -106,58 +130,159 @@ def _list(lines: list[str], i: int, sources) -> tuple[str, int]:
     return "".join(out), i
 
 
-def _blocks(lines: list[str], sources, depth: int = 0) -> str:
+def _split_row(line: str) -> list[str]:
+    """Cells of a pipe-table row. A | inside $...$ or `...` stays in its cell."""
+    line = line.strip()
+    if line.startswith("|"):
+        line = line[1:]
+    if line.endswith("|") and not line.endswith("\\|"):
+        line = line[:-1]
+    cells, cur = [], ""
+    for part in re.split(r"(?<!\\)\|", line):
+        cur = f"{cur}|{part}" if cur else part
+        if cur.count("$") % 2 == 0 and cur.count("`") % 2 == 0:
+            cells.append(cur.strip().replace("\\|", "|"))
+            cur = ""
+    if cur:
+        cells.append(cur.strip())
+    return cells
+
+
+def _table(lines: list[str], i: int, sources) -> tuple[str, int]:
+    head = _split_row(lines[i])
+    seps = _split_row(lines[i + 1])
+    align = ["center" if s.startswith(":") and s.endswith(":") else "right" if s.endswith(":") else "" for s in seps]
+    i += 2
+    rows = []
+    while i < len(lines) and lines[i].strip() and "|" in lines[i]:
+        rows.append(_split_row(lines[i]))
+        i += 1
+
+    def cell(tag: str, text: str, k: int) -> str:
+        a = f' style="text-align:{align[k]}"' if k < len(align) and align[k] else ""
+        scope = ' scope="col"' if tag == "th" else ""
+        return f"<{tag}{scope}{a}>{inline(text, sources)}</{tag}>"
+
+    th = "".join(cell("th", c, k) for k, c in enumerate(head))
+    body = "".join("<tr>" + "".join(cell("td", c, k) for k, c in enumerate(r)) + "</tr>" for r in rows)
+    return (f'<div class="table-wrap" tabindex="0" role="region" aria-label="Table, scrolls sideways if wide">'
+            f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>"), i
+
+
+def _is_mathy(line: str) -> bool:
+    return "=" in line or "$" in line
+
+
+def _paragraph(lines: list[str], sources) -> str:
+    """Lines of one paragraph. Prose lines join with spaces; a run of equations or math lines keeps its line breaks."""
+    lines = [ln.strip() for ln in lines]
+    mathy = sum(1 for ln in lines if _is_mathy(ln))
+    if len(lines) > 1 and mathy >= 2 and mathy * 10 >= len(lines) * 6:
+        return "<p>" + "<br>".join(inline(ln, sources) for ln in lines) + "</p>"
+    return f"<p>{inline(' '.join(lines), sources)}</p>"
+
+
+def _normalize(lines: list[str]) -> list[str]:
+    """Put <details>, <summary> and </details> on lines of their own (outside code) so one-line forms work."""
+    out: list[str] = []
+    fence: str | None = None
+    for line in lines:
+        fm = FENCE_RE.match(line)
+        if fm and (fence is None or fm.group(2) == fence):
+            fence = None if fence else fm.group(2)
+            out.append(line)
+        elif fence is None and "`" not in line and re.search(r"(?i)</?(?:details|summary)\b", line):
+            parts = [p for p in _TAG_SPLIT.split(line)]
+            out.extend(p for p in parts if p.strip())
+        else:
+            out.append(line)
+    return out
+
+
+def _blocks(lines: list[str], sources, depth: int = 0, offset: int = 1) -> str:
     out: list[str] = []
     i = 0
     para: list[str] = []
 
     def flush() -> None:
         if para:
-            out.append(f"<p>{inline(' '.join(p.strip() for p in para), sources)}</p>")
+            out.append(_paragraph(para, sources))
             para.clear()
 
     while i < len(lines):
         line = lines[i]
-        if FENCE_RE.match(line):
+        fm = FENCE_RE.match(line)
+        if fm:
             flush()
+            indent, mark, lang = len(fm.group(1)), fm.group(2), fm.group(3)
             i += 1
             code = []
-            while i < len(lines) and not FENCE_RE.match(lines[i]):
-                code.append(lines[i])
+            while i < len(lines) and not (FENCE_RE.match(lines[i]) and FENCE_RE.match(lines[i]).group(2) == mark
+                                          and not FENCE_RE.match(lines[i]).group(3)):
+                code.append(lines[i][indent:] if lines[i][:indent].strip() == "" else lines[i])
                 i += 1
             i += 1
-            out.append(f"<pre><code>{escape(chr(10).join(code))}</code></pre>")
+            lang = re.sub(r"[^\w+#.-]", "", lang)
+            cls = f' class="language-{escape(lang)}"' if lang else ""
+            out.append(f'<pre tabindex="0"{(" data-lang=" + chr(34) + escape(lang) + chr(34)) if lang else ""}>'
+                       f"<code{cls}>{escape(chr(10).join(code))}</code></pre>")
             continue
-        if line.strip().lower() == "<details>" and depth < 4:
+        if DETAILS_OPEN_RE.match(line) and depth < 4:
             flush()
             i += 1
             inner, nest = [], 1
             while i < len(lines):
-                low = lines[i].strip().lower()
-                if low == "<details>":
+                if DETAILS_OPEN_RE.match(lines[i]):
                     nest += 1
-                elif low == "</details>":
+                elif DETAILS_CLOSE_RE.match(lines[i]):
                     nest -= 1
                     if nest == 0:
                         break
                 inner.append(lines[i])
                 i += 1
             i += 1
+            while inner and not inner[0].strip():
+                inner = inner[1:]
             summary = "More"
             if inner and (sm := SUMMARY_RE.match(inner[0])):
                 summary = sm.group(1)
                 inner = inner[1:]
-            out.append(f"<details><summary>{inline(summary, sources)}</summary>{_blocks(inner, sources, depth + 1)}</details>")
+            out.append(f"<details><summary>{inline(summary, sources)}</summary>"
+                       f"{_blocks(inner, sources, depth + 1, offset)}</details>")
+            continue
+        if DETAILS_CLOSE_RE.match(line) or SUMMARY_RE.match(line):  # stray tag from the model: drop it
+            flush()
+            i += 1
             continue
         if not line.strip():
             flush()
             i += 1
             continue
+        st = line.strip()
+        if st.startswith("$$") and (st.count("$$") >= 2 and st.endswith("$$") and len(st) > 4 or st.count("$$") == 1):
+            flush()
+            block = [st]
+            i += 1
+            if st.count("$$") == 1:
+                while i < len(lines):
+                    block.append(lines[i].strip())
+                    done = "$$" in lines[i]
+                    i += 1
+                    if done:
+                        break
+            out.append(f'<div class="math-block">{escape(chr(10).join(block))}</div>')
+            continue
         if (h := HEAD_RE.match(line)):
             flush()
-            level = min(6, len(h.group(1)) + 2)  # page already has h1 and h2
+            level = min(6, len(h.group(1)) + offset)
             out.append(f"<h{level}>{inline(h.group(2), sources)}</h{level}>")
             i += 1
+            continue
+        if "|" in line and i + 1 < len(lines) and TABLE_SEP_RE.match(lines[i + 1]) and "|" in lines[i + 1] \
+                and len(_split_row(line)) >= 2:
+            flush()
+            html, i = _table(lines, i, sources)
+            out.append(html)
             continue
         if ITEM_RE.match(line):
             flush()
@@ -170,7 +295,7 @@ def _blocks(lines: list[str], sources, depth: int = 0) -> str:
             while i < len(lines) and lines[i].lstrip().startswith(">"):
                 quote.append(lines[i].lstrip()[1:].lstrip())
                 i += 1
-            out.append(f"<blockquote>{_blocks(quote, sources, depth + 1)}</blockquote>")
+            out.append(f"<blockquote>{_blocks(quote, sources, depth + 1, offset)}</blockquote>")
             continue
         if re.match(r"^\s*(-{3,}|\*{3,})\s*$", line):
             flush()
@@ -183,9 +308,18 @@ def _blocks(lines: list[str], sources, depth: int = 0) -> str:
     return "".join(out)
 
 
-def render(md: str, sources: list[dict[str, Any]] | dict[int, dict[str, Any]] | None = None) -> Markup:
+def render(md: str, sources: list[dict[str, Any]] | dict[int, dict[str, Any]] | None = None,
+           *, heading_offset: int = 1) -> Markup:
+    """Markdown to safe HTML. heading_offset 1 puts # at h2 (answers and guides, under the page h1); the reader
+    passes 2 because each passage already has an h2 for its location."""
     smap = sources if isinstance(sources, dict) else source_map(sources)
-    return Markup(_blocks((md or "").replace("\r\n", "\n").split("\n"), smap))
+    lines = _normalize((md or "").replace("\r\n", "\n").split("\n"))
+    return Markup(_blocks(lines, smap, 0, heading_offset))
+
+
+def count_marks(md: str) -> tuple[int, int]:
+    """(removed citations, unverified quotes) marked in stored markdown."""
+    return (md or "").count(REMOVED_MARK), (md or "").count(QUOTE_OPEN)
 
 
 def split_outside(md: str) -> list[dict[str, str]]:

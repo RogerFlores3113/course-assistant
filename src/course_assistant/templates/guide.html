@@ -1,4 +1,8 @@
 {% extends "base.html" %}{% from "_answer.html" import answer %}{% block title %}{{ g.title }} - Course Assistant{% endblock %}
+{% macro chips(cites) %}{% for c in cites %}{% if smap.get(c) %} <a class="cite" href="{{ smap[c].href }}" aria-label="Source {{ c }}: {{ smap[c].title }}{% if smap[c].label %}, {{ smap[c].label }}{% endif %}">[{{ c }}]</a>{% endif %}{% endfor %}{% endmacro %}
+{% macro edge(label, cites) %}{% if label %}<span class="muted">{{ label }}</span>{% endif %}{% if cites %}{{ chips(cites) }}{% else %} <span class="edge-note">Not from your materials</span>{% endif %}{% endmacro %}
+{% macro node(n) %}<li><strong>{{ n.label }}</strong>{{ chips(n.cites) }}
+{% if n.children %}<ul>{% for ch in n.children %}<li class="via"><span class="muted">links to</span> {{ edge(ch.via, ch.via_cites) }}<ul>{{ node(ch) }}</ul></li>{% endfor %}</ul>{% endif %}</li>{% endmacro %}
 {% block body %}
 <div class="course-head" style="--accent-c: {{ accent }}"><p class="crumbs"><a href="/courses/{{ course.id }}/guides">{{ course.name }}</a> &rsaquo; {{ kind_label }}</p>
 <h1>{{ g.title }}</h1><p class="muted small">{{ g.created_at[:10] }}{% if g.model %} &middot; {{ g.model }}{% endif %}</p></div>
@@ -6,13 +10,14 @@
 {% if graph %}
 <section aria-labelledby="map-h"><h2 id="map-h">Concept map</h2>
 {% if graph.empty %}<p class="muted">This map has no concepts.</p>{% else %}
-{% macro node(n) %}<li><strong>{{ n.label }}</strong>{% for c in n.cites %}{% if smap.get(c) %} <a class="cite" href="{{ smap[c].href }}" aria-label="Source {{ c }}">[{{ c }}]</a>{% endif %}{% endfor %}
-{% if n.children %}<ul>{% for ch in n.children %}{% if ch.via %}<li class="via"><span class="muted">{{ ch.via }}</span><ul>{{ node(ch) }}</ul></li>{% else %}{{ node(ch) }}{% endif %}{% endfor %}</ul>{% endif %}</li>{% endmacro %}
 <ul class="tree">{% for n in graph.forest %}{{ node(n) }}{% endfor %}</ul>
-<div class="mapwrap"><svg viewBox="0 0 {{ graph.width }} {{ graph.height }}" width="{{ graph.width }}" height="{{ graph.height }}" aria-hidden="true" focusable="false" class="map">
-{% for l in graph.lines %}<line x1="{{ l.x1 }}" y1="{{ l.y1 }}" x2="{{ l.x2 }}" y2="{{ l.y2 }}"/>{% endfor %}
-{% for b in graph.boxes %}<g><title>{{ b.full }}</title><rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}" rx="8"/><text x="{{ b.x + b.w // 2 }}" y="{{ b.y + b.h // 2 + 5 }}" text-anchor="middle">{{ b.label }}</text></g>{% endfor %}
+{% if graph.cross %}<h3>Other links between concepts</h3><ul class="cross">{% for x in graph.cross %}<li><strong>{{ x.a }}</strong> links to <strong>{{ x.b }}</strong>{% if x.label %}: <span class="muted">{{ x.label }}</span>{% endif %}{% if x.cites %}{{ chips(x.cites) }}{% else %} <span class="edge-note">Not from your materials</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+<div class="mapwrap"><svg viewBox="0 0 {{ graph.width }} {{ graph.height }}" width="{{ graph.width }}" height="{{ graph.height }}" role="img" aria-label="{{ graph.aria }}" focusable="false" class="map">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+{% for l in graph.edges %}<path class="edge" d="M{{ l.x1 }},{{ l.y1 }} L{{ l.x2 }},{{ l.y2 }}" marker-end="url(#arrow)"/>
+{% if l.lines %}<text class="edge-label" text-anchor="middle">{% for ln in l.lines %}<tspan x="{{ l.lx }}" y="{{ l.ly + loop.index0 * 12 }}">{{ ln }}</tspan>{% endfor %}</text>{% endif %}{% endfor %}
+{% for b in graph.boxes %}<g><rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}" rx="8"/><text text-anchor="middle">{% for ln in b.lines %}<tspan x="{{ b.x + b.w // 2 }}" y="{{ b.ty + loop.index0 * 15 }}">{{ ln }}</tspan>{% endfor %}</text></g>{% endfor %}
 </svg></div>{% endif %}</section>{% endif %}
-{% if g.body_md.strip() %}{{ answer(view) }}{% elif view.sources %}{{ answer(view) }}{% endif %}
+{% if g.body_md.strip() %}{{ answer(view) }}{% elif view.sources or view.unused_sources %}{{ answer(view) }}{% endif %}
 <p class="actions"><a class="btn ghost" href="/guides/{{ g.id }}/delete">Delete this guide</a></p>
 {% endblock %}
