@@ -31,3 +31,36 @@ def world(essay=True):
     if essay:
         ids["Essay 1"] = s.add_graded_item(c, "Essay 1: What made the canal era matter", ESS, None, kind="essay", label="Essay 1")
     return s, c, ids
+
+
+HANDOUT = """# Lab 5 handout: Titration of vinegar
+
+## Equipment
+
+You will need two 50 mL burets, a ring stand, three 125 mL flasks, a wash bottle and a pH meter set to the 4.00 to 7.00 range.
+
+## Procedure
+
+Rinse the buret twice with the sodium hydroxide solution. Record the starting volume to two decimals. Add phenolphthalein to each flask and titrate until a faint pink holds for thirty seconds.
+
+## Safety
+
+Wear goggles at all times. Sodium hydroxide burns skin, so rinse spills with plenty of water.
+
+## Pre-lab questions
+
+A 25.00 mL sample of vinegar needs 31.20 mL of 0.1000 M sodium hydroxide to reach the endpoint. What is the molarity of the acetic acid in the vinegar?
+
+Why does the pink color fade after the endpoint is passed? Answer in two sentences.
+"""
+
+
+def handout_world(tmp_path):
+    from course_assistant import importers
+    s, c, ids = world(essay=False)
+    f = tmp_path / "lab-5-handout.md"
+    f.write_text(HANDOUT)
+    mid = importers.import_file(s, c, f)
+    s.update_material(mid, graded=1)
+    integrity.mark_material_graded(s, mid)
+    return s, c, ids, mid

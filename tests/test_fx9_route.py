@@ -205,3 +205,44 @@ def test_d5_pasted_essay_intro_routes_to_the_essay_not_the_proof():
           "so every point between them is a solution. QED.")
     r = integrity.match_graded(s, c, q3)
     assert r and r["id"] == ids["Problem 4"]
+
+
+# ------------------------------------------------------------------ decision 5: graded handouts are searched outside their questions
+def test_d5_graded_handout_equipment_and_safety_are_found_but_its_questions_are_not(tmp_path):
+    from fx9_world import handout_world
+    s, c, ids, mid = handout_world(tmp_path)
+
+    def f(system, messages):
+        return "You need two 50 mL burets, a ring stand and three 125 mL flasks [1]."
+    a = grounding.ask(s, c, "What equipment do I need for the vinegar titration?", FakeProvider(f))
+    assert a.mode == "answer" and any("125 mL flasks" in (x.get("text") or "") for x in a.sources)
+    assert all("31.20" not in (x.get("text") or "") and "Answer in two sentences" not in (x.get("text") or "") for x in a.sources)
+    assert not a.not_covered
+    # the safety paragraph beside a question is found too
+    a = grounding.ask(s, c, "What safety rules apply when I use sodium hydroxide?",
+                      FakeProvider(model(default="Wear goggles at all times [1].")))
+    assert any("goggles" in (x.get("text") or "") for x in a.sources)
+
+
+def test_d5_a_hit_inside_a_graded_question_is_left_out_and_said(tmp_path):
+    from fx9_world import handout_world
+    s, c, ids, mid = handout_world(tmp_path)
+    a = grounding.ask(s, c, "What is the endpoint of a titration of acetic acid in vinegar?", FakeProvider(model(default="The sources do not cover it.")))
+    assert all("Answer in two sentences" not in (x.get("text") or "") for x in a.sources)
+    assert "Part of your graded handout was not searched" in a.body_md
+
+
+def test_d5_the_graded_question_pasted_still_goes_to_the_graded_route(tmp_path):
+    from fx9_world import handout_world
+    s, c, ids, mid = handout_world(tmp_path)
+    q = ("A 25.00 mL sample of vinegar needs 31.20 mL of 0.1000 M sodium hydroxide to reach the endpoint. What is the molarity "
+         "of the acetic acid in the vinegar?")
+    a = grounding.ask(s, c, q, FakeProvider(model()))
+    assert held(a)
+    assert all("31.20" not in (x.get("text") or "") for x in a.sources)
+
+
+def test_d5_no_graded_handout_no_note():
+    s, c, ids = world()
+    a = grounding.ask(s, c, "What equipment do I need for the lab?", FakeProvider(model(default="The materials do not cover this.")))
+    assert "graded handout" not in a.body_md

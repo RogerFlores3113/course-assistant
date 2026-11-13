@@ -2989,6 +2989,53 @@ def search_safe(store, course_id: int, query: str, *, limit: int = 6, **kw) -> l
         return [s for s in retrieval.search(store, course_id, query, limit=limit, **kw) if s.get("material_id") not in graded]
 
 
+HANDOUT_NOTE = ("Part of your graded handout was not searched: its questions are kept out of answers, so something the "
+                "handout says about them may be missing here. Open the handout to read it.")
+
+
+def _question_paragraph(para: str, bodies: list[tuple[dict[str, Any], _Text]]) -> bool:
+    """The paragraph belongs to a graded question of its material: it quotes the question's words, or carries two of its
+    distinctive numbers or two of its rows or equations."""
+    t = _Text(para)
+    for it, b in bodies:
+        if _quote_ratio(para, it.get("body") or "") >= 0.3 or _row_hits(t, b) >= 2:
+            return True
+        hit = [n for n in b.sig if _distinctive(n) and b.fm.get(n, {n}) & t.forms]
+        if len(hit) >= 2:
+            return True
+    return False
+
+
+def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tuple[list[dict], int]:
+    """Passages of a graded material that are not its graded questions (equipment, procedure, settings, safety), found for
+    an ordinary question, and how many paragraphs that matched were left out because they hold a graded question.
+    Search never returns a graded question: each chunk is cut to its paragraphs that do not belong to one."""
+    items = graded_view(store, course_id)
+    by_mid: dict[int, list[tuple[dict[str, Any], _Text]]] = {}
+    for it in items:
+        if it.get("material_id") and (it.get("body") or "").strip():
+            by_mid.setdefault(it["material_id"], []).append((it, _Text(it["body"])))
+    if not by_mid or not (query or "").strip():
+        return [], 0
+    try:
+        found = retrieval.search(store, course_id, query, limit=max(limit * 2, 6), material_ids=sorted(by_mid))
+    except Exception:
+        return [], 0
+    out: list[dict] = []
+    left_out = 0
+    for src in found:
+        bodies = by_mid.get(src.get("material_id"))
+        if not bodies:
+            continue
+        paras = [x for x in re.split(r"\n\s*\n", src.get("text") or "") if x.strip()]
+        keep = [x for x in paras if not _question_paragraph(x, bodies)]
+        left_out += len(paras) - len(keep)
+        keep = [x for x in keep if len(x.split()) >= 4]  # a bare heading is no passage
+        if keep and len(out) < limit:
+            out.append(dict(src, text="\n\n".join(keep)))
+    return out, left_out
+
+
 def _assignment_sources(store, graded: dict, limit_chars: int = 6000) -> list[dict]:
     """The graded essay's own prompt, requirements and rubric (concepts mode only), so coaching is specific to them.
     Never used for a material that also holds numeric or proof problems: those would reach the model as sources."""
