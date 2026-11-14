@@ -298,6 +298,19 @@ def _merge_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(rows.values())
 
 
+def _renumber_unused(rows: list[dict[str, Any]], cited: set[int]) -> list[dict[str, Any]]:
+    """The "Also searched" list is numbered without gaps, skipping the numbers the cited list already uses. Passages
+    that were hidden (graded work) leave holes in the saved numbers, and no text refers to an uncited one."""
+    used, n = set(cited), 0
+    for row in rows:
+        for x in row["ns"]:
+            n += 1
+            while n in used:
+                n += 1
+            x["n"] = n
+    return rows
+
+
 ROUTING_FALLBACK = {"twin": "This looks like your graded work, so here is a similar problem with different numbers.",
                     "concepts": "This looks like your graded work, so this covers the ideas behind it."}
 
@@ -554,6 +567,8 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
         for b in raw:
             b["md"] = _head_twin(b["md"])
     raw = _join_headings(raw)
+    while raw and raw[-1]["kind"] == "text" and re.fullmatch(r"\s*#{1,6}\s+[^\n\[]*", raw[-1]["md"]):
+        raw = raw[:-1]  # a heading with nothing under it (a "## Practice" whose questions were all removed) does not render
     top = shallowest_heading(*[b["md"] for b in raw])
     uid = next(_UID)
     out_blocks: list[dict[str, Any]] = []
@@ -599,7 +614,7 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
         ask_normal = {"course_id": int(course_id), "question": question or str(data.get("question"))}
     return {"blocks": out_blocks,
             "sources": _merge_sources([smap[k] for k in sorted(smap) if k in cited]),
-            "unused_sources": _merge_sources(_fair_unused(smap, cited, question or str(data.get("question") or ""))),
+            "unused_sources": _renumber_unused(_merge_sources(_fair_unused(smap, cited, question or str(data.get("question") or ""))), cited),
             "twin": is_twin, "concepts": is_concepts,
             "routing_note": routing_note, "ask_normal": ask_normal,
             "offers": _offers_of(data, course_id), "offer_course_id": course_id,
