@@ -54,9 +54,12 @@ def test_problem2_real_outside_still_boxed():
 def test_problem2_banner_wording(ready):
     r = page(ready, [{"kind": "text", "md": "x", "cites": []}], data={"not_covered": True})  # nothing cited
     assert "Your saved materials don&#39;t cover this." in r.text and "general knowledge" not in r.text
-    r = page(ready, [{"kind": "text", "md": "x [1]", "cites": [1]}, {"kind": "outside", "md": "Other.", "cites": []}],
+    r = page(ready, [{"kind": "text", "md": "x", "cites": []}, {"kind": "outside", "md": "Other.", "cites": []}],
              data={"not_covered": True})
     assert "Parts below come from general knowledge." in r.text
+    r = page(ready, [{"kind": "text", "md": "x [1]", "cites": [1]}, {"kind": "outside", "md": "Other.", "cites": []}],
+             data={"not_covered": True})  # fx12: an answer with cited content is never "not covered"
+    assert "data-not-covered" not in r.text
 
 
 # 3 lists and sentences
@@ -125,7 +128,7 @@ def test_problem6_removed_marker_and_math_and_svg(ready):
             "edges": [{"a": "a", "b": "b", "label": "has $\\lambda$", "cites": [2], "cites_removed": True}]}
     gid = ready.store.add_guide(ready.cid, "concept_map", "Map", "", sources=sources(3), data=data)
     t = ready.client.get(f"/guides/{gid}").text
-    tree = t.split('<ul class="tree">')[1].split('<div class="mapwrap">')[0]
+    tree = t.split('<ul class="tree">')[1].split('<div class="mapwrap"')[0]
     assert tree.count("(citation removed)") == 2 and "<strong data-math>" in tree
     svg = t.split("<svg")[1].split("</svg>")[0]
     assert "$" not in svg and "A = X Lambda X^-1" in svg.replace("\n", " ") or "Lambda" in svg

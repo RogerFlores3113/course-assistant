@@ -20,7 +20,7 @@
 {% if graph.empty %}<p class="muted">This map has no concepts.</p>{% else %}
 <ul class="tree">{% for n in graph.forest %}{{ node(n) }}{% endfor %}</ul>
 {% if graph.cross %}<h3>Other links between concepts</h3><ul class="cross">{% for x in graph.cross %}<li><strong data-math>{{ x.a }}</strong> links to <strong data-math>{{ x.b }}</strong>{% if x.label %}: <span class="muted" data-math>{{ x.label }}</span>{% endif %}{% if x.cites %}{{ chips(x.cites) }}{% elif not x.removed %} <span class="edge-note">Not from your materials</span>{% endif %}{{ removed(x.removed) }}</li>{% endfor %}</ul>{% endif %}
-<div class="mapwrap"><svg viewBox="0 0 {{ graph.width }} {{ graph.height }}" width="{{ graph.width }}" height="{{ graph.height }}" role="img" aria-label="{{ graph.aria }}" focusable="false" class="map">
+<div class="mapwrap" tabindex="0" role="region" aria-label="Concept map. Scrolls sideways when wider than the page."><svg viewBox="0 0 {{ graph.width }} {{ graph.height }}" width="{{ graph.width }}" height="{{ graph.height }}" role="img" aria-label="{{ graph.aria }}" focusable="false" class="map">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
 {% for l in graph.edges %}<path class="edge" d="M{{ l.x1 }},{{ l.y1 }} L{{ l.x2 }},{{ l.y2 }}" marker-end="url(#arrow)"/>
 {% if l.lines %}<text class="edge-label" text-anchor="middle" aria-hidden="true">{% for ln in l.lines %}<tspan x="{{ l.lx }}" y="{{ l.ly + loop.index0 * 12 }}">{{ ln }}</tspan>{% endfor %}</text>{% endif %}{% endfor %}

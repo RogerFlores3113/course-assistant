@@ -129,6 +129,29 @@ def _search(store: Store, course_id: int, query: str, limit: int = 6, **kw) -> l
         return [x for x in retrieval.search(store, course_id, query, limit=limit, **kw) if x.get("material_id") not in graded]
 
 
+def _defining_first(sources: list[dict[str, Any]], topic: str) -> list[dict[str, Any]]:
+    """Passages that define the topic come before ones that only mention it ("Explain eigenvalues" opens with the
+    definition, not a chapter that uses eigenvalues). The order inside each group stays as retrieval ranked it."""
+    score = getattr(_mod("retrieval"), "_definition_score", None)
+    nq = getattr(_mod("retrieval"), "normalize_query", None)
+    if not score or not nq or len(sources) < 2:
+        return sources
+    try:
+        terms = [t for t in nq(topic)["core"] if t not in getattr(_mod("retrieval"), "_GENERIC_TOPIC", ())]
+    except Exception:
+        return sources
+    if not terms:
+        return sources
+
+    def defines(x: dict[str, Any]) -> bool:
+        try:
+            return score(terms, {"text": x.get("text") or "", "heading": x.get("heading") or ""}) >= 1.5
+        except Exception:
+            return False
+    flags = [defines(x) for x in sources]
+    return [x for x, f in zip(sources, flags) if f] + [x for x, f in zip(sources, flags) if not f]
+
+
 def _merge(*lists: list[dict[str, Any]], cap: int = MAX_SOURCES) -> list[dict[str, Any]]:
     seen: set[int] = set()
     out: list[dict[str, Any]] = []
@@ -958,6 +981,33 @@ def _relevant_materials(store: Store, mats: list[dict[str, Any]], topic_text: st
     return hit or rest or mats
 
 
+def _materials_per_topic(store: Store, mats: list[dict[str, Any]], topics: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Each typed topic keeps its own best-matching materials, scored against that topic alone, so a chapter that
+    matches another topic more strongly never pushes it out. Returns the materials in course order and the topics
+    that matched nothing."""
+    words = {m["id"]: _stem_set(m["title"]) | _stem_set(" ".join(c.get("heading", "") for c in store.chunks_of(m["id"])))
+             for m in mats}
+    rest = [m for m in mats if _rfn("title_doc_id", m["title"]) != ("chapter", 1)]  # the opening chapter is filler here
+    keep: dict[int, dict[str, Any]] = {}
+    unmatched: list[str] = []
+    for t in topics:
+        want = _stem_set(t)
+        need = min(2, len(want))  # one shared word of a longer topic ('chemical') is not a match
+        scored = [(len(words[m["id"]] & want), m) for m in rest]
+        best = max((n for n, _ in scored), default=0)
+        got = [m for n, m in scored if n >= max(need, 1) and n >= 0.5 * best] if want else []
+        if want and not got:  # no title or heading names it: a material whose passages cover all its words does
+            def covers(m: dict[str, Any]) -> bool:  # plural and singular share their first five letters
+                have = {w[:5] for w in _stem_set(" ".join(c["text"] for c in store.chunks_of(m["id"])))}
+                return all(w[:5] in have for w in want)
+            got = [m for m in rest if covers(m)]
+        if not got:
+            unmatched.append(t)
+        for m in got:
+            keep[m["id"]] = m
+    return [m for m in mats if m["id"] in keep], unmatched
+
+
 def _exam_sections(math: bool, plan: str) -> str:
     """The section list of the exam guide prompt. Courses with math get formulas and new numbers; readings and
     arguments get key terms, claims and short-answer or essay prompts."""
@@ -1042,9 +1092,17 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         mats = list(in_window.values())
         scope_note = f"Built from the materials saved for {'the lectures since ' + prev if prev else 'the course so far'}."
     else:
-        mats = _relevant_materials(store, [m for m in store.materials(course_id) if _usable(m)], " ".join(topics_text))
-        scope_note = ("Built from the saved materials that match the topics you typed for this exam: " + typed + "."
-                      if typed_parts else
+        usable = [m for m in store.materials(course_id) if _usable(m)]
+        if typed_parts:
+            mats, unmatched = _materials_per_topic(store, usable, typed_parts)
+            mats = mats or _relevant_materials(store, usable, " ".join(topics_text))
+            found = [t for t in typed_parts if t not in unmatched]
+            scope_note = (("Built from the saved materials that match the topics you typed for this exam: " +
+                           ", ".join(found) + ". ") if found else "") + \
+                         ("Nothing in your saved materials matched: " + ", ".join(unmatched) + "." if unmatched else "")
+        else:
+            mats = _relevant_materials(store, usable, " ".join(topics_text))
+        scope_note = (scope_note if typed_parts else
                       "No material is linked to the lectures before this exam, so this covers all your saved materials.")
     syllabus_rows = [f"{e['date']}: {event_label(e)}" for e in lectures if e.get("topics")]
     course_topics = " ".join(f"{clean_title(e)} {e.get('topics', '')}" for e in store.events(course_id, kinds=["lecture"]))
@@ -1340,7 +1398,7 @@ def explain(store: Store, course_id: int, provider, topic: str, *, depth: str = 
         hit = _named_essay(store, course_id, topic)
     if hit:  # a graded problem pasted into Explain: a twin (or coaching), decided before the model sees it
         return _route_graded(store, course_id, provider, topic, hit)
-    sources = _search(store, course_id, topic, 10, exclude_graded=True)
+    sources = _defining_first(_search(store, course_id, topic, 10, exclude_graded=True), topic)
     task = f"Explain \"{topic}\" for a student in {_course_name(store, course_id)}. Depth: {depth}. {guide}"
     return _generate(store, course_id, provider, "explain", f"Explain ({depth}): {topic}", task, sources,
                      question=topic, data={"depth": depth}, max_tokens=3500)
@@ -1500,7 +1558,7 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     n_normal = count  # twins and coaching notes are extras: they never count toward the requested number
     normal = None
     if n_normal > 0:
-        sources = _search(store, course_id, topic, 10, exclude_graded=True)
+        sources = _defining_first(_search(store, course_id, topic, 10, exclude_graded=True), topic)
         if has_math(store, course_id):
             task = (f"Write {n_normal} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to "
                     "hardest, in the style of the materials. For each, number it and state the question, then give the "

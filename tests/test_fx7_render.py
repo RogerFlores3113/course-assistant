@@ -87,7 +87,7 @@ def deep_map():
 
 def test_branching_map_text_nests_at_most_two_lists(ready):
     gid = ready.store.add_guide(ready.cid, "concept_map", "Map", "", sources=sources(3), data=deep_map())
-    tree = ready.client.get(f"/guides/{gid}").text.split('<ul class="tree">')[1].split('<div class="mapwrap">')[0]
+    tree = ready.client.get(f"/guides/{gid}").text.split('<ul class="tree">')[1].split('<div class="mapwrap"')[0]
     depth = best = 0
     import re
     for m in re.finditer(r"<(/?)ul\b", tree):
@@ -110,7 +110,7 @@ def test_map_unlabelled_edge_says_links_to(ready):
                       {"id": "c", "label": "C", "cites": [1]}],
             "edges": [{"a": "a", "b": "b", "label": "", "cites": [1]}, {"a": "a", "b": "c", "label": "", "cites": []}]}
     gid = ready.store.add_guide(ready.cid, "concept_map", "Map", "", sources=sources(3), data=data)
-    tree = ready.client.get(f"/guides/{gid}").text.split('<ul class="tree">')[1].split('<div class="mapwrap">')[0]
+    tree = ready.client.get(f"/guides/{gid}").text.split('<ul class="tree">')[1].split('<div class="mapwrap"')[0]
     assert "links to</span>: <strong data-math>B</strong>" in tree and tree.count("Not from your materials") == 1
 
 

@@ -840,6 +840,18 @@ def keep_list_markers(blocks):
     return out
 
 
+_SOLUTION_SUMMARY = re.compile(r"<details(?:\s[^>]*)?>\s*<summary>[^<]*\b(?:solution|answer|hint|worked)\b", re.I)
+
+
+def _asks_then_solution(para: str, nxt: str) -> bool:
+    """A short numbered or labelled paragraph right before a hidden "Show solution" block: a practice question."""
+    plain = re.sub(r"[*_`>#]", "", para).strip()
+    return bool(_SOLUTION_SUMMARY.match((nxt or "").lstrip()) and plain and len(plain.split()) <= 70
+                and not _DETAILS_OPEN.search(para) and not plain.startswith("|")
+                and (_STEM_LABEL.match(plain) or plain.endswith("?") or _LIST_ITEM.match(para) or _IMPERATIVE.match(plain)
+                     or len(plain.split()) <= 45))
+
+
 def _uncited_blocks(cleaned: str, n_sources: int, calc: bool = False) -> tuple[list[Block], bool]:
     """Blocks for one paragraph with no valid citation, and whether it only said the materials do not cover it."""
     if _says_not_covered(cleaned):
@@ -884,7 +896,8 @@ def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool
     worked = False  # inside a worked example: its uncited arithmetic is the working, not a claim
     for kind, seg in segments:
         seg = _STRAY_TAG.sub("", seg)
-        for para in _paragraphs(seg):
+        paras = _paragraphs(seg)
+        for pi, para in enumerate(paras):
             if _WORKED_START.search(para):
                 worked = True
             elif para.lstrip().startswith("#"):
@@ -918,6 +931,8 @@ def _parse_inner(raw: str, n_sources: int) -> tuple[list[Block], list[int], bool
             elif REMOVED_MARK in cleaned and not cleaned.lstrip().startswith("#"):
                 # A line that tried to cite a source that doesn't exist is a claim, so it is never exempt.
                 blocks.append(Block("outside", _unmark(cleaned), []))
+            elif _asks_then_solution(cleaned, paras[pi + 1] if pi + 1 < len(paras) else ""):
+                blocks.append(Block("text", cleaned, []))  # an exercise followed by its hidden solution is a question, not a claim
             else:
                 more, said = _uncited_blocks(cleaned, n_sources, worked)
                 said_not_covered = said_not_covered or said
@@ -978,13 +993,13 @@ _CAUTION = re.compile(
     r"\b(?:check|confirm|verify|look)\b", re.I)
 # two facts already cited, set side by side ("That is one fewer exam than Fall 2018")
 _COMPARISON = re.compile(
-    r"^\W*(?:that|this|it|so|which|these|those|both|the\s+two)\b[^.!?]*\b(?:fewer|more|less|earlier|later|longer|"
-    r"shorter|higher|lower|bigger|smaller|larger|than|same\s+as|different\s+from|differs?|compared|unlike|similar)\b", re.I)
+    r"^\W*(?:that|this|it|so|which|these|those|both|the\s+two)\b[^.!?]*\b(?:than|same\s+as|different\s+from|"
+    r"differs?|compared|unlike|similar)\b", re.I)  # a bare "larger" or "more" is a claim, not a comparison
 # feedback on the student's own draft or proof, and what the assignment asks of it
 _ABOUT_DRAFT = re.compile(
     r"^\W*(?:you|your|you're|you've)\b|^\W*(?:the|this)\s+draft\b|"
     r"^\W*(?:the|this)\s+(?:assignment|rubric|prompt|task)\s+(?:asks|requires|wants|needs|expects|says|lists|grades|"
-    r"scores)\b|^\W*(?:honest\s+answer|verdict|feedback|overall|strength|weakness|gap|missing)\b|"
+    r"scores)\b|^\W*(?:essay|paper|assignment|project|report)\s*#?\d*\s+(?:asks|requires|wants|needs|expects)\s+you\b|^\W*(?:honest\s+answer|verdict|feedback|overall|strength|weakness|gap|missing)\b|"
     r"^\W*what\s+(?:the|this)\s+(?:assignment|rubric|prompt|task|problem|question)\s+(?:asks|wants|needs|requires)\b|"
     r"^\W*(?:nothing|none|no\s+\w+)\s+(?:\w+\s+){0,2}?(?:in|of)\s+(?:the|this|your)\s+(?:draft|essay|proof|answer|paragraph|response)\b|"
     r"\b(?:in|of|about|from)\s+(?:the|this|your)\s+draft\b|\bas\s+the\s+(?:prompt|assignment|rubric|problem)\s+(?:says|states|asks)\b", re.I)
@@ -1301,6 +1316,83 @@ def source_rows(sources: list[Source], used: list[int] | None = None) -> list[di
     return rows
 
 
+# ---- the assignment's own prompt, requirements and rubric, for a question that names them
+_ASSIGN_ASK = re.compile(
+    r"\b(?:rubrics?|requirements?|grading\s+criteri\w*|grading\s+(?:scale|breakdown|guide)|how\s+(?:is|will)\s+(?:it|my\s+\w+|the\s+\w+)\s+graded|"
+    r"the\s+assignment|(?:my|the)\s+(?:essay|paper)|essay\s*#?\d+|assignment\s*#?\d+)\b", re.I)
+_ASSIGN_HEAD = re.compile(r"\b(?:prompt|requirements?|rubric|criteri\w*|grading|points|length|due|format|instructions?|question)\b", re.I)
+_DANGLING = re.compile(r"(?:criteri\w*|points?|score|weight|description|level|rubric)\W*\|?\s*$", re.I)
+
+
+def _aw(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def assignment_sources(store, course_id: int, question: str, *, limit_chars: int = 6000, max_sources: int = 4) -> list[dict]:
+    """The prompt, requirements and rubric chunks of a graded essay's assignment, for a question that names the rubric,
+    the requirements, the assignment, "my essay" or an essay by its title. A chunk that ends in a dangling table header
+    is joined with the chunk after it, so a rubric table arrives whole. Only an assignment that holds nothing but its
+    essay: a material with problems in it is never a source."""
+    if not _ASSIGN_ASK.search(question or "") and not _names_essay(store, course_id, question):
+        return []
+    from . import integrity
+    view = integrity.graded_view(store, course_id)
+    essays = [it for it in view if it.get("kind") == "essay" and it.get("material_id")
+              and not any(i.get("material_id") == it["material_id"] and i["id"] != it["id"] for i in view)]
+    q = f" {_aw(question)} "
+    named = [it for it in essays if _essay_named(it, q)]
+    out: list[dict] = []
+    total = 0
+    for it in (named or essays)[:2]:
+        mid = it["material_id"]
+        mat = store.material(mid) or {}
+        chunks = store.chunks_of(mid)
+        picks: list[int] = []
+        for i, ch in enumerate(chunks):
+            if i < 2 or _ASSIGN_HEAD.search(ch.get("heading") or "") or _ASSIGN_HEAD.search((ch.get("text") or "")[:200]):
+                picks.append(i)
+        merged: list[tuple[dict, str]] = []
+        used_idx: set[int] = set()
+        for i in picks:
+            if i in used_idx:
+                continue
+            ch, text, j = chunks[i], chunks[i].get("text") or "", i
+            while j + 1 < len(chunks) and (_DANGLING.search(text.rstrip()) or chunks[j + 1].get("text", "").lstrip().startswith("|")):
+                text = text.rstrip() + "\n" + chunks[j + 1].get("text", "")
+                j += 1
+                used_idx.add(j)
+            merged.append((ch, text))
+        for ch, text in merged:
+            total += len(text)
+            if total > limit_chars or len(out) >= max_sources:
+                break
+            out.append({"chunk_id": ch["id"], "material_id": mid, "material_title": mat.get("title", "Assignment"),
+                        "material_kind": mat.get("kind", ""), "loc_kind": ch.get("loc_kind", ""),
+                        "loc_start": ch.get("loc_start", 0), "loc_label": ch.get("loc_label", ""),
+                        "heading": ch.get("heading", ""), "text": text,
+                        "href": f"/read/{mid}?at={ch['id']}#c{ch['id']}", "score": 1.0})
+    return out
+
+
+def _essay_named(it: dict, q: str) -> bool:
+    title = _aw(it.get("title") or "")
+    if not title:
+        return False
+    if f" {title} " in q:
+        return True
+    m = re.match(r"((?:essay|paper|assignment|project|report)\s*\d+)", title)
+    return bool(m and f" {m.group(1)} " in q.replace(" #", " "))
+
+
+def _names_essay(store, course_id: int, question: str) -> bool:
+    q = f" {_aw(question)} "
+    try:
+        return any(_essay_named(it, q) for it in store.graded_items(course_id) if not (it.get("body") or "").strip() or (it.get("kind") or "") == "essay")
+    except Exception:
+        return False
+
+
+
 def ask(store, course_id: int, question: str, provider, *, depth: str = "standard",
         history: list[dict] | None = None, limit: int = 8, record_chat: bool = True, route: bool = True) -> Answer:
     """Search the course, route graded work to a twin, otherwise answer from the sources. Saves a guide.
@@ -1321,6 +1413,10 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
     fixed, caught, answer, reworded = False, None, None, None
     if not graded:
         sources = integrity.search_safe(store, course_id, question, limit=limit)
+        head = assignment_sources(store, course_id, question)  # fx12: a rubric or requirements question gets them on the first call
+        if head:
+            seen = {x.get("chunk_id") for x in head}
+            sources = head + [x for x in sources if x.get("chunk_id") not in seen]
         # a graded handout's own equipment, procedure and safety text is searchable; its questions never are
         extra, left_out = integrity.handout_sources(store, course_id, question,
                                                     listed={(x.get("material_id") if isinstance(x, dict) else getattr(x, "material_id", None))

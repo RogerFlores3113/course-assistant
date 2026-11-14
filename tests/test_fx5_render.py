@@ -172,5 +172,5 @@ def test_concept_chain_page_depth(ready):
     data = {"nodes": [{"id": c, "label": c.upper(), "cites": [1]} for c in ids],
             "edges": [{"a": a, "b": b, "label": "leads to", "cites": [1]} for a, b in zip(ids, ids[1:])]}
     gid = ready.store.add_guide(ready.cid, "concept_map", "Map", "", sources=sources(3), data=data)
-    tree = ready.client.get(f"/guides/{gid}").text.split('<ul class="tree">')[1].split('<div class="mapwrap">')[0]
+    tree = ready.client.get(f"/guides/{gid}").text.split('<ul class="tree">')[1].split('<div class="mapwrap"')[0]
     assert tree.count("<ul") <= 1 and tree.count('<ol class="chain">') == 1 and tree.count("<li>") >= 8
