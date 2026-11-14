@@ -145,3 +145,18 @@ def test_a_rubric_header_cut_from_its_rows_is_joined_to_them():
     s.add_graded_item(c, "Essay 1: The Gallery Essay", "", m)
     got = grounding.assignment_sources(s, c, "What does the rubric for my essay reward?")
     assert got and "Criterion Points" in got[0]["text"] and "| Looking closely | 25 |" in got[0]["text"]
+
+
+def test_explain_puts_the_chunk_that_defines_the_topic_before_one_that_mentions_it():
+    from course_assistant import study
+    mention = {"text": "Markov chains use the eigenvalues of the transition matrix to find the long run.", "heading": "Markov chains"}
+    define = {"text": "An eigenvalue is a number that scales a vector the matrix leaves in its own direction.", "heading": "Eigenvalues"}
+    out = study._defining_first([mention, define], "eigenvalues")
+    assert out[0] is define and out[1] is mention
+
+
+def test_two_defining_or_two_mentioning_chunks_keep_their_order():
+    from course_assistant import study
+    a = {"text": "Powers of a matrix use eigenvalues.", "heading": "Powers"}
+    b = {"text": "Stability depends on the eigenvalues.", "heading": "Stability"}
+    assert study._defining_first([a, b], "eigenvalues") == [a, b]

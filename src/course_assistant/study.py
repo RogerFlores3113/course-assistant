@@ -129,6 +129,29 @@ def _search(store: Store, course_id: int, query: str, limit: int = 6, **kw) -> l
         return [x for x in retrieval.search(store, course_id, query, limit=limit, **kw) if x.get("material_id") not in graded]
 
 
+def _defining_first(sources: list[dict[str, Any]], topic: str) -> list[dict[str, Any]]:
+    """Passages that define the topic come before ones that only mention it ("Explain eigenvalues" opens with the
+    definition, not a chapter that uses eigenvalues). The order inside each group stays as retrieval ranked it."""
+    score = getattr(_mod("retrieval"), "_definition_score", None)
+    nq = getattr(_mod("retrieval"), "normalize_query", None)
+    if not score or not nq or len(sources) < 2:
+        return sources
+    try:
+        terms = [t for t in nq(topic)["core"] if t not in getattr(_mod("retrieval"), "_GENERIC_TOPIC", ())]
+    except Exception:
+        return sources
+    if not terms:
+        return sources
+
+    def defines(x: dict[str, Any]) -> bool:
+        try:
+            return score(terms, {"text": x.get("text") or "", "heading": x.get("heading") or ""}) >= 1.5
+        except Exception:
+            return False
+    flags = [defines(x) for x in sources]
+    return [x for x, f in zip(sources, flags) if f] + [x for x, f in zip(sources, flags) if not f]
+
+
 def _merge(*lists: list[dict[str, Any]], cap: int = MAX_SOURCES) -> list[dict[str, Any]]:
     seen: set[int] = set()
     out: list[dict[str, Any]] = []
@@ -1375,7 +1398,7 @@ def explain(store: Store, course_id: int, provider, topic: str, *, depth: str = 
         hit = _named_essay(store, course_id, topic)
     if hit:  # a graded problem pasted into Explain: a twin (or coaching), decided before the model sees it
         return _route_graded(store, course_id, provider, topic, hit)
-    sources = _search(store, course_id, topic, 10, exclude_graded=True)
+    sources = _defining_first(_search(store, course_id, topic, 10, exclude_graded=True), topic)
     task = f"Explain \"{topic}\" for a student in {_course_name(store, course_id)}. Depth: {depth}. {guide}"
     return _generate(store, course_id, provider, "explain", f"Explain ({depth}): {topic}", task, sources,
                      question=topic, data={"depth": depth}, max_tokens=3500)
@@ -1535,7 +1558,7 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     n_normal = count  # twins and coaching notes are extras: they never count toward the requested number
     normal = None
     if n_normal > 0:
-        sources = _search(store, course_id, topic, 10, exclude_graded=True)
+        sources = _defining_first(_search(store, course_id, topic, 10, exclude_graded=True), topic)
         if has_math(store, course_id):
             task = (f"Write {n_normal} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to "
                     "hardest, in the style of the materials. For each, number it and state the question, then give the "
