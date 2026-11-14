@@ -3503,7 +3503,11 @@ _HANDOUT_NAMED = re.compile(r"\b(?:hand-?outs?|lab|labs|pre-?\s?labs?|lab\s+repo
 _HANDOUT_NOISE = frozenset("right wrong correct check checking mine thing things stuff sure okay due late submit".split())
 
 
-def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tuple[list[dict], int]:
+_DEFINITION_Q = re.compile(r"\b(?:what\s+(?:is|are|'s)\b|define\b|definition\b|defined\b|meaning\b|what\s+does\b[^.?!]{0,40}\bmean\b|"
+                           r"used\s+for\b|what\s+do\s+(?:you|we|i)\s+use\b)", re.I)
+
+
+def handout_sources(store, course_id: int, query: str, *, limit: int = 3, listed: "set[Any] | None" = None) -> tuple[list[dict], int]:
     """Passages of a graded material that are not its graded questions (equipment, procedure, settings, safety), found for
     an ordinary question, and how many paragraphs that matched were left out because they hold a graded question.
     Search never returns a graded question: each chunk is cut to its paragraphs that do not belong to one."""
@@ -3531,13 +3535,14 @@ def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tup
         # the note is for a left-out paragraph that is about what the student asked: the question names the handout, the
         # lab, the pre-lab or the report, or the paragraph shares two content words with it (never on a content-free or
         # logistics question)
-        n_out = sum(1 for x in paras if x not in keep and ((named and not is_logistics(query)) or len(qwords & content_tokens(x)) >= 2))
+        n_out = sum(1 for x in paras if x not in keep and ((named and not is_logistics(query)) or (
+            not _DEFINITION_Q.search(query) and len(qwords & content_tokens(x)) >= 2)))
         if n_out:
             left_by_mid[src.get("material_id")] = left_by_mid.get(src.get("material_id"), 0) + n_out
         keep = [x for x in keep if len(x.split()) >= 4]  # a bare heading is no passage
         if keep and len(out) < limit:
             out.append(dict(src, text="\n\n".join(keep)))
-    shown = {o.get("material_id") for o in out}  # a handout that has its own "Also searched" row needs no note beside it
+    shown = {o.get("material_id") for o in out} | set(listed or ())  # a handout with a source row on the page needs no note
     return out, sum(v for mid, v in left_by_mid.items() if mid not in shown)
 
 
@@ -3812,12 +3817,55 @@ def finished_answer(body: str, reply: str) -> bool:
     if len(want) < 3:
         return False
     sents = [x for x in _proof_sentences(reply) if len(x.split()) >= 6 and not essay.STRICT_COACH.search(x) and not essay.MODAL.search(x)]
-    if len(sents) < 3:
+    if len(sents) >= 3:
+        covered = set()
+        for x in sents:
+            covered |= content_tokens(x) & want
+        if len(covered) >= 0.6 * len(want):
+            return True
+    return _parts_answered(core or body, reply)
+
+
+_PART_SPLIT = re.compile(r"[;:]|,\s*(?:and\s+|then\s+)?|\band\s+(?=(?:state|give|explain|describe|define|name|list|identify|compare|say|show|"
+                         r"write|include|contrast|relate|tell)\b)|\bthen\b|\([a-d]\)|\bpart\s+\d\b|(?<=[.!?])\s+", re.I)
+_EXAMPLE_MARK = re.compile(r"\bexamples?\b|\bsuch as\b|\be\.g\b|\bfor instance\b|\billustrat", re.I)
+_EXAMPLE_FOUND = re.compile(r"\bfor (?:example|instance)\b|\bsuch as\b|\be\.g\b|\bis an example\b|\b[A-Z][a-z]?\d|\d")
+
+
+_TASK_VERBS = frozenset("state relate name named give say tell include contrast compare identify list define illustrate".split())
+
+
+def _parts_answered(core: str, reply: str) -> bool:
+    """A terse reply that states, in plain sentences, every part the item asks for (each part named by its own concept
+    words, an 'example' part by a further sentence that gives one), even when it does not echo the item's wording.
+    Needs two or more parts."""
+    parts = []
+    for clause in _PART_SPLIT.split(core or ""):
+        if not clause or not clause.strip():
+            continue
+        ex = bool(_EXAMPLE_MARK.search(clause))
+        toks = {t for t in content_tokens(clause) - essay.ESSAY_GENERIC if not t.startswith("exampl") and t not in _TASK_VERBS}
+        if toks or ex:
+            parts.append((toks, ex))
+    if len(parts) < 2 or len(parts) > 8:
         return False
-    covered = set()
-    for x in sents:
-        covered |= content_tokens(x) & want
-    return len(covered) >= 0.6 * len(want)
+    sents = [x for x in _proof_sentences(reply) if len(x.split()) >= 5 and not essay.STRICT_COACH.search(x) and not essay.MODAL.search(x)]
+    if len(sents) < 2:
+        return False
+    sent_tok = [content_tokens(x) for x in sents]
+    used: set[int] = set()
+    for toks, ex in (p for p in parts if not p[1]):
+        hit = [i for i, have in enumerate(sent_tok) if len(toks & have) >= max(1, math.ceil(0.5 * len(toks)))]
+        if not hit:
+            return False
+        used.add(next((i for i in hit if i not in used), hit[0]))
+    for toks, ex in (p for p in parts if p[1]):  # an example part: a sentence of its own that gives one
+        hit = [i for i, have in enumerate(sent_tok) if i not in used and (
+            (toks and len(toks & have) >= max(1, math.ceil(0.5 * len(toks)))) or _EXAMPLE_FOUND.search(sents[i]))]
+        if not hit:
+            return False
+        used.add(hit[0])
+    return len(used) >= 2
 
 
 def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_text: str,
@@ -3869,13 +3917,19 @@ def reworded_note(graded: dict[str, Any]) -> str:
     return f"I reworded this answer to stay clear of your graded {_item_name(graded)}, so it may be less detailed than you asked for."
 
 
-def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = False, has_answer: bool | None = None) -> str:
+def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = False, has_answer: bool | None = None,
+               held: bool = False) -> str:
     """The one sentence the page shows for why this question got a similar problem or concepts help. It never says
     'a similar problem' for a page that shows none, and it blames the reply, not the question, when the reply was
     what the app threw away."""
     name = _item_name(graded)
     if mode == "feedback":
         return f"This looks like your own draft for {name}, so here is feedback, not a rewrite."
+    if held and mode != "twin":  # the page shows the fixed "I can't write this" text, so it never says "concepts and an approach"
+        tail = " The app does not say whether your answer is right." if check else ""
+        if why in _REPLY_WHY:
+            return f"My first answer was too close to your graded {name}, so I held it back. Some steps you can take are below." + tail
+        return f"This looks like your graded {name}, so the app held back an answer. Some steps you can take are below." + tail
     if why in _REPLY_WHY:
         if mode == "twin":
             return (f"My first answer was too close to your graded {name}, so I replaced it with a similar problem with "
@@ -4024,10 +4078,15 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     shown_mode = "twin" if mode == "twin" else "concepts"
     if kind in ("essay", "proof") and not feedback and mode != "twin":
         note = ""  # the routing sentence on the page already says why; one banner, not three
+    if mode != "twin" and not feedback and any(b.md in (SAFE_CONCEPTS, SAFE_CHECK, SAFE_ESSAY, SAFE_SHORT, SAFE_CHECK_WRITTEN) for b in blocks):
+        note = ""  # a fixed "I can't write this" page: no banner above it that says concepts are shown
     blocks = ([Block("text", note, [])] if note else []) + list(blocks)
     answer = grounding.make_answer(blocks, used, sources, twin=(mode == "twin"), not_covered=False)
     answer.mode = shown_mode
-    note_line = route_note(graded, "feedback" if feedback else shown_mode, why or graded.get("reason") or "", check, has_answer)
+    held = mode != "twin" and not feedback and bool(blocks) and any(
+        b.md in (SAFE_CONCEPTS, SAFE_CHECK, SAFE_ESSAY, SAFE_SHORT, SAFE_CHECK_WRITTEN) for b in blocks)
+    note_line = route_note(graded, "feedback" if feedback else shown_mode, why or graded.get("reason") or "", check, has_answer,
+                           held=held)
     answer.routing_note = note_line
     excerpt = " ".join(problem_text.split())
     excerpt = excerpt if len(excerpt) <= 300 else excerpt[:297] + "..."

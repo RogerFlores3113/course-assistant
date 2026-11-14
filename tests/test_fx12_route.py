@@ -164,3 +164,68 @@ def test_d9_a_set_ask_that_two_items_share_still_touches_the_whole_set(tmp_path)
     s, c = set_world(tmp_path)
     m = integrity.match_graded(s, c, "I'm stuck on the problem set about NaCl and carbon")
     assert m and len(m.get("members") or []) == 2
+
+
+def test_d9_handout_note_needs_a_content_match_that_is_not_a_definition_question(tmp_path):
+    import fx11_world
+    s, c, mid = fx11_world.handout_only_questions(tmp_path)
+    leak = "How do I compute the molarity of a brine sample and what happens to conductivity when it is diluted?"
+    assert integrity.handout_sources(s, c, leak)[1] >= 1
+    for q in ["How is the molarity of a brine sample defined?", "What is the molarity of brine and how do I compute it?"]:
+        assert integrity.handout_sources(s, c, q)[1] == 0, q
+
+
+def test_d9_handout_note_never_beside_a_source_row_of_that_handout(tmp_path):
+    import fx11_world
+    s, c, mid = fx11_world.handout_only_questions(tmp_path)
+    q = "How do I compute the molarity of a brine sample and what happens to conductivity when it is diluted?"
+    assert integrity.handout_sources(s, c, q)[1] >= 1
+    assert integrity.handout_sources(s, c, q, listed={mid})[1] == 0
+    named = "What does the lab handout say about the molarity of the brine sample?"
+    assert integrity.handout_sources(s, c, named)[1] >= 1
+    assert integrity.handout_sources(s, c, named, listed={mid})[1] == 0
+
+
+# ------------------------------------------------------------------ decision 9: terse finished answers, banner agrees with fallback
+SHORT6 = ("Problem 6 (6 points). Explain the difference between a solute and a solvent, give an example of each in a named "
+          "solution, and state how concentration relates to the amount of solute.")
+TERSE6 = ("A solvent is the part that dissolves things and the solute is what gets dissolved [1]. In a salt solution, water is the "
+          "solvent and salt is the solute [1]. Concentration rises as the amount of solute rises in a fixed volume [1].")
+COACH6 = ("Name what each word means in your own words. Then choose a solution you can name as your example and ask yourself what "
+          "happens to concentration when you add more solute.")
+TWO6 = ("A solvent is the part that dissolves things and the solute is what gets dissolved [1]. Salt and sugar are common solutes "
+        "in water [1].")
+
+
+def test_d9_terse_complete_answer_is_finished_and_honest_look_alikes_are_not():
+    assert integrity.finished_answer(SHORT6, TERSE6)
+    assert not integrity.finished_answer(SHORT6, COACH6)
+    assert not integrity.finished_answer(SHORT6, TWO6)  # two of the three parts
+
+
+def _short_world(tmp_path):
+    s = Store(":memory:")
+    c = s.add_course("Chem")
+    s.add_graded_item(c, "Set 6: Problem 6", SHORT6, None, kind="essay", label="Problem 6")
+    f = tmp_path / "ch.md"
+    f.write_text("# Solutions\n\n## Parts\n\nA solvent dissolves a solute to make a solution. Concentration measures solute per volume.\n")
+    importers.import_file(s, c, f)
+    return s, c
+
+
+def test_d9_terse_cited_answer_is_replaced_and_the_banner_agrees_with_the_fallback(tmp_path):
+    s, c = _short_world(tmp_path)
+    a = grounding.ask(s, c, SHORT6, FakeProvider(lambda system, messages: TERSE6 if "GRADED TASK" in messages[0]["content"] else "ok"))
+    assert a.mode == "concepts"
+    assert "salt solution" not in a.body_md
+    assert "I can't write this answer" in a.body_md
+    note = (a.routing_note or "").lower()
+    assert "concepts and an approach" not in note and "held" in note
+    assert "here are the concepts" not in a.body_md.lower()
+
+
+def test_d9_coaching_reply_for_the_same_item_keeps_the_concepts_banner(tmp_path):
+    s, c = _short_world(tmp_path)
+    a = grounding.ask(s, c, SHORT6, FakeProvider(lambda system, messages: COACH6 if "GRADED TASK" in messages[0]["content"] else "ok"))
+    assert a.mode == "concepts" and "ask yourself" in a.body_md.lower()
+    assert "concepts and an approach" in (a.routing_note or "")
