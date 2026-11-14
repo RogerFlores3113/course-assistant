@@ -1248,6 +1248,22 @@ def is_logistics(text: str) -> bool:
     return bool(_LOGISTICS.search(t) or _SIZE_ASK.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t)
 
 
+_COVERAGE = re.compile(
+    r"\b(?:which|what)\s+(?:lecture|lectures|chapter|chapters|reading|readings|section|sections|week|weeks|video|videos|slides?|notes?|"
+    r"page|pages|topic|topics|unit|module)\b[^.?!]{0,40}?\b(?:covers?|covered|teach(?:es)?|explains?|discuss(?:es)?|introduc(?:es?|ed)|"
+    r"go(?:es)?\s+over|has|have|is\s+(?:about|on|relevant|for)|are\s+(?:about|on|relevant|for)|help(?:s|ful)?|before|prepare[sd]?|"
+    r"should\s+i\s+(?:read|watch|review))\b|\bwhere\s+(?:in\s+the\s+\w+\s+)?(?:is|are|can\s+i\s+(?:find|read|review)|do\s+(?:we|you)\s+"
+    r"(?:cover|learn|discuss))\b", re.I)
+
+
+def is_coverage_ask(text: str) -> bool:
+    """'Problem 3: which lecture covers LU?': where to read about something, not graded work (a value or a draft in the
+    message, or a request to solve, makes it work again)."""
+    t = text or ""
+    return bool(_COVERAGE.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t) \
+        and not _states_value(t)
+
+
 def draft_text(question: str) -> str:
     return essay.draft_request(question) or ""
 
@@ -1278,6 +1294,12 @@ def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[
     question = drop_negated_sets(question)
     if not _SET_WORD.search(question) or is_logistics(question):
         return None
+    named = topic_named_item(items, question)  # 'the one with L and U' is the LU item, whatever the set's overall subject
+    if named is not None:
+        one = dict(named)
+        one["source"] = "material" if one.get("material_id") else "item"
+        one["score"] = 0.7
+        return one
     stripped = _SET_WORD.sub(" ", question)
     groups: dict[Any, list[dict[str, Any]]] = {}
     for it in items:
@@ -1312,6 +1334,85 @@ def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[
     return None
 
 
+_REF_PHRASES = (
+    _TOPIC_PHRASE,  # 'the NaCl problem', 'the row exchange problem'
+    re.compile(r"\b(?:the|that|this|my|our)\s+(?:one|problem|question|exercise|part|task|item)\s+(?:with|about|on|involving|using|"
+               r"where|that\s+(?:has|uses|asks|involves)|for|asking\s+for|containing)\s+([^,.?!;:]{2,60})", re.I),
+)
+_NAME_REF = re.compile(r"(?<![a-z0-9_])[a-z]\d{1,3}(?![a-z0-9_])")
+
+
+def _ref_words(phrase: str) -> tuple[set[str], set[str]]:
+    """(content-word stems, acronyms) a topic phrase carries. 'L and U' is the acronym 'lu'; a lone letter is no word."""
+    words = {_stem(w) for w in re.findall(r"[a-z]{3,}", _words_to_digits(phrase).lower())
+             if w not in retrieval.STOPWORDS and w not in GENERIC and w not in _SET_WORDS_FULL}
+    acr = {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", phrase)}
+    letters = [w for w in re.findall(r"\b[A-Za-z]\b", phrase) if w.lower() not in ("a", "i")]
+    if 2 <= len(letters) <= 3:
+        acr.add("".join(letters).lower())
+    return words, acr
+
+
+_ASK_WORDS = frozenset("gram kilogram liter litre many much amount total final answer".split())
+_SET_WORDS_FULL = frozenset({"set", "pset", "homework", "worksheet", "sheet", "assignment", "hw"})
+
+
+def topic_named_item(items: list[dict[str, Any]], question: str) -> dict[str, Any] | None:
+    """The graded item a question names by its distinctive content, with no 'problem set' word and no number: 'the NaCl
+    problem', 'the row exchange problem', 'the one with L and U', or a key name only this item has ('what's l31 for the problem set?'). It is
+    the item only when it is the one item carrying those words (a tie names nothing, and a question that names no item,
+    'how do I find the mass of NaCl in general?', names none)."""
+    q = drop_negated_sets(question or "")
+    if not q.strip() or is_logistics(q):
+        return None
+    cands = [i for i in items if i["kind"] in ("problem", "proof") and (i.get("body") or "").strip()]
+    if not cands:
+        return None
+    score: dict[int, float] = {}
+    refs = [m for rx in _REF_PHRASES for m in rx.finditer(q)]
+    for rx in _REF_PHRASES:
+        for m in rx.finditer(q):
+            phrase = m.group(1)
+            if rx is _TOPIC_PHRASE:  # 'the mass for the NaCl problem': only what follows the last article or preposition
+                phrase = re.split(r"\b(?:the|that|this|my|our|for|of|in|on|about|with)\s", phrase + " ", flags=re.I)[-1] or phrase
+            words, acr = _ref_words(phrase)
+            if not words and not acr:
+                continue
+            for it in cands:
+                text = f"{it.get('title', '')} {it.get('body', '')}"
+                have = content_tokens(text)
+                lows = {w.lower() for w in re.findall(r"[A-Za-z]{2,4}", text)}
+                hit = sum(1 for w in words if w in have) + sum(1.5 for a in acr if a in lows)
+                if hit:
+                    score[it["id"]] = max(score.get(it["id"], 0.0), hit)
+    ranked = sorted(score.items(), key=lambda kv: -kv[1])
+    if ranked and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+        return next(i for i in cands if i["id"] == ranked[0][0])
+    if refs and not ranked:
+        # 'how many grams of NaCl for the molarity problem?': the phrase names no item, the rest of the question does
+        words, acr = _ref_words(q)
+        words = {w for w in words if w not in METHOD_WORDS}
+        for it in cands:
+            text = f"{it.get('title', '')} {it.get('body', '')}"
+            have = content_tokens(text)
+            hit = sum(1 for w in words if w in have and w not in _ASK_WORDS) + sum(1.5 for a in acr if a in {w.lower() for w in re.findall(r"[A-Za-z]{2,4}", text)})
+            if hit:
+                score[it["id"]] = hit
+        ranked = sorted(score.items(), key=lambda kv: -kv[1])
+        if ranked and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+            return next(i for i in cands if i["id"] == ranked[0][0])
+    owners: dict[str, set[int]] = {}
+    for it in cands:
+        for nm in key_names(it):
+            owners.setdefault(nm, set()).add(it["id"])
+    # a key name only one item has ('what's l31 for the problem set?'); with no problem-set word it is a plain question
+    asked = {n for n in _NAME_REF.findall(_norm_hay(q).lower())} if _SET_WORD.search(q) else set()
+    ids = {next(iter(owners[n])) for n in asked if len(owners.get(n, ())) == 1}
+    if len(ids) == 1:
+        return next(i for i in cands if i["id"] == next(iter(ids)))
+    return None
+
+
 def _proof_markers(question: str) -> bool:
     """The message names a proof item ('Problem 4') or carries proof wording: 'prove', 'suppose ... then', QED."""
     q = question or ""
@@ -1334,7 +1435,7 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     check = is_check_ask(question)
     if check and _GENERIC_CHECK.search(question) and not any(has_candidate(question, i) for i in items):
         check = False  # "how do I check an LU factorization in general" is a method question, not an answer to check
-    logi = is_logistics(question)
+    logi = is_logistics(question) or is_coverage_ask(question)
     scored: list[tuple[float, dict[str, Any]]] = []
     keyed = key_leak_any(store, course_id, question, items, {"lone": True})  # the message carries a final value: a check ask
     refs: list[dict[str, Any]] = []
@@ -1685,10 +1786,10 @@ def force_map(items: list[dict[str, Any]], force_item: dict | None) -> dict[int,
 
 def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with_cites: str,
                     force_item: dict | None, n_cites: int | None = None,
-                    data: dict[Any, set[str]] | None = None) -> dict[str, Any] | None:
+                    data: dict[Any, set[str]] | None = None, forced: dict[int, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """The item whose key the reply gives away (most matches), judged with each item's own chat context."""
     best, top = None, 0
-    forced = force_map(items, force_item)
+    forced = force_map(items, force_item) if forced is None else forced
     for it in items:
         if not item_key(it):
             continue
@@ -1720,6 +1821,38 @@ def _mask_asked(reply: str, question: str) -> str:
     return out
 
 
+_FILLER = frozenset("is are was were be been the a an of to by from for and then so that this it as at in on with gives give "
+                    "becomes become equals equal".split())
+_NUM_TOK = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _num_contexts(sentence: str) -> list[tuple[str, str]]:
+    """(the word right before each number, the number) of a sentence: 'subtract 2 times row 1' gives (subtract, 2), (row, 1)."""
+    t = _words_to_digits(sentence).lower().replace(",", " ")
+    out = []
+    for m in _NUM_TOK.finditer(t):
+        words = [w for w in re.findall(r"[a-z]+", t[:m.start()]) if w not in _FILLER]
+        out.append((words[-1] if words else "", _canon(m.group(0))))
+    return out
+
+
+def echoes_sources(reply: str, source_texts: list[str], own: "set[str] | frozenset[str]" = frozenset()) -> bool:
+    """Every sentence of the reply that carries a number says what a cited passage says: each of its numbers sits right after
+    the same word there ('subtract 2 times row 1', 'the multiplier is 2'). A small number a passage prints beside the same
+    quantity word is the passage's, not a key value; the same digit beside another word shows nothing."""
+    held = [set(_num_contexts(sn)) for t in source_texts for sn in re.split(r"(?<=[.!?;])\s+|\n+|,\s+(?=and\b)", t or "") if sn.strip()]
+    seen = False
+    for sn in _sentences_of(reply):
+        ctxs = [c for c in _num_contexts(_CITE_STRIP.sub("", sn)) if c[1] not in own]
+        if not ctxs:
+            continue
+        for w, n in ctxs:
+            if not w or not any((w, n) in h for h in held):
+                return False
+            seen = True
+    return seen
+
+
 def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str, reply: str,
                     sources: list[Any] | None, force_item: dict | None) -> bool:
     """A worked example the reply takes from the cited course sources: every number it states is in the cited
@@ -1745,7 +1878,7 @@ def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str,
             if it["kind"] == "problem" and (_row_hits(_Text(t), b) >= 2 or copies_item(t, it, rows=True)):
                 return False
     own = set(_reply_numbers(question or ""))
-    return shown_in(reply, texts, own)  # the chunk itself must show each binding: bare small digits never qualify
+    return shown_in(reply, texts, own) or echoes_sources(reply, texts, own)  # the chunk must show each binding
 
 
 def check_reply(store, course_id: int, question: str, raw_reply: str, force_item: dict | None = None, *,
@@ -1772,16 +1905,23 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         data = _data_map(store, items, sources)  # molar masses the item, its handout or the cited sources print
     if _quoted_example(items, question or "", with_cites, reply, sources, force_item):
         return None
-    k = _reply_key_item(items, question or "", reply, with_cites, force_item, n_cites, data)
+    forced = force_map(items, force_item)
+    named = topic_named_item(items, question or "") if question else None
+    if named is not None and named["id"] not in forced:
+        # decision 1: the question names an item by its distinctive content ('the NaCl problem'): the reply is judged as
+        # in a chat about that item, with no 'problem set' word needed
+        forced = {**forced, named["id"]: dict(named, source="material" if named.get("material_id") else "item",
+                                              score=1.0, reason="topic")}
+    k = _reply_key_item(items, question or "", reply, with_cites, force_item, n_cites, data, forced)
     if k:
         return _hit(k, "key")
     if keys_only:
         return None
-    for fi in force_map(items, force_item).values():
+    for fi in forced.values():
         # an essay reply is judged WITH its cites: a cited restatement of a source is only excused when its [n] is present
         if _leaks_forced(fi, with_cites if (fi.get("kind") or _item_kind(fi)) == "essay" else reply, question or "", sources):
             return _hit(fi, "sticky")
-    for fi in force_map(items, force_item).values():
+    for fi in forced.values():
         if question and is_check_ask(question) and confirms_answer(reply) \
                 and (fi.get("kind") or _item_kind(fi)) in ("problem", "proof"):
             return _hit(fi, "sticky")
@@ -1851,6 +1991,11 @@ def _guide_item(store, course_id: int, guide_id: int | None) -> dict[str, Any] |
     return dict(it, kind=_item_kind(it)) if it and it.get("course_id") == course_id else None
 
 
+def _topic_found(store, course_id: int, text: str) -> dict[str, Any] | None:
+    it = topic_named_item(graded_view(store, course_id), text)
+    return dict(it, source="material" if it.get("material_id") else "item", score=0.9) if it else None
+
+
 def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_TURNS) -> dict[str, Any] | None:
     """The graded item this chat touched: it stays touched for `turns` turns after the last student turn that matched
     or named it, or whose reply was caught, whatever words the later questions share with it. It never routes a
@@ -1863,7 +2008,7 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_T
     for m in msgs:
         if m.get("role") == "user":
             text = m.get("content") or ""
-            found = match_graded(store, course_id, text)
+            found = match_graded(store, course_id, text) or _topic_found(store, course_id, text)
             if found and found.get("members"):  # a whole set was named or described: every item in it is touched
                 found = dict(found, kind="problem")
             if found and (found.get("id") or found.get("members")):
@@ -1879,6 +2024,8 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_T
             caught = _guide_item(store, course_id, m.get("guide_id"))
             if caught:
                 item, since, last = caught, 0, caught
+    if item is None and question:
+        item = _topic_found(store, course_id, question)  # 'what is d for the row exchange problem?' touches that item
     if item is None and last is not None and last.get("kind") != "essay" and question \
             and any(re.fullmatch(r"[a-z]\d{1,3}", n) or len(n) >= 4 for n in question_names(last, question)):
         item = last  # a question that names one of its key entries ('l31', 'x3', 'ratio') touches the item again
@@ -3531,7 +3678,9 @@ def _unrelated_turn(question: str, item: dict[str, Any]) -> bool:
     if not (q.mrows or q.erows):
         return False
     b = _Text(item.get("body") or "")
-    if _row_hits(q, b) or touches(question, item) or question_names(item, question) or is_check_ask(question) \
+    # x1, x2, y, z, b are the unknowns of any system: a question that brings its own system and asks for them is about its own
+    own_names = {n for n in question_names(item, question) if not re.fullmatch(r"[xyzb]\d?", n)}
+    if _row_hits(q, b) or touches(question, item) or own_names or is_check_ask(question) \
             or has_candidate(question, item):
         return False
     return not any(b.fm.get(n, {n}) & q.forms for n in b.sig)
@@ -5054,6 +5203,24 @@ def _held_note(names: list[str]) -> str:
             "Ask for a similar problem with different numbers instead.")
 
 
+_LIST_MARK = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+
+
+def _list_units(seg: str) -> list[str]:
+    """The lines of a block that holds two or more list items, each item with its continuation lines ([] for any other
+    block): the heading or lead-in lines stay single units."""
+    lines = seg.splitlines()
+    if sum(1 for ln in lines if _LIST_MARK.match(ln)) < 2:
+        return []
+    units: list[str] = []
+    for ln in lines:
+        if not _LIST_MARK.match(ln) and units and _LIST_MARK.match(units[-1]) and ln.startswith((" ", "\t")):
+            units[-1] += "\n" + ln
+        else:
+            units.append(ln)
+    return units
+
+
 LAST_SCRUB_ITEMS: list[int] = []  # ids of the items the last scrub_parts call matched (for the Practice button)
 
 
@@ -5091,12 +5258,27 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
             n += 1
             continue
         hit = hit_of(seg)
-        if not hit:
-            for line in seg.splitlines():
-                if re.match(r"^\s*(?:[-*+]|\d+[.)])\s", line):
-                    hit = hit_of(line)
-                    if hit:
-                        break
+        units = _list_units(seg)
+        if units:
+            # a list: only the offending item goes, never its siblings (nor the heading or lead-in line above them)
+            hits = [(u, hit_of(u)) for u in units if _LIST_MARK.match(u)]
+            bad = [(u, h) for u, h in hits if h]
+            kept = [u for u in units if not any(u is b for b, _ in bad)]
+            rest = "\n".join(kept)
+            if bad and rest.strip() and not hit_of(rest):
+                drop_details = any(h.get("reason") == "copy" for _, h in bad)
+                for _, h in bad:
+                    n += 1
+                    names.append(_item_name(h))
+                    kinds.append(h.get("kind"))
+                    if h.get("id") and h["id"] not in LAST_SCRUB_ITEMS:
+                        LAST_SCRUB_ITEMS.append(h["id"])
+                out.append(rest)
+                continue
+            if not bad and not hit:
+                out.append(seg)
+                continue
+            hit = hit or bad[0][1]
         if hit:
             n += 1
             drop_details = hit.get("reason") == "copy" and not seg.lower().startswith("<details>")

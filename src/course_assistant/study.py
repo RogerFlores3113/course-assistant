@@ -489,7 +489,8 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
     ans = _mod("grounding").parse_answer(normalize_details(raw), sources)
     return {"routed": None, "blocks": _block_dicts(ans.blocks), "body": _clean_body(ans.body_md),
             "used": list(ans.used or []), "outside": bool(getattr(ans, "outside", False)),
-            "not_covered": bool(getattr(ans, "not_covered", False)), "sources": sources, "scrubbed": scrubbed,
+            # a page that left a part out never says "your materials don't cover this": it says what was left out
+            "not_covered": bool(getattr(ans, "not_covered", False)) and not scrubbed, "sources": sources, "scrubbed": scrubbed,
             "scrub_note": scrub_note, "scrub_items": scrub_ids}
 
 
