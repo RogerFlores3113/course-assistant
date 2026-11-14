@@ -1810,7 +1810,7 @@ _PIPE_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$")
 _NUMROW = r"-?(?:\d+/\d+|\d*\.?\d+)"
 _ROWSEP = r"(?:[ \t]*\|[ \t]*|[ \t]+)"  # entries of one row: spaces, or an augmented bar
 _SLASH_ROWS = re.compile(r"(?<![\w./])(" + _NUMROW + r"(?:" + _ROWSEP + _NUMROW + r")+)((?:[ \t]*[/;][ \t]*" + _NUMROW +
-                         r"(?:" + _ROWSEP + _NUMROW + r")+)+)(?![\w./])")
+                         r"(?:" + _ROWSEP + _NUMROW + r")+)+)(?![\w/]|\.\w)")  # a full stop that ends the sentence may follow the last row
 _LINE_ROW = re.compile(r"^[ \t>]*" + ANSWER_PREFIX + r"(?:[\[(|<]\s*)?(" + _NUMROW + r"(?:[ \t,|&]+" + _NUMROW + r")+)\s*[\])|]?[ \t]*,?[ \t]*$")
 
 
@@ -2708,7 +2708,8 @@ def _comp_hit(h: "_Hay", comp: _Comp, given: set[tuple[str, ...]] | None = None,
 def _ordinal_pairs(text: str) -> list[tuple[int, str, str]]:
     """'the third component of x is 2' -> (3, '2', 'x'); the name is '' when the sentence names none."""
     out = []
-    t = _norm_hay(text).lower()
+    # the word 'zero' is prose ('the third pivot being zero'), never a value an ordinal entry is given
+    t = _norm_hay(re.sub(r"\bzero\b", "nil", text or "", flags=re.I)).lower()
     for m in re.finditer(r"\b(first|second|third|fourth|fifth|last)\b(?:\s+(?:entry|component|element|unknown|one|value|number))?"
                          r"(?:\s+of\s+(?:the\s+)?(?:vector\s+)?([a-z]\d?))?[^.;\n]{0,40}?" + _CONNECT +
                          r"\s*(?:about\s+)?(-?\d[\d./]*)", t):
@@ -2815,14 +2816,22 @@ def _family_bound(h: "_Hay", ix: _Index, data: frozenset | set = frozenset()) ->
     for fam, vals in fams.items():
         words = _FAMILY_WORDS["lambda"] if fam.startswith("eigen") else _FAMILY_WORDS.get(fam, re.escape(fam) + r"s?")
         plural = bool(re.search(r"s\??$|values", words)) or fam in ("lambda", "sigma")
-        head = _ORD_WORD + r"(?:" + words + r")(?![a-z])(?:\s+of\s+(?:the\s+)?(?:matrix\s+)?[a-z]\w{0,2}(?![a-z]))?\s*\d{0,2}\s*"
+        head = _ORD_WORD + r"(?:" + words + r")(?![a-z])(?:\s+of\s+(?:the\s+)?(?:(?:matrix\s+)?[a-z]\w{0,2}(?![a-z])|matrix))?\s*\d{0,2}\s*\??\s*"
         item = r"(-?\d[\d./]*)"
         # 'W = 5', 'W is 5 and 2', 'W: 5, 2'; the plural words also read 'eigenvalues 5 and 2' with nothing between
-        pat = re.compile(head + r"(?:" + _CONNECT + (r"|" if plural else r"") + r")\s*(?:about\s+|approximately\s+)?" + item
+        pat = re.compile(head + r"(?:" + _CONNECT + r"|(?<=\?)|(?<=\?\s)" + (r"|" if plural else r"") + r")\s*(?:about\s+|approximately\s+)?" + item
                          + r"((?:\s*(?:,|;|\band\b|\bor\b|\bthen\b)\s*(?:(?:" + words + r")\s*\d{0,2}\s*(?:" + _CONNECT + r")\s*)?-?\d[\d./]*)*)")
         for m in pat.finditer(h.low):
             nums = [_canon(x.rstrip("./")) for x in re.findall(r"-?\d[\d./]*", m.group(1) + " " + m.group(2))]
-            if any(num_eq(a, b) for a in nums for b in vals):
+            hits = {b for a in nums for b in vals if num_eq(a, b)}
+            if "?" in m.group(0)[:m.start(1) - m.start(0)]:
+                # a question and its answer on the next line ('What are the eigenvalues of A? / 5 and 2'): it needs the
+                # values themselves, not a lone count ('How many eigenvalues does it have? 2')
+                if len(hits) >= 2 or any(_distinct_val(b) for b in hits):
+                    out.append(fam)
+                    break
+                continue
+            if hits:
                 out.append(fam)
                 break
     return out
@@ -2857,7 +2866,16 @@ _FOR_VALUE = re.compile(r"^\s*[,.;]?\s*(?:for|with|when|at|corresponding\s+to|be
                         r"(?:=|is|of)?\s*(-?\d[\d./]*)", re.I)
 
 
-def _pair_vec_bound(h: "_Hay", ix: _Index, given: set[tuple[str, ...]], asked=()) -> list[str]:
+_EIGENVEC_FOR = re.compile(r"eigen\s*vectors?\s+(?:for|of|with|belonging\s+to|corresponding\s+to)\s+(?:the\s+)?(?:eigenvalue\s+|\u03bb\s*=?\s*|lambda\d*\s*=?\s*)?"
+                           r"(-?\d[\d./]*)\s*(?:is|are|=|:|\u2192|->)?\s*$", re.I)
+
+
+def _sentence_names(sentence: str, item: dict[str, Any] | None) -> bool:
+    """The sentence names the item by its number or label ('For Problem 5, ...')."""
+    return bool(item) and bool(sentence.strip()) and (_own_ref(sentence, item) or _reference_match(sentence, item))
+
+
+def _pair_vec_bound(h: "_Hay", ix: _Index, given: set[tuple[str, ...]], asked=(), item: dict[str, Any] | None = None) -> list[str]:
     """A two-entry key vector ((1, 1), (1, -2): the eigenvectors of a 2 by 2 matrix) written in the key's order in a
     touched or named context, with a cue that it is the item's own vector: the text names eigenvectors, binds the vector
     to its key name ('v1 = (1, 1)') or gives it to one of the key's values ('(1, 1) for 5'). Two small numbers in a
@@ -2875,8 +2893,13 @@ def _pair_vec_bound(h: "_Hay", ix: _Index, given: set[tuple[str, ...]], asked=()
             m = re.match(r"[\[(][^\[\]()]*[\])]", h.t[pos:])
             after = h.t[pos + m.end():pos + m.end() + 60] if m else ""
             fv = _FOR_VALUE.match(after)
+            lead = re.split(r"[.!?\n]", h.t[:pos])[-1]  # the words of the same sentence before the vector
+            lead_for = _EIGENVEC_FOR.search(lead)
             if (comp.name and h.named_before(comp.name, pos)) or \
-                    (fv and any(num_eq(_canon(fv.group(1).rstrip("./")), v) for v in key_vals)):
+                    (fv and any(num_eq(_canon(fv.group(1).rstrip("./")), v) for v in key_vals)) or \
+                    (lead_for and any(num_eq(_canon(lead_for.group(1).rstrip("./")), v) for v in key_vals)) or \
+                    (_EIGEN_CUE.search(lead) and _sentence_names(lead, item)):
+                # 'the eigenvector for 5 is (1, 1)', 'For Problem 5, the eigenvector is (1, 1)', 'Eigenvector for Problem 5: (1,1)'
                 found[i] = "strong"
                 break
             if _EIGEN_CUE.search(before):
@@ -2896,6 +2919,21 @@ def _echoed(vec, asked) -> bool:
 
 
 def key_leak(reply, item=None, ctx=None):
+    """See _key_leak_core. A sentence that names the item itself ('For Problem 5, the eigenvector for 5 is (1, 1).') is
+    judged as a named context even when the chat as a whole is not about the item: the numbers sit next to its name."""
+    got = _key_leak_core(reply, item, ctx)
+    c = ctx or {}
+    if got or not isinstance(reply, str) or item is None or (c.get("named") and c.get("sticky")) or c.get("_sentence"):
+        return got
+    for sn in _sentences_of(reply):
+        if _sentence_names(sn, item) or _sentence_names(re.split(r"[,:;]", sn)[0], item):
+            got = _key_leak_core(sn, item, dict(c, named=True, small=True, _sentence=True))
+            if got:
+                return got
+    return got
+
+
+def _key_leak_core(reply, item=None, ctx=None):
     """Does the reply give away the item's answer? Returns what matched (a list of names; [] when it is fine).
     ctx: named (the question pastes or names the item, or the text is a saved guide or card), sticky (the chat
     touched it within the last turns), short (reply under 80 words), question_refs (the question points at one value
@@ -2952,7 +2990,7 @@ def key_leak(reply, item=None, ctx=None):
         coarse = _rounded_unit_bound(h, ix, data, asked)  # 'about 5.1 g' for the key's 5.11 g, in a context about the item
         if coarse:
             return coarse
-        pair = _pair_vec_bound(h, ix, _given_seqs(item), asked)  # 'the eigenvectors are (3, 1) and (1, -3)', '(1, 1) for 5'
+        pair = _pair_vec_bound(h, ix, _given_seqs(item), asked, item)  # 'the eigenvectors are (3, 1) and (1, -3)', '(1, 1) for 5'
         if pair:
             return pair
         letters = _alias_bound(h, ix, data)  # 'z = 2, then y = 1, then x = 1' for x = (1, 1, 2)
@@ -2968,7 +3006,8 @@ def key_leak(reply, item=None, ctx=None):
     if gate:
         if c.get("short") and c.get("question_refs"):
             svals = {e.val for e in ix.entries if _is_small(e.val) and e.val not in data}
-            if any(n in svals for n in _reply_numbers(reply) if _is_small(n)):
+            # the word 'zero' ('a pivot position becomes zero') never matches a key entry of 0 by itself
+            if any(n in svals for n in _reply_numbers(re.sub(r"\bzero\b", " ", reply, flags=re.I)) if _is_small(n)):
                 return ["value"]
     return []
 
@@ -3028,6 +3067,27 @@ def named_value_leak(text: str, item: dict[str, Any] | None) -> bool:
     h = _Hay(text)
     return any(e.name and e.unit != "atom" and not _is_small(e.val) and e.val not in ix.given and not _is_const(e.val)
                and h.named(e.name, e.val) for e in ix.entries)
+
+
+def table_value_leak(text: str, item: dict[str, Any] | None) -> bool:
+    """A table row, with or without its header ('| 11 | singular |'), whose one number is a distinctive value of the key and whose
+    words are about the item: a value of the item's own unknown set in a table is the answer as much as 'd = 11' is."""
+    ix = _index(item) if item else None
+    if not ix or not ix.entries:
+        return False
+    vals = [e.val for e in ix.entries if e.name and e.unit != "atom" and _distinct_val(e.val) and e.val not in ix.given and not _is_const(e.val)]
+    if not vals:
+        return False
+    iw = content_tokens(f"{item.get('title', '')} {item.get('body', '')}") - _TOPIC_NOISE - METHOD_WORDS
+    for line in (text or "").splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        cells = [re.sub(r"[$`*\s]", "", c) for c in re.sub(r"\[\d+(?:\s*[,;\u2013-]\s*\d+)*\]", " ", line).strip().strip("|").split("|")]
+        nums = [c for c in cells if c and _NUM_FULL.match(c)]
+        words = " ".join(c for c in re.sub(r"\[\d+\]", " ", line).strip().strip("|").split("|") if c.strip() and not _NUM_FULL.match(re.sub(r"[$`*\s]", "", c)))
+        if len(nums) == 1 and words and any(num_eq(_canon(nums[0]), v) for v in vals) and content_tokens(words) & iw:
+            return True
+    return False
 
 
 def touches(text: str, item: dict[str, Any]) -> bool:
@@ -4111,6 +4171,24 @@ def _seq_in(seq: list[str], h: "_Hay") -> list[int]:
     return out
 
 
+_JOIN_AND = re.compile(r"\)\s*,?\s*and\s*\(")
+_FAMILY_CLAIM = re.compile(r"(?<![a-z0-9])((?:eigen\s*)?values?|eigenvalues?|(?:characteristic\s+)?roots?|singular\s+values?|lambda\d*|\u03bb\d*)(?![a-z])"
+                           r"(?:\s+of\s+(?:(?:the|that|this|our|a)\s+)?(?:[a-z][a-z-]*\s+){0,2}[a-z][a-z-]*)?\s*\??"
+                           r"\s*(?:,|:|=|\bare\b|\bis\b|\bequals?\b|\bbeing\b)?\s*((?:-?\d[\d./]*)(?:\s*(?:,|;|\band\b|\bor\b)\s*-?\d[\d./]*)*)")
+
+
+def _family_claims(text: str) -> list[set[str]]:
+    """'the eigenvalues are 5 and 2' (number words read as digits): the set of numbers each such statement gives. A count before the
+    name ('two eigenvalues, five and two') is not part of it."""
+    t = _norm_hay(text or "").lower()
+    out = []
+    for m in _FAMILY_CLAIM.finditer(t):
+        if m.group(1) in ("value", "values"):
+            continue
+        out.append({_canon(x.rstrip("./")) for x in re.findall(r"-?\d[\d./]*", m.group(2))})
+    return [c for c in out if c]
+
+
 def shown_in(text: str, source_texts: list[str], own: "set[str] | frozenset[str]" = frozenset()) -> bool:
     """Is every number the text states shown by the cited course sources with the same binding, and is at least one of
     them shown? A run of numbers (a vector, a matrix row, a list) must be printed in the same order by one source; a
@@ -4119,12 +4197,19 @@ def shown_in(text: str, source_texts: list[str], own: "set[str] | frozenset[str]
     qualify. own: numbers the student typed, which count as printed."""
     if not source_texts or not (text or "").strip():
         return False
+    # a row of several matrices written out in a lecture is joined by 'and' ('(2, 1, 1), (0, -8, -2) and (0, 0, 1)')
+    text = _JOIN_AND.sub("), (", text)
+    source_texts = [_JOIN_AND.sub("), (", t) for t in source_texts]
     hs = _Hay(strip_constants(text))
     srcs = [_Hay(t) for t in source_texts]
     anchored = False
+    claims = _family_claims(text)
+    claimed: set[str] = set().union(*claims) if claims else set()
     for pos, seq in hs.seqs:
         if len(seq) < 2 or all(c in own for c in seq):
             continue
+        if claims and set(seq) <= claimed:
+            continue  # 'eigenvalues 5 and 2': judged below as the statement it is
         mname = _NAME_BEFORE.search(hs.low[max(0, pos - 40):pos])
         name = mname.group(1) if mname and mname.group(1) not in _NOT_VAR else ""
         ok = False
@@ -4140,6 +4225,11 @@ def shown_in(text: str, source_texts: list[str], own: "set[str] | frozenset[str]
         if name in _NOT_VAR or val in own:
             continue
         if not any(h.named(name, val) for h in srcs):
+            return False
+        anchored = True
+    if claims:  # 'the eigenvalues are 5 and 2' / 'eigenvalues five and two': the chunk must print that binding, as digits or as words
+        shown = [_family_claims(t) for t in source_texts]
+        if not all(any(c <= sc for sl in shown for sc in sl) for c in claims):
             return False
         anchored = True
     printed = [c for h in srcs for _, c, _ in h.nums]
@@ -4245,7 +4335,7 @@ def _text_key_item(items: list[dict[str, Any]], whole: str, text: str, data: dic
         if free:
             ctx["data"] = sorted(free)
         n = len(_kl(text, it, ctx))
-        if not n and (bare_vec_leak(text, it, sentences=True) or (about and named_value_leak(text, it)) or quantity_list_leak(text, it)):
+        if not n and (bare_vec_leak(text, it, sentences=True) or (about and (named_value_leak(text, it) or table_value_leak(text, it))) or quantity_list_leak(text, it)):
             n = 1  # 'The solution is (1, 1, 2)', 'd = 11 makes the system singular', 'The multipliers are 2, -1, -1'
         if n > top:
             best, top = it, n
