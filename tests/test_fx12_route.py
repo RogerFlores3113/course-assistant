@@ -229,3 +229,75 @@ def test_d9_coaching_reply_for_the_same_item_keeps_the_concepts_banner(tmp_path)
     a = grounding.ask(s, c, SHORT6, FakeProvider(lambda system, messages: COACH6 if "GRADED TASK" in messages[0]["content"] else "ok"))
     assert a.mode == "concepts" and "ask yourself" in a.body_md.lower()
     assert "concepts and an approach" in (a.routing_note or "")
+
+
+# ------------------------------------------------------------------ decision 9: proofs without a set opening
+P4 = ("Problem 4 (10 points). Prove that if a linear system Ax = b has two different solutions, then it has infinitely "
+      "many solutions.")
+PROOFS = [
+    "If Ax = b has two solutions x and y, then A(x - y) = 0, and x + t(x - y) solves Ax = b for every t, so there are infinitely many.",
+    "Two solutions x and y give A(x-y) = 0; adding any multiple of x-y to x keeps Ax = b, so there are infinitely many solutions.",
+    "Take the midpoint of two solutions; it solves the system too, and repeating this with the new pair gives infinitely many solutions.",
+    "Every point on the line through the two solutions x and y is a solution, since A(x + t(y - x)) = b, so the system has infinitely many solutions.",
+    "The difference of two solutions is a nonzero vector sent to zero, and any multiple of it can be added to a solution, which gives infinitely many solutions.",
+]
+HONEST = [
+    "To show infinitely many solutions, a good method is to build new solutions from the ones you are given.",
+    "Try subtracting the two solutions and see what A does to the difference.",
+    "The difference of two solutions of Ax = b is a solution of Ax = 0.",
+    "A system with exactly one solution has a pivot in every column.",
+    "Infinitely many solutions happen when there is a free variable.",
+]
+
+
+@pytest.mark.parametrize("r", PROOFS)
+def test_d9_a_two_solution_proof_is_finished_whatever_its_opening(r):
+    it = {"kind": "proof", "body": P4}
+    assert integrity._leaks_proof(it, r, "")
+
+
+@pytest.mark.parametrize("r", HONEST)
+def test_d9_honest_method_sentences_without_the_items_steps_pass(r):
+    it = {"kind": "proof", "body": P4}
+    assert not integrity._leaks_proof(it, r, "")
+
+
+# ------------------------------------------------------------------ decision 9: equation-line systems read by their rows
+SYS_A = ("Problem 1 (10 points). Solve the system 2x + 5y + z = 0, 4x + 11y + z = 3, -2x - 2y - 5z = 11 by elimination and "
+         "report (x, y, z).")
+SYS_A_KEY = ["x = -3/2", "y = 1", "z = -2", "x = (-3/2, 1, -2)", "U = [[2, 5, 1], [0, 1, -1], [0, 0, -1]]", "c = (0, 3, 2)",
+             "l21 = 2", "l31 = -1", "l32 = 2"]
+SYS_B = "Problem 3 (10 points). Solve the system x + y + z = 4, 2x + 3y + z = 9, x + y + 3z = 8 for (x, y, z)."
+SYS_B_KEY = ["x = (1, 1, 2)", "x1 = 1", "x2 = 1", "x3 = 2", "c = (4, 5, 4)"]
+
+
+def sys_world():
+    s = Store(":memory:")
+    c = s.add_course("LA")
+    ib = s.add_graded_item(c, "Set: Problem 3", SYS_B, None, kind="problem", label="Problem 3", answer_key=json.dumps(SYS_B_KEY))
+    ia = s.add_graded_item(c, "Set: Problem 1", SYS_A, None, kind="problem", label="Problem 1", answer_key=json.dumps(SYS_A_KEY))
+    return s, c, ia, ib
+
+
+SYS_LEAKS = ["The reduced system is 2x + 5y + z = 0 / y - z = 3 / -z = 2 [1]", "2x + 5y + z = 0\ny - z = 3\n-z = 2",
+             "Row 3 reads -z = 2.", "-z = 2", "The last equation becomes -z = 2."]
+SYS_HONEST = ["Elimination ends with an upper triangular system, then you back substitute.",
+              "A system such as x + y = 9 / y = 4 is already triangular, so start from the last equation.",
+              "For example 3x + y = 5 and -z = 7 are equations; the sign of the pivot matters."]
+
+
+@pytest.mark.parametrize("r", SYS_LEAKS)
+def test_d9_equation_lines_are_read_by_their_rows_and_blamed_on_the_matching_item(r):
+    s, c, ia, ib = sys_world()
+    st = dict(s.graded_item(ia), kind="problem", reason="sticky", source="item", score=1.0)
+    assert integrity.check_reply(s, c, "what does the last row say?", r, force_item=st)["id"] == ia
+    g = integrity.check_guide(s, c, "Notes", r)
+    assert g and g["id"] == ia
+
+
+@pytest.mark.parametrize("r", SYS_HONEST)
+def test_d9_triangular_system_look_alikes_pass(r):
+    s, c, ia, ib = sys_world()
+    st = dict(s.graded_item(ia), kind="problem", reason="sticky", source="item", score=1.0)
+    assert integrity.check_reply(s, c, "how does elimination end?", r, force_item=st) is None
+    assert integrity.check_guide(s, c, "Notes", r) is None

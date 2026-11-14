@@ -765,10 +765,25 @@ def mask_structure(text: str) -> str:
 _EQ_CLAUSE_SPLIT = re.compile(r"\n|;|\s/\s|\s\|\s|,\s|\.\s|\b(?:then|gives|so|and|with|becomes)\b|\\\\|&&")
 
 
-def equation_system(text: str) -> list[list[str]]:
-    """A triangular system written as equation lines ('2x + 5y + z = 0 / y - z = 3 / -z = 2', as separate lines or in one
-    sentence) as augmented rows [A | b] over the unknowns x, y, z, ... in order. [] when the lines are not a square
-    triangular system with a nonzero diagonal, or when none of them carries two unknowns (a list 'x = 1, y = 1')."""
+def _lhs_terms(lhs: str) -> dict[str, str] | None:
+    pos, terms = 0, {}
+    while pos < len(lhs):
+        m = _TERM.match(lhs, pos)
+        if not m or m.end() == pos:
+            return None
+        sign, coef, param, var = m.groups()
+        if param:
+            return None  # a symbol coefficient: not a numeric system
+        val = _canon(coef) if coef not in ("", ".") else "1"
+        terms[var] = _canon("-" + val) if sign == "-" and val != "0" else val
+        pos = m.end()
+    return terms or None
+
+
+def _equation_lines(text: str) -> list[tuple[dict[str, str], str]]:
+    """Every equation of the text with numeric coefficients on the unknowns x, y, z, ... and a number on the right, as
+    ({unknown: coefficient}, rhs). A lead-in before the equation ('The reduced system is 2x + y = 3', 'Row 3 reads -z = 2')
+    is skipped."""
     eqs: list[tuple[dict[str, str], str]] = []
     for clause in _EQ_CLAUSE_SPLIT.split(text or ""):
         line = clause.strip().strip("`$*").strip()
@@ -778,26 +793,57 @@ def equation_system(text: str) -> list[list[str]]:
         rhs = rhs.rstrip(",.;")
         if not lhs or not _NUM_FULL.match(rhs.replace(" ", "")):
             continue
-        pos, terms, ok = 0, {}, True
-        while pos < len(lhs):
-            m = _TERM.match(lhs, pos)
-            if not m or m.end() == pos:
-                ok = False
-                break
-            sign, coef, param, var = m.groups()
-            if param:
-                ok = False  # a symbol coefficient: not a numeric system
-                break
-            val = _canon(coef) if coef not in ("", ".") else "1"
-            terms[var] = _canon("-" + val) if sign == "-" and val != "0" else val
-            pos = m.end()
-        if ok and terms:
+        terms = _lhs_terms(lhs)
+        if terms is None:
+            for m in re.finditer(r"(?<=[\s(])(?=[+\-\u2212\d.xyzwtuv])", lhs):
+                terms = _lhs_terms(lhs[m.start():].replace("\u2212", "-"))
+                if terms is not None:
+                    break
+        if terms:
             eqs.append((terms, _canon(rhs.replace(" ", ""))))
+    return eqs
+
+
+def equation_system(text: str) -> list[list[str]]:
+    """A triangular system written as equation lines ('2x + 5y + z = 0 / y - z = 3 / -z = 2', as separate lines or in one
+    sentence) as augmented rows [A | b] over the unknowns x, y, z, ... in order. [] when the lines are not a square
+    triangular system with a nonzero diagonal, or when none of them carries two unknowns (a list 'x = 1, y = 1')."""
+    eqs = _equation_lines(text)
     cols = [v for v in _VARS if any(v in t for t, _ in eqs)]
     if len(eqs) < 2 or len(cols) != len(eqs) or not any(len(t) >= 2 for t, _ in eqs):
         return []
     rows = [[t.get(v, "0") for v in cols] + [r] for t, r in eqs]
     return rows if _solve_triangular(rows) else []
+
+
+def _system_rows_hit(text: str, item: dict[str, Any] | None, ctx: dict[str, Any] | None) -> list[str]:
+    """Equation lines that are rows of the item's triangular system [U | c] (its own given rows excluded): two rows are
+    always a leak, one when the chat touched the item or the text is a saved guide or card. Reads each line by its own
+    coefficients, so '-z = 2' is row 3 of the system even without the other rows."""
+    if not item:
+        return []
+    ix = _index(item)
+    sysrows = next((c.rows for c in ix.comps if c.kind == "sys"), None)
+    if not sysrows:
+        return []
+    n = len(sysrows[0]) - 1
+    given = {tuple(_val(x) for x in [t.get(v, "0") for v in _VARS[:n]] + [r]) for t, r in _equation_lines(item.get("body") or "")}
+    hits: list[int] = []
+    for terms, rhs in _equation_lines(text):
+        if any(v not in _VARS[:n] for v in terms):
+            continue
+        row = [terms.get(v, "0") for v in _VARS[:n]] + [rhs]
+        vals = tuple(_val(x) for x in row)
+        if vals in given:
+            continue
+        for i, sr in enumerate(sysrows):
+            if i not in hits and all(num_eq(a, b) for a, b in zip(row, sr)):
+                hits.append(i)
+                break
+    c = ctx or {}
+    if len(hits) >= 2 or (hits and (c.get("named") or c.get("sticky") or c.get("lone"))):
+        return [f"row {i + 1}" for i in hits] + ["system"]
+    return []
 
 
 def with_equation_system(text: str) -> str:
@@ -809,7 +855,8 @@ def with_equation_system(text: str) -> str:
 
 def _kl(text: str, item: dict[str, Any] | None, ctx: dict[str, Any] | None = None) -> list[str]:
     """key_leak on the text with the item's own givens and the method's step counts masked."""
-    return key_leak(with_equation_system(mask_structure(mask_givens(text, item))), item, ctx)
+    masked = mask_structure(mask_givens(text, item))
+    return key_leak(with_equation_system(masked), item, ctx) or _system_rows_hit(masked, item, ctx)
 
 
 def _overlap_score(q: str, b: str, paste_only: bool = False) -> float:
@@ -1472,6 +1519,24 @@ def _proof_sentences(reply: str) -> list[str]:
     return [x for x in re.split(r"(?<=[.!?])\s+|\n+", _CITE_STRIP.sub("", reply or "")) if x.strip() and "?" not in x]
 
 
+_TWO_SOLN = re.compile(r"\btwo\s+(?:different\s+|distinct\s+|given\s+)?(?:solutions?|vectors?|points?)\b|\b([a-z])\s+and\s+([a-z])\b[^.;!?]{0,50}"
+                       r"\b(?:solutions?|solve|solves|satisf(?:y|ies)|both)\b|\bsolutions?\s+([a-z])\s+and\s+([a-z])\b", re.I)
+_DIFF_CONSTRUCT = re.compile(r"\bdifference\b|\b[a-z]\s*[-\u2212]\s*[a-z]\b|\bmultiples?\b|\bmidpoint\b|\bthe\s+line\b|\ba\s+line\b|"
+                             r"\b(?:linear|convex|affine)\s+combinations?\b|\baverage\b|\bscal(?:ar|ing|e)\b|\b[a-z]\s*\+\s*t\b|\bt\s*\(|\bevery\s+point\s+on\b", re.I)
+_MANY = re.compile(r"\binfinitely\s+many\b|\binfinite(?:ly)?\b|\bmore\s+than\s+two\b|\bendless", re.I)
+
+
+def two_solution_proof(it: dict[str, Any], reply: str) -> bool:
+    """A finished argument for 'two different solutions mean infinitely many' whatever its opening: two solutions, their
+    difference, a multiple, midpoint or line, and the conclusion of infinitely many, together in the advice-free
+    sentences of the reply. Method advice ('try subtracting the two solutions') carries no step."""
+    body = (it.get("body") or "").lower()
+    if not (re.search(r"\btwo\b[^.]{0,30}\bsolutions?\b", body) and re.search(r"infinitely|more than one", body)):
+        return False
+    text = " ".join(x for x in _proof_sentences(reply) if not _P_ADVICE.search(x))
+    return bool(_TWO_SOLN.search(text) and _DIFF_CONSTRUCT.search(text) and _MANY.search(text))
+
+
 def proof_steps(it: dict[str, Any], reply: str) -> bool:
     """Two or three sentences that CARRY the argument of a graded proof item, whatever their connectives: one opens it
     (Suppose / Let / If ...), one holds a step of the construction or an equation about the item's objects, one states
@@ -1479,6 +1544,8 @@ def proof_steps(it: dict[str, Any], reply: str) -> bool:
     b = _Text(it.get("body") or "")
     if not b.tok:
         return False
+    if two_solution_proof(it, reply):
+        return True
     sents = [x for x in _proof_sentences(reply) if not _P_ADVICE.search(x)]
     shared = [len(content_tokens(x) & b.tok) for x in sents]
     opens = [i for i, x in enumerate(sents) if _P_OPEN_LEAD.search(x) or _P_OPEN.search(x)]
