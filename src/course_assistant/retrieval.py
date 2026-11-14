@@ -515,6 +515,18 @@ def is_scaffold_chunk(text: str, heading: str = "") -> bool:
     return is_filler_chunk(text, heading) or bool(_SCAFFOLD_HEAD.match(heading or ""))
 
 
+_DEFINING_VERB = re.compile(r"\b(?:is|are|means|denotes|satisfies|satisfy|if|when|such that|exists?|consists? of)\b", re.I)
+
+
+def _heading_defines(stem: str, heading: str, text: str) -> bool:
+    """A short heading that names the term, over a first sentence that says what it is or when it holds, defines the
+    term; a long heading or a passage that only uses the word does not."""
+    if not heading or len(heading.split()) > 6 or not re.search(rf"\b{stem}", heading, re.I):
+        return False
+    first = re.split(r"(?<=[.!?])\s", text.strip(), maxsplit=1)[0][:300]
+    return bool(re.search(rf"\b{stem}", first, re.I) and _DEFINING_VERB.search(first))
+
+
 def _definition_score(terms: list[str], r: dict[str, Any]) -> float:
     """How much a chunk reads as the definition of one of the terms (0 to 2). The chunk must also hold at least
     half of the question's terms, so 'a defective matrix is...' does not define 'projection matrix'."""
@@ -539,6 +551,10 @@ def _definition_score(terms: list[str], r: dict[str, Any]) -> float:
         elif re.search(rf"\*\*[^*]*{stem}[^*]*\*\*", text, re.I):
             sc = 1.5
         elif re.search(r"\bdefinition\b", text + " " + (r["heading"] or ""), re.I) and re.search(w, text, re.I):
+            sc = 1.5
+        elif re.search(rf"\b(?:is|are|be)\s+(?:an?|the|called|said to be)\s+(?:\w+\s+){{0,2}}{w}", text[:400], re.I):
+            sc = 1.5  # "a number x is an eigenvalue of A when ...": the first lines say what the term is
+        elif _heading_defines(stem, r["heading"] or "", text):
             sc = 1.5
         elif re.search(rf"\b{stem}\w*\s+(?:is|are)\b", text, re.I):
             sc = 0.5

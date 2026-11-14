@@ -311,6 +311,34 @@ def _renumber_unused(rows: list[dict[str, Any]], cited: set[int]) -> list[dict[s
     return rows
 
 
+def _renumber_cited(raw: list[dict[str, str]], smap: dict[int, dict[str, Any]]) -> tuple[list[dict[str, str]], dict[int, dict[str, Any]]]:
+    """Cited sources numbered 1, 2, 3 in their saved order, with every citation in the text renumbered to match. Passages
+    that were hidden or never cited leave holes in the saved numbers; a page never shows them. A citation to a number
+    with no source is left alone (and no renumbering happens then), so nothing is silently moved."""
+    from . import grounding
+
+    spans = [(i, grounding._find_cites(b["md"])) for i, b in enumerate(raw) if b["kind"] == "text"]
+    cited = sorted({k for _, found in spans for _, _, nums in found for k in nums})
+    if not cited or any(k not in smap for k in cited):
+        return raw, smap
+    new = {old: i for i, old in enumerate(cited, start=1)}
+    if all(k == v for k, v in new.items()):
+        return raw, smap
+    out = [dict(b) for b in raw]
+    for i, found in spans:
+        md = out[i]["md"]
+        for s, e, nums in reversed(found):
+            md = md[:s] + "[" + ", ".join(str(new[k]) for k in nums) + "]" + md[e:]
+        out[i]["md"] = md
+    renum = {new[k]: {**smap[k], "n": new[k]} for k in cited}
+    first_free = len(cited)
+    for k in sorted(smap):  # uncited rows keep a place after the cited ones, so the "also searched" list still numbers
+        if k not in new:
+            first_free += 1
+            renum[first_free] = {**smap[k], "n": first_free}
+    return out, renum
+
+
 ROUTING_FALLBACK = {"twin": "This looks like your graded work, so here is a similar problem with different numbers.",
                     "concepts": "This looks like your graded work, so this covers the ideas behind it."}
 
@@ -569,6 +597,8 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
     raw = _join_headings(raw)
     while raw and raw[-1]["kind"] == "text" and re.fullmatch(r"\s*#{1,6}\s+[^\n\[]*", raw[-1]["md"]):
         raw = raw[:-1]  # a heading with nothing under it (a "## Practice" whose questions were all removed) does not render
+    if not tree_shown and not (data.get("nodes") or data.get("edges")):
+        raw, smap = _renumber_cited(raw, smap)  # the cited list runs 1, 2, 3 like "Also searched"
     top = shallowest_heading(*[b["md"] for b in raw])
     uid = next(_UID)
     out_blocks: list[dict[str, Any]] = []

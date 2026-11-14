@@ -40,8 +40,9 @@ def test_sources_show_only_cited_with_also_searched_p4(ready):
     r = page(ready, [{"kind": "text", "md": "Claim [2].", "cites": [2]}])
     sec = r.text.split('<div class="sources">')[1]
     main, also = sec.split("Also searched (not cited)")
-    assert '[2]</span>' in main and '[1]</span>' not in main and '[3]</span>' not in main
-    assert '[1]</span>' in also and '[3]</span>' in also and "<details" in r.text
+    # fx13: the cited list runs 1, 2, 3 (the text's [2] is renumbered to [1]) and "Also searched" carries on after it
+    assert '[1]</span>' in main and '[2]</span>' not in main and '[3]</span>' not in main
+    assert '[2]</span>' in also and '[3]</span>' in also and "<details" in r.text
 
 
 def test_no_also_searched_when_all_cited(ready):
@@ -94,7 +95,7 @@ def test_matrix_in_guide_not_chips_p3(ready):
 
 def test_answer_view_derives_cites_without_saved_cites():
     v = web_helpers.answer_view("Claim [2].\n\nMatrix [[1],[2]].", sources(3))
-    assert [s["n"] for s in v["sources"]] == [2] and [s["n"] for s in v["unused_sources"]] == [1, 3]
+    assert [s["n"] for s in v["sources"]] == [1] and [s["n"] for s in v["unused_sources"]] == [2, 3]
 
 
 # ---- concept map
