@@ -6,7 +6,7 @@ import pytest
 from course_assistant import grounding, importers, integrity, study
 from course_assistant.providers import FakeProvider
 from course_assistant.store import Store
-from fx13_world import world as w13
+from fx13r_world import world as w13
 
 
 @pytest.fixture
