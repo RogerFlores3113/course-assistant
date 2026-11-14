@@ -398,8 +398,19 @@ def _clean_body(body: str) -> str:
 
 
 _SPLIT_QS = re.compile(r"(<details>.*?</details>|\n\s*\n)", re.S | re.I)
-_NUM_Q = re.compile(r"^\s*(\d+)([.)])\s")
+# a numbered question: "1.", "2)", "**3.**", "**4**.", "Question 5:" (the model often bolds its numbers)
+_NUM_Q = re.compile(r"^\s*\*{0,2}(?:(?:Question|Q)\s*)?(\d+)(?:[.):]\*{0,2}|\*{1,2}[.):]?)\s")
 _SCRUB_HEAD = re.compile(r"^(?:A part|\d+ parts) of this guide (?:was|were) left out because", re.I)
+
+
+def _count_note(note: str, n: int) -> str:
+    """The drop note counts questions and its grammar follows the count: 'A question was left out because it matched',
+    '3 questions were left out because they matched'."""
+    if not note or not _SCRUB_HEAD.match(note):
+        return note
+    one = n == 1
+    note = _SCRUB_HEAD.sub(f"{n} practice question{'' if one else 's'} {'was' if one else 'were'} left out because", note)
+    return re.sub(r"(left out because )(?:it|they)\b", r"\1" + ("it" if one else "they"), note, count=1)
 
 
 def tidy_practice(before: str, after: str, scrubbed: int, note: str) -> tuple[str, int, str]:
@@ -437,18 +448,16 @@ def tidy_practice(before: str, after: str, scrubbed: int, note: str) -> tuple[st
                                              for seg, _ in b_segs) else 0)
         if not loose or not note or not _SCRUB_HEAD.match(note):
             return after, scrubbed, note
-        word = f"{loose} practice question{'s were' if loose != 1 else ' was'} left out because"
-        return after, loose, _SCRUB_HEAD.sub(word, note)
+        return after, loose, _count_note(note, loose)
     n = 0
     renum = []
     for seg in kept:
         m = _NUM_Q.match(seg)
         if m and not seg.lower().startswith("<details>"):
             n += 1
-            seg = f"{n}{m.group(2)} " + seg[m.end():]
+            seg = seg[:m.start(1)] + str(n) + seg[m.end(1):]  # the model's own bold or "Question" wording stays
         renum.append(seg)
-    new_note = _SCRUB_HEAD.sub(f"{gone} practice question{'s were' if gone != 1 else ' was'} left out because", note) if note else note
-    return "\n\n".join(renum), gone, new_note
+    return "\n\n".join(renum), gone, _count_note(note, gone)
 
 
 def _compose(store: Store, course_id: int, provider, task: str, sources: list[dict[str, Any]], *, question: str = "",
@@ -898,6 +907,41 @@ def _stem_set(text: str) -> set[str]:
     return {w[:6] for w in re.findall(r"[a-z]{4,}", (text or "").lower()) if w not in _GENERIC and w not in _FILLER_WORDS}
 
 
+_STEM_ENDS = ("ies", "ing", "ed", "es", "s")
+
+
+def _whole_stem(word: str) -> str:
+    """A word cut to its stem by plain suffixes only ('quantum' and 'quantity' stay different words; 'eigenvalues' and
+    'eigenvalue' meet)."""
+    w = word.lower()
+    for end in _STEM_ENDS:
+        if w.endswith(end) and len(w) - len(end) >= 4:
+            w = w[: -len(end)] + ("y" if end == "ies" else "")
+            break
+    return w[:-1] if w.endswith("e") and len(w) > 4 else w  # 'space' and 'spaces' meet
+
+
+def _same_word(a: str, b: str) -> bool:
+    """The same word or a plain inflection of it: equal stems, or one stem is the other with up to three more letters
+    ('empirical' and 'empirically'). Never a shared five-letter start ('quantum' and 'quantity')."""
+    a, b = _whole_stem(a), _whole_stem(b)
+    if a == b:
+        return True
+    lo, hi = sorted((a, b), key=len)
+    return len(lo) >= 5 and hi.startswith(lo) and len(hi) - len(lo) <= 3
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z]{4,}", (text or "").lower()) if w not in _GENERIC and w not in _FILLER_WORDS]
+
+
+def _topic_in_text(topic: str, text: str) -> bool:
+    """Every content word of the typed topic appears in the text as a whole word (or a plain inflection of it)."""
+    want = _content_words(topic)
+    have = set(_content_words(text))
+    return bool(want) and all(any(_same_word(w, h) for h in have) for w in want)
+
+
 def _best_in_section(group: list[dict[str, Any]], heading: str) -> dict[str, Any]:
     """The passage that opens a topic: prefers one that defines (bold term, 'is', 'defined') over a figure, a table
     or a worked solution."""
@@ -981,6 +1025,22 @@ def _relevant_materials(store: Store, mats: list[dict[str, Any]], topic_text: st
     return hit or rest or mats
 
 
+def _material_text(store: Store, m: dict[str, Any]) -> str:
+    return " ".join([m.get("title") or "", *(f"{c.get('heading', '')} {c['text']}" for c in store.chunks_of(m["id"]))])
+
+
+def _unmatched_topics(store: Store, mats: list[dict[str, Any]], topics: list[str], skip_text: str = "") -> list[str]:
+    """The typed topics that none of these materials (title, headings and passages) covers by whole words. A topic a
+    lecture without materials already names is said by that note, so it is skipped here."""
+    texts = [_material_text(store, m) for m in mats]
+    out = []
+    for t in topics:
+        if any(_topic_in_text(t, x) for x in texts) or (skip_text and _topic_in_text(t, skip_text)):
+            continue
+        out.append(t)
+    return out
+
+
 def _materials_per_topic(store: Store, mats: list[dict[str, Any]], topics: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
     """Each typed topic keeps its own best-matching materials, scored against that topic alone, so a chapter that
     matches another topic more strongly never pushes it out. Returns the materials in course order and the topics
@@ -997,10 +1057,7 @@ def _materials_per_topic(store: Store, mats: list[dict[str, Any]], topics: list[
         best = max((n for n, _ in scored), default=0)
         got = [m for n, m in scored if n >= max(need, 1) and n >= 0.5 * best] if want else []
         if want and not got:  # no title or heading names it: a material whose passages cover all its words does
-            def covers(m: dict[str, Any]) -> bool:  # plural and singular share their first five letters
-                have = {w[:5] for w in _stem_set(" ".join(c["text"] for c in store.chunks_of(m["id"])))}
-                return all(w[:5] in have for w in want)
-            got = [m for m in rest if covers(m)]
+            got = [m for m in rest if _topic_in_text(t, _material_text(store, m))]  # whole words, never a five-letter start
         if not got:
             unmatched.append(t)
         for m in got:
@@ -1077,6 +1134,7 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         topics_text = typed_parts + [t for t in topics_text if not (_stem_set(t) <= typed_stems)]
     topics_text = topics_text or [" ".join(x for x in (ev["title"], ev.get("topics", "")) if x)]
     scope_note = ""
+    no_match: list[str] = []
     graded_ids = {i.get("material_id") for i in store.graded_items(course_id) if i.get("material_id")}
     graded_chosen = [m for m in chosen if m.get("graded") or m["id"] in graded_ids]
     if chosen:
@@ -1096,6 +1154,7 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         if typed_parts:
             mats, unmatched = _materials_per_topic(store, usable, typed_parts)
             mats = mats or _relevant_materials(store, usable, " ".join(topics_text))
+            no_match = unmatched
             found = [t for t in typed_parts if t not in unmatched]
             scope_note = (("Built from the saved materials that match the topics you typed for this exam: " +
                            ", ".join(found) + ". ") if found else "") + \
@@ -1104,6 +1163,13 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
             mats = _relevant_materials(store, usable, " ".join(topics_text))
         scope_note = (scope_note if typed_parts else
                       "No material is linked to the lectures before this exam, so this covers all your saved materials.")
+    if typed_parts and (chosen or in_window):  # every branch names a typed topic that nothing it uses covers
+        gone = _unmatched_topics(store, mats, typed_parts, " ".join(f"{clean_title(l)} {l.get('topics', '')}" for l in lectures
+                                                                     if f"{event_label(l)} ({l['date']})" in missing))
+        no_match = gone
+        if gone:
+            scope_note = (scope_note + " " if scope_note else "") + \
+                f"Nothing in the materials used for this guide matched: {', '.join(gone)}."
     syllabus_rows = [f"{e['date']}: {event_label(e)}" for e in lectures if e.get("topics")]
     course_topics = " ".join(f"{clean_title(e)} {e.get('topics', '')}" for e in store.events(course_id, kinds=["lecture"]))
     mids = [m["id"] for m in mats]
@@ -1153,6 +1219,8 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
             ("Topics this exam covers (the student's own list):\n- " if typed_parts else "Lecture topics in the window:\n- ") +
             "\n- ".join(topics_text) +
             ("\nSyllabus rows:\n- " + "\n- ".join(syllabus_rows) if syllabus_rows else "") +
+            (("\nThese typed topics matched NOTHING in the saved materials, so say plainly that the guide cannot cover "
+              "them and do not invent their content:\n- " + "\n- ".join(no_match)) if no_match else "") +
             (("\nThese lectures have NO saved materials, so say plainly that the guide cannot cover them and do not "
               "invent their content:\n- " + "\n- ".join(missing)) if missing else "") +
             "\n\n" + _exam_sections(math, plan))
@@ -1398,7 +1466,7 @@ def explain(store: Store, course_id: int, provider, topic: str, *, depth: str = 
         hit = _named_essay(store, course_id, topic)
     if hit:  # a graded problem pasted into Explain: a twin (or coaching), decided before the model sees it
         return _route_graded(store, course_id, provider, topic, hit)
-    sources = _defining_first(_search(store, course_id, topic, 10, exclude_graded=True), topic)
+    sources = _defining_first(_search(store, course_id, topic, 24, exclude_graded=True), topic)[:10]
     task = f"Explain \"{topic}\" for a student in {_course_name(store, course_id)}. Depth: {depth}. {guide}"
     return _generate(store, course_id, provider, "explain", f"Explain ({depth}): {topic}", task, sources,
                      question=topic, data={"depth": depth}, max_tokens=3500)
@@ -1558,7 +1626,7 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
     n_normal = count  # twins and coaching notes are extras: they never count toward the requested number
     normal = None
     if n_normal > 0:
-        sources = _defining_first(_search(store, course_id, topic, 10, exclude_graded=True), topic)
+        sources = _defining_first(_search(store, course_id, topic, 24, exclude_graded=True), topic)[:10]
         if has_math(store, course_id):
             task = (f"Write {n_normal} practice questions on \"{topic}\" for {_course_name(store, course_id)}, easiest to "
                     "hardest, in the style of the materials. For each, number it and state the question, then give the "

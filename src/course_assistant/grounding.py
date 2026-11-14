@@ -1393,6 +1393,17 @@ def _names_essay(store, course_id: int, question: str) -> bool:
 
 
 
+def _handout_row_shown(store, course_id: int, sources) -> bool:
+    """Some source row of the page comes from a material that holds graded items (a graded handout)."""
+    mids = {x.get("material_id") if isinstance(x, dict) else getattr(x, "material_id", None) for x in sources}
+    mids.discard(None)
+    if not mids:
+        return False
+    graded = {i.get("material_id") for i in store.graded_items(course_id) if i.get("material_id")}
+    graded |= {m["id"] for m in store.materials(course_id) if m.get("graded")}
+    return bool(mids & graded)
+
+
 def ask(store, course_id: int, question: str, provider, *, depth: str = "standard",
         history: list[dict] | None = None, limit: int = 8, record_chat: bool = True, route: bool = True) -> Answer:
     """Search the course, route graded work to a twin, otherwise answer from the sources. Saves a guide.
@@ -1426,6 +1437,8 @@ def ask(store, course_id: int, question: str, provider, *, depth: str = "standar
         sources = sorted(sources + [x for x in extra if x.get("chunk_id") not in have],
                          key=lambda x: -float((x.get("score") if isinstance(x, dict) else getattr(x, "score", 0)) or 0))
         handout_note = integrity.HANDOUT_NOTE if left_out and (not have or extra) else ""
+        if handout_note and _handout_row_shown(store, course_id, sources):
+            handout_note = ""  # never beside a source row from a graded handout, whichever path found it
         if integrity.is_logistics(question):
             sources = integrity.logistics_sources(store, course_id, question) + sources
         system, messages = build_messages(question, sources, depth=depth, history=history,
