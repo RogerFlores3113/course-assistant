@@ -1,0 +1,32 @@
+{% extends "base.html" %}{% from "_answer.html" import answer %}{% block title %}{{ g.title }} - Course Assistant{% endblock %}
+{% macro removed(flag) %}{% if flag %} <span class="cite-removed">(citation removed)</span>{% endif %}{% endmacro %}
+{% macro chips(cites) %}{% for c in cites %}{% if smap.get(c) %} <a class="cite" href="{{ smap[c].href }}" aria-label="Source {{ c }}: {{ smap[c].title }}{% if smap[c].label %}, {{ smap[c].label }}{% endif %}{% if smap[c].past %}, {{ smap[c].past }}{% endif %}">[{{ c }}]</a>{% endif %}{% endfor %}{% endmacro %}
+{% macro rel(via, parent) %}{% if parent %}<strong data-math>{{ parent }}</strong> {% endif %}<span class="muted" data-math>{{ via or 'links to' }}</span>{% endmacro %}
+{# a link's own cite is shown only when it adds a source the concept's own cite does not already show: one link per source #}
+{% macro relsrc(via, cites, gone, own) %}{% set extra = cites | reject('in', own) | list %}{% if extra %} <span class="muted">(link source:</span>{{ chips(extra) }}<span class="muted">)</span>{% elif not cites and not gone %} <span class="edge-note">Not from your materials</span>{% endif %}{{ removed(gone) }}{% endmacro %}
+{% macro step(c) %}<li>{{ rel(c.via, c.parent) }}: <strong data-math>{{ c.label }}</strong>{{ chips(c.cites) }}{{ removed(c.removed) }}{{ relsrc(c.via, c.via_cites, c.via_removed, c.cites) }}</li>{% endmacro %}
+{% macro node(n, via=none) %}<li>{% if via is not none %}{{ rel(via.via, via.parent) }}: {% endif %}<strong data-math>{{ n.label }}</strong>{{ chips(n.cites) }}{{ removed(n.removed) }}{% if via is not none %}{{ relsrc(via.via, via.via_cites, via.via_removed, n.cites) }}{% endif %}
+{% if n.chain %}<ol class="chain">{% for c in n.chain %}{{ step(c) }}{% endfor %}</ol>{% endif %}
+{% if n.branches %}<ul>{% for ch in n.branches %}{{ node(ch, ch) }}{% endfor %}</ul>{% endif %}
+{% if n.more %}<p class="muted small">Then, further down this branch:</p><ol class="chain more">{% for c in n.more %}{{ step(c) }}{% endfor %}</ol>{% endif %}</li>{% endmacro %}
+{% block body %}
+<div class="course-head" style="--accent-c: {{ accent }}"><p class="crumbs"><a href="/courses/{{ course.id }}/guides">{{ course.name }}</a> &rsaquo; {{ kind_label }}</p>
+<h1>{{ g.title }}</h1><p class="muted small">{{ g.created_at[:10] }}{% if g.model %} &middot; {{ g.model }}{% endif %}</p></div>
+{% if g.question and g.kind in ('answer', 'twin') %}<p><strong>Question:</strong> {{ g.question }}</p>
+{% elif g.question and g.kind in ('missed', 'primer') %}<p><strong>Lecture:</strong> {{ g.question }}</p>{% endif %}
+{% if g.kind == 'primer' and g.data is mapping and g.data.used_materials is defined %}<p class="muted small"><strong>Used materials:</strong> {% if g.data.used_materials %}{% for u in g.data.used_materials %}{{ u.title }}{% if u.why %} ({{ u.why }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}{% else %}none linked to this lecture, so this primer comes from the syllabus reading and related notes{% endif %}.</p>{% endif %}
+{% if graph %}
+<section aria-labelledby="map-h"><h2 id="map-h">Concept map</h2>
+{% if graph.empty %}<p class="muted">This map has no concepts.</p>{% else %}
+<ul class="tree">{% for n in graph.forest %}{{ node(n) }}{% endfor %}</ul>
+{% if graph.cross %}<h3>Other links between concepts</h3><ul class="cross">{% for x in graph.cross %}<li><strong data-math>{{ x.a }}</strong> links to <strong data-math>{{ x.b }}</strong>{% if x.label %}: <span class="muted" data-math>{{ x.label }}</span>{% endif %}{% if x.cites %}{{ chips(x.cites) }}{% elif not x.removed %} <span class="edge-note">Not from your materials</span>{% endif %}{{ removed(x.removed) }}</li>{% endfor %}</ul>{% endif %}
+<div class="mapwrap" tabindex="0" role="region" aria-label="Concept map. Scrolls sideways when wider than the page."><svg viewBox="0 0 {{ graph.width }} {{ graph.height }}" width="{{ graph.width }}" height="{{ graph.height }}" role="img" aria-label="{{ graph.aria }}" focusable="false" class="map">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+{% for l in graph.edges %}<path class="edge" d="M{{ l.x1 }},{{ l.y1 }} L{{ l.x2 }},{{ l.y2 }}" marker-end="url(#arrow)"/>
+{% if l.lines %}<text class="edge-label" text-anchor="middle" aria-hidden="true">{% for ln in l.lines %}<tspan x="{{ l.lx }}" y="{{ l.ly + loop.index0 * 12 }}">{{ ln }}</tspan>{% endfor %}</text>{% endif %}{% endfor %}
+{% for b in graph.boxes %}<g><rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}" rx="8"/><text text-anchor="middle" aria-hidden="true">{% for ln in b.lines %}<tspan x="{{ b.x + b.w // 2 }}" y="{{ b.ty + loop.index0 * 15 }}">{{ ln }}</tspan>{% endfor %}</text></g>{% endfor %}
+</svg></div>{% endif %}</section>{% endif %}
+{% if view.feedback_note %}<p class="muted small" data-feedback-note>{{ view.feedback_note }}</p>{% endif %}
+{% if g.body_md.strip() %}{{ answer(view) }}{% elif view.sources or view.unused_sources %}{{ answer(view) }}{% endif %}
+<p class="actions"><a class="btn ghost" href="/guides/{{ g.id }}/delete">Delete this guide</a></p>
+{% endblock %}

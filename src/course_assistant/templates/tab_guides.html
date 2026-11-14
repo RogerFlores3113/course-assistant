@@ -1,0 +1,10 @@
+<h2>Guides</h2>
+{% if not guide_groups.total %}<div class="card empty"><p><strong>No guides yet.</strong> Make a primer or exam guide on the Study tab, or ask a question on the Ask tab. Everything is saved here.</p></div>
+{% else %}
+{% macro guide_item(g) %}<li class="row-item"><div class="grow"><a href="/guides/{{ g.id }}"><strong>{{ g.display_title }}</strong></a>{% if g.created_by == 'ai_app' %} <span class="badge">By your AI app</span>{% endif %}<br><span class="muted small">{{ g.created_at[:10] }}</span></div></li>{% endmacro %}
+{% for grp in guide_groups.groups %}<section aria-labelledby="gk-{{ grp.kind }}"><h3 id="gk-{{ grp.kind }}">{{ guide_kinds.get(grp.kind, grp.kind) }} ({{ grp['items'] | length }})</h3>
+<ul class="plain list">{% for g in grp['items'] %}{{ guide_item(g) }}{% endfor %}</ul></section>{% endfor %}
+{% if guide_groups.ask_history %}<details class="ask-history"><summary>Ask history ({{ guide_groups.ask_history | length }})</summary>
+<p class="muted small">Answers to questions you asked on the Ask tab.</p>
+<ul class="plain list">{% for g in guide_groups.ask_history %}{{ guide_item(g) }}{% endfor %}</ul></details>{% endif %}
+{% endif %}

@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}Edit flashcard - {{ course.name }} - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>Edit flashcard</h1><p class="muted"><a href="/flashcards/{{ course.id }}">{{ course.name }}</a></p>
+<form method="post" class="form card">
+  <label>Front <textarea name="front" rows="3" required {{ fa('card', 'front') }}>{{ card.front }}</textarea></label>{{ fe('card', 'front') }}
+  <label>Back <textarea name="back" rows="4" required {{ fa('card', 'back') }}>{{ card.back }}</textarea></label>{{ fe('card', 'back') }}
+  <div class="row"><button class="btn" type="submit">Save card</button> <a class="btn ghost" href="/flashcards/{{ course.id }}">Cancel</a></div>
+</form>
+<p><a class="danger-link" href="/flashcards/card/{{ card.id }}/delete">Delete this card</a></p></section>{% endblock %}

@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}Edit {{ m.title }} - {{ course.name }} - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>Edit material</h1><p class="muted">{{ course.name }}</p>
+{% if copy_of %}<p class="flash warn">This looks like a copy of <a href="/read/{{ copy_of.id }}">{{ copy_of.title }}</a>. Answers use that one only, so this copy is not searched. You can <a href="/materials/{{ m.id }}/delete">delete this one</a>, or go back to the Materials tab to keep this copy instead or mark it as not a copy.</p>{% endif %}
+<form method="post" class="form card">
+  <label>Title <input name="title" required value="{{ m.title }}" {{ fa('material', 'title') }}></label>{{ fe('material', 'title') }}
+  <label>What is it? <select name="kind" {{ fa('material', 'kind') }}>{% for k, l in material_kinds.items() %}<option value="{{ k }}" {% if m.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>{{ fe('material', 'kind') }}
+  <label>Which lecture is it for? <select name="event_id" {{ fa('material', 'event_id', 'lec-help') }}><option value="">No particular lecture</option>
+    {% for e in lectures %}<option value="{{ e.id }}" {% if m.event_id == e.id %}selected{% endif %}>{{ e.date }}: {{ e.title }}</option>{% endfor %}</select></label>{{ fe('material', 'event_id') }}
+  <p id="lec-help" class="muted small">Linking a material to its lecture is what lets "What did I miss" and the primers find it. Picking a lecture also fills in the date below if it is empty.</p>
+  <label>Lecture date (optional) <input type="date" name="lecture_date" value="{{ m.lecture_date }}" {{ fa('material', 'lecture_date') }}></label>{{ fe('material', 'lecture_date') }}
+  <div class="row"><button class="btn" type="submit">Save changes</button> <a class="btn ghost" href="/courses/{{ course.id }}">Cancel</a></div>
+</form>
+<p><a class="danger-link" href="/materials/{{ m.id }}/delete">Delete this material</a></p></section>{% endblock %}

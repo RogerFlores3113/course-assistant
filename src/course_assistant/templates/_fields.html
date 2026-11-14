@@ -1,0 +1,9 @@
+{#- Tie a server-side error to its input. Use: {% from "_fields.html" import fa, fe with context %}
+    <input name="title" {{ fa('event', 'title') }}> {{ fe('event', 'title') }}
+    `extra` is another element id the input is already described by. -#}
+{% macro fa(form, field, extra='') -%}
+{%- if field_error and field_error.form == form and field_error.field == field %} aria-invalid="true" aria-describedby="err-{{ form }}-{{ field }}{{ ' ' ~ extra if extra }}"{% elif extra %} aria-describedby="{{ extra }}"{% endif -%}
+{%- endmacro %}
+{% macro fe(form, field) -%}
+{%- if field_error and field_error.form == form and field_error.field == field %}<p class="field-error" id="err-{{ form }}-{{ field }}"><span class="visually-hidden">Error: </span>{{ field_error.message }}</p>{% endif -%}
+{%- endmacro %}

@@ -1,0 +1,20 @@
+{% from "_fields.html" import fa, fe with context %}
+<h2>Calendar</h2>
+<p><a class="btn small" href="/courses/{{ course.id }}/calendar?add=exam#add-event">Add exam</a> <span class="muted small">Exam dates drive the countdown and the exam guide.</span></p>
+{% set add_kind = (request.query_params.get('add', '') if request else '') %}
+<div class="card" id="add-event" tabindex="-1" aria-labelledby="add-event-h"><h3 id="add-event-h">Add an event</h3>
+{% if add_kind %}<p class="visually-hidden" role="status">Add an event, type {{ event_kinds.get(add_kind, 'Event') }}. Focus is on the Title field.</p>{% endif %}
+<form method="post" action="/courses/{{ course.id }}/events" hx-post="/courses/{{ course.id }}/events" hx-target="#course-body" hx-swap="outerHTML" hx-disabled-elt="find button[type='submit']" class="form">
+  <div class="two"><label>Type <select name="kind">{% for k, l in event_kinds.items() %}<option value="{{ k }}" {% if add_kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+  <div><label>Title <input name="title" required placeholder="Midterm 1" {% if add_kind %}autofocus data-focus-title{% endif %} {{ fa('event', 'title') }}></label>{{ fe('event', 'title') }}</div></div>
+  <div class="two"><div><label>Date <input type="date" name="date" required {{ fa('event', 'date') }}></label>{{ fe('event', 'date') }}</div><div><label>Time (optional) <input type="time" name="time" {{ fa('event', 'time') }}></label>{{ fe('event', 'time') }}</div></div>
+  <label>Topics (optional) <input name="topics" placeholder="Chapters 1 to 4"></label>
+  <button class="btn" type="submit">Add event</button></form></div>
+{% if not weeks and not earlier %}<div class="card empty"><p><strong>No dates yet.</strong> Add your syllabus on the Materials tab and its exam and assignment dates appear here, or add events above.</p></div>{% endif %}
+{% for w in weeks %}<h3>{{ w.label }}</h3><ul class="plain list">
+{% for e in w.events %}<li class="row-item"><span class="dot" aria-hidden="true"></span><div class="grow"><strong>{{ e.title }}</strong> <span class="badge">{{ event_kinds.get(e.kind, e.kind) }}</span>
+  {% if e.added_by == 'syllabus' %}<span class="badge syl">From syllabus</span>{% endif %}{% if e.listed > 1 %} <span class="badge">Listed {{ e.listed }} times, shown once</span>{% endif %}<br><span class="muted">{{ e.date | day }}{% if e.time %}, {{ e.time | clock }}{% endif %}{% if e.topics %} &middot; {{ e.topics }}{% endif %}</span></div>
+  <div class="actions"><a class="btn small ghost" href="/events/{{ e.id }}/edit">Edit<span class="visually-hidden"> {{ e.title }}</span></a> <a class="btn small ghost" href="/events/{{ e.id }}/delete">Delete<span class="visually-hidden"> {{ e.title }}</span></a></div></li>{% endfor %}</ul>{% endfor %}
+{% if earlier %}<details><summary>Earlier events ({{ earlier | length }})</summary><ul class="plain list">
+{% for e in earlier %}<li class="row-item"><div class="grow">{{ e.title }} <span class="badge">{{ event_kinds.get(e.kind, e.kind) }}</span>{% if e.added_by == 'syllabus' %} <span class="badge syl">From syllabus</span>{% endif %}{% if e.listed > 1 %} <span class="badge">Listed {{ e.listed }} times, shown once</span>{% endif %}<br><span class="muted">{{ e.date }}</span></div>
+ <div class="actions"><a class="btn small ghost" href="/events/{{ e.id }}/edit">Edit<span class="visually-hidden"> {{ e.title }}</span></a></div></li>{% endfor %}</ul></details>{% endif %}

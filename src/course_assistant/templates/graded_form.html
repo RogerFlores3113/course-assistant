@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}{{ 'Add' if is_new else 'Edit' }} graded item - {{ course.name }} - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>{{ 'Add graded item' if is_new else 'Edit graded item' }}</h1><p class="muted">{{ course.name }}. The app will not solve this; it explains the ideas and writes a similar problem instead.</p>
+<form method="post" class="form card">
+  <label>Title <input name="title" required value="{{ item.title }}" {{ fa('graded', 'title') }}></label>{{ fe('graded', 'title') }}
+  <label>Label (optional) <input name="label" value="{{ item.label }}" placeholder="Problem 2" aria-describedby="gl-help"></label>
+  <p id="gl-help" class="muted small">A short name for one problem or essay, such as Problem 3 or Essay 1.</p>
+  <label>Kind <select name="kind">{% for k, l in graded_kinds.items() %}<option value="{{ k }}" {% if item.kind == k %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+  {% if is_new and graded_materials %}<label>Part of (optional) <select name="material_id" aria-describedby="gm-help"><option value="">Not part of a saved material</option>{% for m in graded_materials %}<option value="{{ m.id }}">{{ m.title }}</option>{% endfor %}</select></label>
+  <p id="gm-help" class="muted small">Pick the graded material this problem belongs to, so the list there counts it as found.</p>{% endif %}
+  <label>Text of the problem or assignment <textarea name="body" rows="8">{{ item.body }}</textarea></label>
+  <div class="row"><button class="btn" type="submit">{{ 'Add it' if is_new else 'Save changes' }}</button> <a class="btn ghost" href="/courses/{{ course.id }}">Cancel</a></div>
+</form>
+{% if not is_new and answer_check == 'none' %}<p class="muted small">Answer check: not needed for a proof or an essay. The app checks written work another way, and never writes it for you.</p><p><a class="danger-link" href="/graded/{{ item.id }}/delete">Remove from graded work</a></p>{% elif not is_new %}<p class="muted small">Answer check: {{ 'on' if answer_check == 'on' else ('on (final values only)' if answer_check == 'final' else ("couldn't be made" if answer_check == 'failed' else 'off (connect an AI to turn it on)')) }}. The app keeps the final values of a numeric problem to make sure it never states them. They are not shown anywhere.</p>{% if answer_check in ('failed', 'final') %}<form method="post" action="/graded/{{ item.id }}/key"><button class="btn small" type="submit">Try again</button></form>{% endif %}<p><a class="danger-link" href="/graded/{{ item.id }}/delete">Remove from graded work</a></p>{% endif %}</section>{% endblock %}
