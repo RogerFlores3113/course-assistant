@@ -958,6 +958,33 @@ def _relevant_materials(store: Store, mats: list[dict[str, Any]], topic_text: st
     return hit or rest or mats
 
 
+def _materials_per_topic(store: Store, mats: list[dict[str, Any]], topics: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Each typed topic keeps its own best-matching materials, scored against that topic alone, so a chapter that
+    matches another topic more strongly never pushes it out. Returns the materials in course order and the topics
+    that matched nothing."""
+    words = {m["id"]: _stem_set(m["title"]) | _stem_set(" ".join(c.get("heading", "") for c in store.chunks_of(m["id"])))
+             for m in mats}
+    rest = [m for m in mats if _rfn("title_doc_id", m["title"]) != ("chapter", 1)]  # the opening chapter is filler here
+    keep: dict[int, dict[str, Any]] = {}
+    unmatched: list[str] = []
+    for t in topics:
+        want = _stem_set(t)
+        need = min(2, len(want))  # one shared word of a longer topic ('chemical') is not a match
+        scored = [(len(words[m["id"]] & want), m) for m in rest]
+        best = max((n for n, _ in scored), default=0)
+        got = [m for n, m in scored if n >= max(need, 1) and n >= 0.5 * best] if want else []
+        if want and not got:  # no title or heading names it: a material whose passages cover all its words does
+            def covers(m: dict[str, Any]) -> bool:  # plural and singular share their first five letters
+                have = {w[:5] for w in _stem_set(" ".join(c["text"] for c in store.chunks_of(m["id"])))}
+                return all(w[:5] in have for w in want)
+            got = [m for m in rest if covers(m)]
+        if not got:
+            unmatched.append(t)
+        for m in got:
+            keep[m["id"]] = m
+    return [m for m in mats if m["id"] in keep], unmatched
+
+
 def _exam_sections(math: bool, plan: str) -> str:
     """The section list of the exam guide prompt. Courses with math get formulas and new numbers; readings and
     arguments get key terms, claims and short-answer or essay prompts."""
@@ -1042,9 +1069,17 @@ def exam_guide(store: Store, course_id: int, provider, *, event_id: int | None =
         mats = list(in_window.values())
         scope_note = f"Built from the materials saved for {'the lectures since ' + prev if prev else 'the course so far'}."
     else:
-        mats = _relevant_materials(store, [m for m in store.materials(course_id) if _usable(m)], " ".join(topics_text))
-        scope_note = ("Built from the saved materials that match the topics you typed for this exam: " + typed + "."
-                      if typed_parts else
+        usable = [m for m in store.materials(course_id) if _usable(m)]
+        if typed_parts:
+            mats, unmatched = _materials_per_topic(store, usable, typed_parts)
+            mats = mats or _relevant_materials(store, usable, " ".join(topics_text))
+            found = [t for t in typed_parts if t not in unmatched]
+            scope_note = (("Built from the saved materials that match the topics you typed for this exam: " +
+                           ", ".join(found) + ". ") if found else "") + \
+                         ("Nothing in your saved materials matched: " + ", ".join(unmatched) + "." if unmatched else "")
+        else:
+            mats = _relevant_materials(store, usable, " ".join(topics_text))
+        scope_note = (scope_note if typed_parts else
                       "No material is linked to the lectures before this exam, so this covers all your saved materials.")
     syllabus_rows = [f"{e['date']}: {event_label(e)}" for e in lectures if e.get("topics")]
     course_topics = " ".join(f"{clean_title(e)} {e.get('topics', '')}" for e in store.events(course_id, kinds=["lecture"]))
