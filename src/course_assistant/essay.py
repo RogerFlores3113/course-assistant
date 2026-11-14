@@ -18,6 +18,25 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import contextlib
+import contextvars
+
+_CTX_SOURCES: contextvars.ContextVar = contextvars.ContextVar("essay_reply_sources", default=None)
+_CONCEPT_NOW: contextvars.ContextVar = contextvars.ContextVar("essay_concept_request", default=False)
+_CITED_NOW: contextvars.ContextVar = contextvars.ContextVar("essay_sentence_cited", default=False)
+
+
+@contextlib.contextmanager
+def reply_sources(sources: list[Any] | None):
+    """The numbered sources a model reply cited, for callers that judge the reply without them (scrub_parts in Explain and
+    Practice): a cited sentence its cited chunk really says is a reading note, never the student's essay prose (fx13)."""
+    tok = _CTX_SOURCES.set(list(sources) if sources else None)
+    try:
+        yield
+    finally:
+        _CTX_SOURCES.reset(tok)
+
+
 _CITE_STRIP = re.compile(r"\[\d+(?:\s*[,;–-]\s*\d+)*\]")
 _CITE_SPLIT = re.compile(r"([.!?])\s*(\[\d+(?:\s*[,;]\s*\d+)*\])")
 _CITE_NUMS = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
@@ -87,6 +106,14 @@ def writing_request(text: str) -> bool:
         return False
     return bool((_WRITE_VERB.search(t) and _PROSE_NOUN.search(t)) or _WRITE_PHRASE.search(t) or _MODEL_PHRASE.search(t)
                 or _POSITION_ASK.search(t))
+
+
+def concept_request(question: str) -> bool:
+    """A concept, Explain, Practice, definition or topic request that is not about the student's own essay and asks for no
+    prose: the essay-evidence cue ('For example, ...') never fires on it and a cited reading fact is never a position (fx13).
+    An empty question is not one (a card or a guide body with no request is judged strictly)."""
+    q = (question or "").strip()
+    return bool(q) and not writing_request(q) and not _OWN_ESSAY.search(q)
 
 
 def topic_tokens(it: dict[str, Any]) -> set[str]:
@@ -425,7 +452,7 @@ def lead_core(sentence: str) -> str:
     judges the clause as a position (strictly: a lead-in is no reason to read a plain sentence as one)."""
     s = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
     s = strip_frames(s)[0]
-    if _SPEAKER.match(s):
+    if _SPEAKER.match(s) or _EXAMPLE_LEAD.match(s) and (_CITED_NOW.get() or _CITE_NUMS.search(sentence or "") or _CONCEPT_NOW.get()):
         return ""
     for rx in (_LEAD_COLON, _LEAD_THAT):
         m = rx.match(s)
@@ -462,13 +489,25 @@ def honest_question(sentence: str) -> bool:
     return not _NOTQ.match(c) and not _NEGQ.match(c)
 
 
+_EXAMPLE_LEAD = re.compile(r"^\W*(?:(?:and|but|so|now)[,\s]+)?(?:for\s+(?:example|instance)|e\.g\.?)\s*[:,]\s+", re.I)
+
+
 def unwrap(sentence: str) -> tuple[str, bool]:
     """(core, wrapped): 'A strong essay would say that X', 'you could argue that X', 'for example by arguing that X',
     'A thesis in this direction: X', 'Your thesis: X', a coaching frame ('A student should note that X', 'Consider that X',
     'As you can see, X') and a rhetorical question ('Wasn't the real lesson that X?') give X. Coaching that names no
     position is not unwrapped."""
     s = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
+    cited = _CITED_NOW.get() or bool(_CITE_NUMS.search(sentence or ""))
     s, framed = strip_frames(s)
+    ex = _EXAMPLE_LEAD.match(s)
+    if ex:  # 'For example, X' (fx13): an example sentence is the essay's claim only on a request to write, uncited
+        rest = s[ex.end():].strip()
+        inner, was = unwrap(rest)
+        if was:
+            return inner, True  # 'For example, you could argue that X'
+        if cited or _CONCEPT_NOW.get() or not (ARGUE.search(rest) or _POS_EVAL.search(rest) or _VERDICT_STRONG.search(rest)):
+            return rest, framed  # a cited, concept-request or verdict-free example is judged as the plain sentence it is
     rq = _rhetorical_core(s)
     if rq and len(rq.split()) >= 3:
         return rq.strip("\"“”'*_ ").rstrip("?").strip(), True
@@ -682,6 +721,8 @@ def _wrapped_position(core: str, topic: set[str], ents: set[str] | None, source:
         return False  # a prepositional tail ('Maybe argue with a friend ...') is advice about how to work, not a claim
     if is_position(c + ".", topic, ents):
         return True
+    if not _VERBISH.search(c) and not _POS_EVAL.search(c) and len(re.findall(r"\b(?:one|two|three|four|five)\s+(?:\w+\s+){0,2}\w+s\b", c, re.I)) >= 2:
+        return False  # 'A thesis, two passages, three events and a counterargument': a list of what is required, no claim (fx13)
     shared = _ct(c) & (topic | (ents or set()))
     if words >= 8 and not strict and (not _META.search(c) or len(shared) >= 2):
         return True
@@ -959,17 +1000,40 @@ def _covers(clause: str, chunk: str) -> bool:
     return bool(ct) and len(ct & kt) >= 1 and len(ct & kt) / len(ct) >= 0.3
 
 
+_COACH_LEAD = re.compile(
+    r"^\W*(?:(?:a|one|another)\s+(?:(?:useful|good|helpful|key|first|big|central|natural|simple)\s+)?questions?"
+    r"(?:\s+(?:to|you\s+could|worth)\s+\w+(?:\s+\w+){0,3})?|questions?\s+(?:to|for)\s+\w+(?:\s+\w+){0,3}|consider|think\s+about|"
+    r"ask\s+yourself|start\s+by\s+(?:asking|noting|asking\s+yourself)|begin\s+by\s+(?:asking|noting)|keep\s+in\s+mind|"
+    r"(?:look(?:ing)?|re-?read)\s+at\s+what\s+(?:the\s+)?(?:prompt|assignment|question)\s+asks|"
+    r"notice\s+what\s+the\s+(?:prompt|assignment|question)\s+asks|what\s+the\s+(?:prompt|assignment|question)\s+asks|"
+    r"the\s+(?:prompt|assignment|question)\s+asks)\s*$", re.I)
+_HISTORIOG = re.compile(
+    r"^\W*(?:many|most|some|several|a\s+number\s+of|a\s+few|numerous|certain|other|older|recent|modern|early|later|traditional)\s+"
+    r"(?:\w+\s+){0,2}?(?:historians?|scholars?|economists?|critics?|commentators?|authors?|writers?|observers?|analysts?|"
+    r"biographers?)\s+(?:would\s+|might\s+|could\s+|have\s+|has\s+)?(?:say|said|argue[sd]?|claim(?:ed)?|believe[sd]?|hold|held|see|saw|"
+    r"note[sd]?|suggest(?:ed)?|contend(?:ed)?|maintain(?:ed)?|view(?:ed)?|judge[sd]?|consider(?:ed)?|think|thought|describe[sd]?)\b", re.I)
+
+
 def lead_exempt(sentence: str, sources: list[Any] | None = None) -> bool:
     """A sentence that is a question after a lead-in ('Questions for your revision: Which of ... held ...?'), or a descriptive
     lead-in plus a cited clause that reads the source or says how it is organised, with no verdict in it and, when the chunks
     are known, each clause covered by the chunk it cites."""
     raw = re.sub(r"\*\*|__", "", sentence or "").strip()
     flat = _CITE_STRIP.sub("", raw).strip()
+    if _HISTORIOG.match(flat) and _cite_numbers(raw) and (sources is None or cited_restatement(raw, sources)
+                                                          or _loosely_covered(raw, sources)):
+        return True  # 'Many historians would say X [3]': a historiographic view reported with a cite is background (fx13)
     m = _DESC_COLON.match(flat) or _DESC_THAT.match(flat)
     if not m or len(m.group("lead").split()) > 10 or _SPEAKER.match(flat):
         return False  # 'Student: Was Madison right?' is a dialogue turn, judged turn by turn
     if honest_question(m.group("rest")):
         return True
+    if _COACH_LEAD.match(m.group("lead").strip()):  # 'Look at what the prompt asks: how far ...', 'Consider: ...', 'A useful question: was ...'
+        rc = _CITE_STRIP.sub("", m.group("rest")).strip()
+        if (_Q_OPEN.match(rc) and not _NOTQ.match(rc) and not _NEGQ.match(rc)) or restates_task(rc) or \
+                (_cite_numbers(raw) and attributed(rc) and not _VERDICT_WORDS.search(rc)
+                 and (sources is None or _loosely_covered(raw, sources) or cited_restatement(raw, sources))):
+            return True  # coaching: a question or the prompt's own words, or a cited reading summary with no verdict
     lead = m.group("lead")
     if not _DESC_LEAD.search(lead) or _VERDICT_WORDS.search(lead) or labelled_core(flat):
         return False
@@ -1064,6 +1128,13 @@ _PICK_REJECT = re.compile(r"^(?:(?:the|a|an)\s+)?(?:one|two|three|any|whichever|
                           r"the\s+(?:idea|change|side|option|one|position)|yourself|with\s+(?:a|your))\b", re.I)
 
 
+_EXPLICIT_PICK = re.compile(r"\s+as\s+(?:your|the|a|my)\s+(?:main\s+|central\s+|working\s+|best\s+)?(?:thesis|claim|position|argument|answer|"
+                            r"pick|stance|main\s+idea|central\s+idea|focus)\b", re.I)
+_THAT_CLAUSE = re.compile(r"^(?:the\s+)?(?:idea|claim|point|position|change|option|argument|side|answer|view|angle)\s+that\s+(?P<cl>\S.*)$", re.I)
+_PICK_CHOOSER = re.compile(r"\b(?:you|your|yours|you're|whichever|whatever|best|most|better|strongest|supported|convincing|interests?|"
+                           r"appeals?|prefer\w*|find|feel|think|can|could)\b", re.I)
+
+
 def pick_position(sentence: str, topic: set[str], ents: set[str] | None, own: str = "") -> bool:
     """A sentence that hands the student a pick: a pick or thesis cue plus a named candidate idea of the essay ('Go with
     libraries as your thesis', 'You could argue for paperbacks', 'Your thesis could be X, because ...', 'Pick X.', 'How about
@@ -1084,7 +1155,24 @@ def pick_position(sentence: str, topic: set[str], ents: set[str] | None, own: st
     claimy = bool(m.group("verb") and re.match(r"(?:say|claim|argu)", m.group("verb"), re.I)) or bool(m.group("obj4")) or bool(m.group("obj3"))
     o = re.sub(r"^(?:that|for|in\s+favou?r\s+of|on|with|as)\s+", "", obj.strip().strip("\"“”'*_ "), flags=re.I)
     o = re.sub(r"^(?:saying|arguing|claiming|going\s+with|that)\s+", "", o, flags=re.I)
-    if not o or _PICK_REJECT.match(o):
+    if not o:
+        return False
+    # fx13: 'as your thesis' names what comes before it as the pick, whatever words it is made of (a phrase of the prompt or of a
+    # source, not only a topic word), and 'Pick the idea that parties formed anyway' hands over the claim after 'that'
+    if _EXPLICIT_PICK.search(o):
+        head = _EXPLICIT_PICK.split(o, maxsplit=1)[0].strip(" ,;")
+        mh = _THAT_CLAUSE.match(head)
+        if mh and len(mh.group("cl").split()) >= 3 and not _PICK_CHOOSER.search(mh.group("cl")) and not _about_writing(mh.group("cl")):
+            return True
+        if head and not _PICK_REJECT.match(head) and not _PICK_CHOOSER.search(head) and not _about_writing(head) \
+                and len(head.split()) <= 12 and not re.search(r"\bor\b", head, re.I):
+            return True
+    mc = _THAT_CLAUSE.match(o)
+    if mc:
+        cl = re.split(r"[.;!?]", mc.group("cl"), maxsplit=1)[0].strip()
+        if len(cl.split()) >= 3 and not _PICK_CHOOSER.search(cl) and not _about_writing(cl) and not _META.search(cl):
+            return True
+    if _PICK_REJECT.match(o):
         return False
     head = re.split(r"[,;.!?:—]|\s+(?:because|since|as|so|which|while|for|then|but|and|if|when)\s+", o, maxsplit=1, flags=re.I)[0].strip()
     if not head or len(head.split()) > (8 if claimy else 5) or _PICK_REJECT.match(head):
@@ -1133,6 +1221,9 @@ def contrast_verdict(sentence: str, topic: set[str], ents: set[str] | None, own:
         return False
     if own and len(c.split()) >= 7 and quote_ratio(c, own) >= 0.5:
         return False
+    if re.search(r"\bon\s+paper\b|\bin\s+(?:theory|principle)\b|\b(?:partly|partially|half|mostly|largely|somewhat|in\s+part)\b", c, re.I) \
+            and ents is not None:
+        return True  # 'His theory worked on paper but not in practice', 'only partly right': two-sided whatever the subject is called
     return bool(_ct(c) & ((topic | (ents or set())) - _GENERIC_IDEA - _NAMED_STOP))
 
 
@@ -1171,6 +1262,15 @@ def restates_task(sentence: str) -> bool:
 
 def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, sources: list[Any] | None,
               loose: bool = False, ents: set[str] | None = None, foreign: bool = True, own: str = "") -> tuple[int, str]:
+    tok = _CITED_NOW.set(bool(_cite_numbers(sent)))
+    try:
+        return _classify_one(sent, span, topic, source, asked, sources, loose, ents, foreign, own)
+    finally:
+        _CITED_NOW.reset(tok)
+
+
+def _classify_one(sent: str, span: str, topic: set[str], source: str, asked: bool, sources: list[Any] | None,
+                  loose: bool = False, ents: set[str] | None = None, foreign: bool = True, own: str = "") -> tuple[int, str]:
     """(level, reason) of one sentence or span. span: 'quoted' | 'colon' | 'label' | 'plain'. ents: the assignment's own
     names; given for essays, it turns on the one-sentence position check. Each sentence is judged alone: a coaching word
     in another sentence never exempts it, and a trailing coaching clause never exempts this one."""
@@ -1188,6 +1288,9 @@ def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, s
             return 2, "position"  # a thesis label or a hedged cue ('Try framing it as: X'): a cite never excuses it
         if pick_position(bare, topic, ents, own):
             return 2, "position"  # a pick cue and a named idea ('Go with X as your thesis'): a cite never excuses it (fx12)
+        if any(contrast_verdict(x, topic, ents, own) for x in (bare, lead_core(bare))) \
+                and not (cited and any(_CONTRAST.search(x) and supported(bare, x) for x in _cited_texts(sent, sources))):
+            return 2, "position"  # a bare cited verdict ('Madison was right about 1786 but wrong about the 1790s [1]'): only a chunk that says it clears it (fx13)
     if imperative_coaching(s, topic, ents):  # "Then pick two examples and ask what each one shows"
         return 0, ""
     if cited and attributed(s):  # "Madison argues ..." with a cite: fine when the cited passage says it
@@ -1360,8 +1463,44 @@ def _tidy(sentence: str) -> str:
 def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = False,
          sources: list[Any] | None = None, loose: bool | None = None) -> tuple[int, str, str]:
     """(level, reason, sentence); see _find. The sentence is tidied for a refusal message."""
-    lvl, why, sent = _find(it, text, question, force_asked, sources, loose)
+    if sources is None:
+        sources = _CTX_SOURCES.get()
+    concept = concept_request(question) and not _asks_own_question(it, question)
+    tok = _CONCEPT_NOW.set(concept)
+    try:
+        lvl, why, sent = _find(it, text, question, force_asked, sources, loose)
+    finally:
+        _CONCEPT_NOW.reset(tok)
+    if lvl == 1 and concept and not _own_question_verdict(sent):
+        orig = next((x for x in _split_sentences(_CITE_SPLIT.sub(r" \2\1", text or "")) if sent and sent in _CITE_STRIP.sub("", x)), "")
+        if sources is None and _cite_numbers(orig):  # a cite whose chunk is unknown cannot be weighed: a cited fact stays
+            lvl, why, sent = 0, "", ""  # a fact on a concept request judges nothing about the essay's question
     return lvl, why, _tidy(sent)
+
+
+def _asks_own_question(it: dict[str, Any], question: str) -> bool:
+    """The request is the essay's own question put as a question ('Which change did the most for ordinary readers?'): it asks
+    for the position, so it is never a plain concept request."""
+    title = _ct(re.sub(r"^\W*(?:essay|paper|assignment)\s*#?\d*\s*[:.-]?\s*", "", it.get("title") or "", flags=re.I)) - ESSAY_GENERIC
+    q = _ct(question or "")
+    own = f"{it.get('body', '')} {it.get('title', '')}"
+    return bool(title) and (len(title & q) / len(title) >= 0.6 or (len(q) >= 4 and quote_ratio(question or "", own) >= 0.5))
+
+
+# What a verdict on the essay's OWN question looks like: whether Madison (his remedy, predictions, argument) was right or wrong,
+# held up or failed. A fact about an event ('land sales failed to produce revenue') is history, not a position (fx13).
+_VERDICT_STRONG = re.compile(
+    r"\b(?:right|wrong|correct(?:ly)?|incorrect\w*|mistaken|accurate|inaccurate|vindicat\w*|came\s+true|held\s+up|"
+    r"half|partly|partially|misjudg\w*|underestimat\w*|overestimat\w*|miss(?:ed|es)|diagnos\w*|predict\w*|"
+    r"on\s+paper|in\s+practice|turned\s+out)\b", re.I)
+_VERDICT_SUBJECT = re.compile(r"\b(?:madison|his|remedy|prediction\w*|theory|argument|diagnosis|solution|design|federalist|framers?|founders?)\b", re.I)
+_VERDICT_WEAK = re.compile(r"\b(?:fail(?:s|ed|ure)|succe(?:ed|eds|eded|ss)|worked|fell\s+short|undone|weaken\w*|undercut\w*|"
+                           r"refut\w*|undermin\w*|disprov\w*|prov(?:ed|es|en)\s+(?:right|wrong))\b", re.I)
+
+
+def _own_question_verdict(sentence: str) -> bool:
+    c = _CITE_STRIP.sub("", sentence or "")
+    return bool(_VERDICT_STRONG.search(c) or (_VERDICT_WEAK.search(c) and _VERDICT_SUBJECT.search(c)))
 
 
 # 'because' alone is history, not a verdict ('It was put down by a militia because the state had no money'); the other connectives
@@ -1397,6 +1536,23 @@ def passing_sentences(it: dict[str, Any], text: str, question: str = "", sources
         out.append(x)
         if len(out) >= limit:
             break
+    return out
+
+
+def matched_sentences(it: dict[str, Any], text: str, question: str = "", sources: list[Any] | None = None, limit: int = 4) -> list[str]:
+    """Every sentence of text the essay gate holds, one by one (each found, taken out, and the rest judged again), so a refusal
+    names them all and the student's AI app fixes them in one call (fx13). Never more than `limit`."""
+    out: list[str] = []
+    cur = _CITE_SPLIT.sub(r" \2\1", text or "")
+    for _ in range(limit):
+        lvl, why, sent = find(it, cur, question, True, sources)
+        if not lvl or not sent:
+            break
+        out.append(sent)
+        hit = next((x for x in _split_sentences(cur) if sent in _tidy(_CITE_STRIP.sub("", x))), "")
+        if not hit or hit not in cur:
+            break
+        cur = cur.replace(hit, " ", 1)
     return out
 
 
@@ -1504,6 +1660,7 @@ def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = 
         return 0, ""
     clean = _CITE_SPLIT.sub(r" \2\1", text or "")
     keep: list[tuple[str, set[str]]] = []
+    cited_ok: list[tuple[str, set[str]]] = []
     for line in re.split(r"\n+", clean):
         line = re.sub(r"^\s*(?:[-*+>]|\d+[.)])\s*", "", line).strip()
         if not line or line.startswith("#"):
@@ -1513,6 +1670,7 @@ def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = 
             if len(body.split()) < 5 or "?" in body:
                 continue
             if sources is not None and _cite_numbers(sent) and cited_restatement(sent, sources) and not _PRESCRIBE.search(body):
+                cited_ok.append((body, _ct(body) & topic))
                 continue
             if _DEFINITION.match(body) and not _SA_ANSWER.search(body) and not _PRESCRIBE.search(body):
                 continue  # a plain definition ('Molarity is moles of solute per liter of solution') answers nothing
@@ -1525,6 +1683,13 @@ def short_answer_hit(it: dict[str, Any], text: str, sources: list[Any] | None = 
             best = (len(sh), body)
     if best[0]:
         return best
+    # fx13: the cited sentences of a terse reply that together answer EVERY part of the item are the finished answer, however well
+    # each one is backed by its chunk; one cited definition, or a long guide that only touches the topic, is a concept guide
+    whole = [(b, sh) for b, sh in keep + cited_ok if not _SA_COACH.search(b)]
+    if cited_ok and len(whole) >= 3 and sum(len(b.split()) for b, _ in whole) <= 90:
+        wu = set().union(*[sh for _, sh in whole])
+        if len(wu) >= 4 and len(wu) / len(topic) >= 0.4 and all(len(sh) >= 1 for _, sh in whole):
+            return len(wu), max(whole, key=lambda x: len(x[1]))[0]
     free = [(b, sh) for b, sh in keep if not _SA_COACH.search(b)]
     words = sum(len(b.split()) for b, _ in free)
     union = set().union(*[sh for _, sh in free]) if free else set()
@@ -1637,7 +1802,18 @@ _PAIR_FRONT = re.compile(
     r"\bshould\s+(?:i|we|you|the\s+\w+)\s+(?:argue|claim|defend|pick|choose|say)\b", re.I)
 _PAIR_STRONG = re.compile(
     r"\b(?:thesis|position|stance|verdict|claim|argue|defend|pick|choose)\b|\bmain\s+(?:claim|argument|point)\b|"
-    r"\bmost\s+important\b|\bwhich\s+(?:idea|change|option|topic|approach|side)\b[^?]*\b(?:most|best|matters?)\b|\bbest\s+(?:idea|answer)\b", re.I)
+    r"\bmost\s+important\b|\bwhich\s+(?:idea|change|option|topic|approach|side)\b[^?]*\b(?:most|best|matters?)\b|\bbest\s+(?:idea|answer)\b|"
+    r"\b(?:best|strongest|top|winning|right|safest)\s+(?:argument|claim|take|angle|approach|position|answer|idea|thesis)\b|"
+    r"\b(?:center|centre|focus|build|revolve|hinge)(?:ed|s)?\s+(?:on|around)\b|\bwhich\s+(?:idea|change|option|topic|approach|side|argument|claim)\s+should\b", re.I)
+_VERBISH = re.compile(r"\b(?:was|were|is|are|did|do|does|had|has|have|can|could|would|will|should|argues?|shows?|failed|worked|made|led|caused)\b", re.I)
+# 'Federalist 10 main claim', 'Chapter 7: main argument': a card about what a SOURCE says is a reading fact, not the student's thesis
+_READING_FRONT = re.compile(r"^\W*(?:the\s+)?(?:federalist(?:\s+papers?)?\s*(?:no\.?\s*)?#?\d+|(?:no|paper|chapter|ch|lecture|section|week)\.?\s*#?\d+|"
+                            r"the\s+(?:reading|textbook|chapter|author|passage|text|lecture))\b", re.I)
+
+
+def reading_front(front: str) -> bool:
+    f = front or ""
+    return bool(_READING_FRONT.match(f)) and not re.search(r"\b(?:essay|thesis|my|our|your|verdict|position|stance|pick|should)\b", f, re.I)
 _PAIR_REQ = re.compile(r"\b(?:need|needs|require|requires|required|requirements?|rubric|worth|points|graded|grading|due|length|"
                        r"criteria|criterion|look\s+like)\b", re.I)
 _ENUM = re.compile(r"^[\w'’ -]{1,30}(?:,\s*[\w'’ -]{1,30}){1,}(?:,?\s+(?:and|or)\s+[\w'’ -]{1,30})?$|^[\w'’ -]{1,30}\s+(?:and|or)\s+[\w'’ -]{1,30}$", re.I)
@@ -1651,6 +1827,8 @@ def _pair_card_claim(it: dict[str, Any], front: str, back: str, source_text: str
     important idea, a bare candidate idea ('Elimination.'). Requirement cards and cards about what a thesis is never match."""
     if not _PAIR_FRONT.search(front or "") or _PAIR_REQ.search(front or "") or _CONCEPT_FRONT.match(front or ""):
         return ""
+    if reading_front(front) and not _own_question_verdict(back) and not _CONTRAST.search(back or ""):
+        return ""  # 'Federalist 10 main claim / A large republic controls faction': what the reading says
     strong = bool(_PAIR_STRONG.search(front or ""))
     if not strong:
         return ""
@@ -1668,10 +1846,10 @@ def _pair_card_claim(it: dict[str, Any], front: str, back: str, source_text: str
                 continue
             if _ENUM.match(s) and not re.search(r"\b(?:was|were|is|are|did|do|does|had|has)\b", s, re.I):
                 continue  # a list of the options ('Libraries, paperbacks, night schools') names no pick
-            if words <= 4 and not _META.search(s):
+            if (words <= 4 or words <= 8 and not _VERBISH.search(s)) and not _META.search(s):
                 named = {t for w in re.findall(r"[\w'’-]+", s) for t in (_ct(w) & pool)}
                 if named and len(re.findall(r"\bor\b|,", s)) == 0:
-                    return s  # a bare candidate idea under a thesis front ('Elimination.')
+                    return s  # a bare candidate idea under a thesis front ('Elimination.', 'Checks and balances in No. 51')
             if words >= 2 and (_labelled_position(s, topic, ents, own) or contrast_verdict(s, topic, ents, own)):
                 return s
     return ""

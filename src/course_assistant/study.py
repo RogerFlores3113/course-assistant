@@ -475,7 +475,8 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
         raw = drop_empty_details(raw)
     before = raw
     if getattr(integ, "scrub_parts", None):  # drop only the parts the item's key flags, and say which item matched
-        raw, scrubbed, scrub_note = integ.scrub_parts(store, course_id, raw, question or task[:300])
+        with _mod("essay").reply_sources(sources):  # fx13: a cited textbook fact the chunk says is no essay prose
+            raw, scrubbed, scrub_note = integ.scrub_parts(store, course_id, raw, question or task[:300])
         if practice:
             raw, scrubbed, scrub_note = tidy_practice(before, raw, scrubbed, scrub_note)
         scrub_ids = list(getattr(integ, "LAST_SCRUB_ITEMS", []) or []) if scrubbed else []
@@ -1427,7 +1428,8 @@ def concept_map(store: Store, course_id: int, provider, *, scope: str = "", mate
         graph["nodes"] = [n for n in graph["nodes"] if clean(n["label"])]
         ids = {n["id"] for n in graph["nodes"]}
         graph["edges"] = [e for e in graph["edges"] if e["a"] in ids and e["b"] in ids and clean(e["label"])]
-        rest = scrub_summary(integ, store, course_id, rest or "", scope)
+        with _mod("essay").reply_sources(sources):
+            rest = scrub_summary(integ, store, course_id, rest or "", scope)
     if not graph["nodes"]:
         raise ValueError("The AI returned a concept map with no usable nodes. Try again.")
     ans = _mod("grounding").parse_answer(rest or "", sources)
