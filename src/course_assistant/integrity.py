@@ -765,10 +765,25 @@ def mask_structure(text: str) -> str:
 _EQ_CLAUSE_SPLIT = re.compile(r"\n|;|\s/\s|\s\|\s|,\s|\.\s|\b(?:then|gives|so|and|with|becomes)\b|\\\\|&&")
 
 
-def equation_system(text: str) -> list[list[str]]:
-    """A triangular system written as equation lines ('2x + 5y + z = 0 / y - z = 3 / -z = 2', as separate lines or in one
-    sentence) as augmented rows [A | b] over the unknowns x, y, z, ... in order. [] when the lines are not a square
-    triangular system with a nonzero diagonal, or when none of them carries two unknowns (a list 'x = 1, y = 1')."""
+def _lhs_terms(lhs: str) -> dict[str, str] | None:
+    pos, terms = 0, {}
+    while pos < len(lhs):
+        m = _TERM.match(lhs, pos)
+        if not m or m.end() == pos:
+            return None
+        sign, coef, param, var = m.groups()
+        if param:
+            return None  # a symbol coefficient: not a numeric system
+        val = _canon(coef) if coef not in ("", ".") else "1"
+        terms[var] = _canon("-" + val) if sign == "-" and val != "0" else val
+        pos = m.end()
+    return terms or None
+
+
+def _equation_lines(text: str) -> list[tuple[dict[str, str], str]]:
+    """Every equation of the text with numeric coefficients on the unknowns x, y, z, ... and a number on the right, as
+    ({unknown: coefficient}, rhs). A lead-in before the equation ('The reduced system is 2x + y = 3', 'Row 3 reads -z = 2')
+    is skipped."""
     eqs: list[tuple[dict[str, str], str]] = []
     for clause in _EQ_CLAUSE_SPLIT.split(text or ""):
         line = clause.strip().strip("`$*").strip()
@@ -778,26 +793,57 @@ def equation_system(text: str) -> list[list[str]]:
         rhs = rhs.rstrip(",.;")
         if not lhs or not _NUM_FULL.match(rhs.replace(" ", "")):
             continue
-        pos, terms, ok = 0, {}, True
-        while pos < len(lhs):
-            m = _TERM.match(lhs, pos)
-            if not m or m.end() == pos:
-                ok = False
-                break
-            sign, coef, param, var = m.groups()
-            if param:
-                ok = False  # a symbol coefficient: not a numeric system
-                break
-            val = _canon(coef) if coef not in ("", ".") else "1"
-            terms[var] = _canon("-" + val) if sign == "-" and val != "0" else val
-            pos = m.end()
-        if ok and terms:
+        terms = _lhs_terms(lhs)
+        if terms is None:
+            for m in re.finditer(r"(?<=[\s(])(?=[+\-\u2212\d.xyzwtuv])", lhs):
+                terms = _lhs_terms(lhs[m.start():].replace("\u2212", "-"))
+                if terms is not None:
+                    break
+        if terms:
             eqs.append((terms, _canon(rhs.replace(" ", ""))))
+    return eqs
+
+
+def equation_system(text: str) -> list[list[str]]:
+    """A triangular system written as equation lines ('2x + 5y + z = 0 / y - z = 3 / -z = 2', as separate lines or in one
+    sentence) as augmented rows [A | b] over the unknowns x, y, z, ... in order. [] when the lines are not a square
+    triangular system with a nonzero diagonal, or when none of them carries two unknowns (a list 'x = 1, y = 1')."""
+    eqs = _equation_lines(text)
     cols = [v for v in _VARS if any(v in t for t, _ in eqs)]
     if len(eqs) < 2 or len(cols) != len(eqs) or not any(len(t) >= 2 for t, _ in eqs):
         return []
     rows = [[t.get(v, "0") for v in cols] + [r] for t, r in eqs]
     return rows if _solve_triangular(rows) else []
+
+
+def _system_rows_hit(text: str, item: dict[str, Any] | None, ctx: dict[str, Any] | None) -> list[str]:
+    """Equation lines that are rows of the item's triangular system [U | c] (its own given rows excluded): two rows are
+    always a leak, one when the chat touched the item or the text is a saved guide or card. Reads each line by its own
+    coefficients, so '-z = 2' is row 3 of the system even without the other rows."""
+    if not item:
+        return []
+    ix = _index(item)
+    sysrows = next((c.rows for c in ix.comps if c.kind == "sys"), None)
+    if not sysrows:
+        return []
+    n = len(sysrows[0]) - 1
+    given = {tuple(_val(x) for x in [t.get(v, "0") for v in _VARS[:n]] + [r]) for t, r in _equation_lines(item.get("body") or "")}
+    hits: list[int] = []
+    for terms, rhs in _equation_lines(text):
+        if any(v not in _VARS[:n] for v in terms):
+            continue
+        row = [terms.get(v, "0") for v in _VARS[:n]] + [rhs]
+        vals = tuple(_val(x) for x in row)
+        if vals in given:
+            continue
+        for i, sr in enumerate(sysrows):
+            if i not in hits and all(num_eq(a, b) for a, b in zip(row, sr)):
+                hits.append(i)
+                break
+    c = ctx or {}
+    if len(hits) >= 2 or (hits and (c.get("named") or c.get("sticky") or c.get("lone"))):
+        return [f"row {i + 1}" for i in hits] + ["system"]
+    return []
 
 
 def with_equation_system(text: str) -> str:
@@ -809,7 +855,8 @@ def with_equation_system(text: str) -> str:
 
 def _kl(text: str, item: dict[str, Any] | None, ctx: dict[str, Any] | None = None) -> list[str]:
     """key_leak on the text with the item's own givens and the method's step counts masked."""
-    return key_leak(with_equation_system(mask_structure(mask_givens(text, item))), item, ctx)
+    masked = mask_structure(mask_givens(text, item))
+    return key_leak(with_equation_system(masked), item, ctx) or _system_rows_hit(masked, item, ctx)
 
 
 def _overlap_score(q: str, b: str, paste_only: bool = False) -> float:
@@ -917,17 +964,54 @@ def score_text(q: _Text, b: _Text) -> float:
     return max(score, ov)
 
 
+# 'hw 3a', 'HW3a', 'hw3 b', 'pset 3 b': problem 3 part b of the homework, not homework number 3
+_DOC_PART = re.compile(r"\b(?:hw|homework|pset|ps|p-set|problem set|assignment)\s*#?\s*(\d{1,2})\s*[-.]?\s*\(?([a-h])\)?(?![A-Za-z0-9])", re.I)
+# 'ps2 1', 'hw 2 number 3': the set, then a problem number that is no quantity
+_DOC_THEN_NUM = re.compile(r"\b(?:hw|homework|pset|ps|p-set|problem set)\s*#?\s*\d{1,2}\s+#?(\d{1,2})\b(?![\d.]|\s*(?:points?|pts|%|hours?|hrs?|days?|weeks?|pages?|"
+                           r"words?|minutes?|mins?|[ap]\.?m\b|st\b|nd\b|rd\b|th\b|[:/]\d|-\d))", re.I)
+_NUMBER_REF = re.compile(r"\b(?:number|no\.?|num)\s*#?\s*(\d{1,2})(?:\s*\(?([a-d])\)?(?![A-Za-z0-9]))?(?![\d.])", re.I)
+_ORD_NUM = {"first": "1", "1st": "1", "second": "2", "2nd": "2", "third": "3", "3rd": "3", "fourth": "4", "4th": "4", "fifth": "5",
+             "5th": "5", "sixth": "6", "6th": "6", "seventh": "7", "7th": "7", "eighth": "8", "8th": "8", "ninth": "9", "9th": "9",
+             "tenth": "10", "10th": "10"}
+_ORD_REF = re.compile(r"\b(?:the\s+)?(" + "|".join(_ORD_NUM) + r")\s+(?:problem|question|exercise)\b", re.I)
+_NUM_WORD = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10"}
+_NUM_WORD_REF = re.compile(r"\b(problem|question|exercise|prob)\s+(" + "|".join(_NUM_WORD) + r")\b", re.I)
+_HYPHEN_PART = re.compile(r"(?<![\w.#/\-])(\d{1,2})-([a-d])\b(?![\w-])", re.I)
+_SPACED_PART = re.compile(r"\b(?:problem|question|exercise|prob|q)\s*\.?\s*#?\s*(\d{1,2})\s+([b-d])\b(?![\w'])", re.I)
+_START_PART = re.compile(r"^\W*(\d{1,2})\s+([b-d])\b(?![\w'])", re.I)
+
+
 def _doc_refs(text: str) -> set[tuple[str, str]]:
-    text = re.sub(r"[-_]+", " ", text or "")
+    text = _DOC_PART.sub(" ", text or "")
+    text = re.sub(r"[-_]+", " ", text)
     return {(DOC_GROUPS[m.group(1).lower()], m.group(2).lstrip("0") or "0") for m in _DOC_REF.finditer(text)}
 
 
 def _prob_pairs(text: str) -> set[tuple[str, str]]:
     """(problem number, part letter or '') for every problem reference: 'Problem 3', '3b', '3(b)', 'q3b', '#3b', '3.b'."""
-    text = re.sub(r"[-_]+", " ", text or "")
+    raw = text or ""
+    out: set[tuple[str, str]] = set()
+    for m in _HYPHEN_PART.finditer(raw):
+        if not _NOT_PART_CTX.search(raw[max(0, m.start() - 14):m.start()]):
+            out.add((m.group(1), m.group(2).lower()))
+    for m in _DOC_PART.finditer(raw):
+        out.add((m.group(1), m.group(2).lower()))
+    for m in _DOC_THEN_NUM.finditer(raw):
+        out.add((m.group(1), ""))
+    for m in _SPACED_PART.finditer(_NUM_WORD_REF.sub(lambda k: f"{k.group(1)} {_NUM_WORD[k.group(2).lower()]}", raw)):
+        out.add((m.group(1), m.group(2).lower()))
+    m = _START_PART.match(raw)
+    if m:
+        out.add((m.group(1), m.group(2).lower()))
+    for m in _ORD_REF.finditer(raw):
+        out.add((_ORD_NUM[m.group(1).lower()], ""))
+    stripped = _DOC_REF.sub(" ", _DOC_PART.sub(" ", raw))  # 'problem set 2 number 3': the 2 names the set, the 3 the problem
+    for m in _NUMBER_REF.finditer(_NUM_WORD_REF.sub(lambda k: f"{k.group(1)} {_NUM_WORD[k.group(2).lower()]}", stripped)):
+        out.add((m.group(1), (m.group(2) or "").lower()))
+    text = _NUM_WORD_REF.sub(lambda k: f"{k.group(1)} {_NUM_WORD[k.group(2).lower()]}", raw)
+    text = re.sub(r"[-_]+", " ", text)
     # drop "problem set 2" style phrases so the 2 is not read as a problem number
     text = re.sub(r"\bproblem set\s*\d+", " ", text, flags=re.I)
-    out: set[tuple[str, str]] = set()
     for m in _PROB_REF.finditer(text):
         g = m.groups()
         if g[0]:
@@ -1152,10 +1236,16 @@ _SOLVE_ASK = re.compile(r"\b(solve|compute|calculate|work\s+out|the\s+answer|sol
                         r"give\s+me|show\s+me|do\s+(?:it|this|my))\b", re.I)
 
 
+# 'Is Problem 2 hard?', 'How long will Problem 2 take?': a question about the assignment's size, not its content
+_SIZE_ASK = re.compile(r"^\W*(?:is|are|was|will|would|does|should)\b[^.!?\n]{0,60}\b(?:hard|harder|difficult|easy|easier|tricky|long|longer|"
+                       r"short|doable|time[- ]consuming|take\s+long|a\s+lot\s+of\s+work)\b[^.!?\n]{0,30}\??\s*$|"
+                       r"^\W*how\s+(?:hard|difficult|long|much\s+work|much\s+time)\b[^.!?\n]{0,60}\??\s*$", re.I)
+
+
 def is_logistics(text: str) -> bool:
     """A question about the assignment itself (due date, points, length, late policy, collaboration), not its content."""
     t = text or ""
-    return bool(_LOGISTICS.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t)
+    return bool(_LOGISTICS.search(t) or _SIZE_ASK.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t)
 
 
 def draft_text(question: str) -> str:
@@ -1206,6 +1296,16 @@ def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[
         if n > top:
             best, top = its, n
     if best and top >= 1:
+        # 'the NaCl problem on the problem set': when exactly one item's own text carries the topic words, it is that item
+        gone = _SET_WORDS_PFX | {w[:5] for w in GENERIC}
+        wset = (_pfx_set(stripped) | {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", stripped)}) - gone
+        per = [(len(wset & (_pfx_set(f"{i.get('title', '')} {i.get('body', '')}") - gone)), i) for i in best]
+        per.sort(key=lambda x: -x[0])
+        if per[0][0] >= 1 and per[0][0] > per[1][0]:
+            one = dict(per[0][1])
+            one["source"] = "material" if one.get("material_id") else "item"
+            one["score"] = 0.7
+            return one
         out = _combined(store, best)
         out.update(score=0.7)
         return out
@@ -1456,6 +1556,24 @@ def _proof_sentences(reply: str) -> list[str]:
     return [x for x in re.split(r"(?<=[.!?])\s+|\n+", _CITE_STRIP.sub("", reply or "")) if x.strip() and "?" not in x]
 
 
+_TWO_SOLN = re.compile(r"\btwo\s+(?:different\s+|distinct\s+|given\s+)?(?:solutions?|vectors?|points?)\b|\b([a-z])\s+and\s+([a-z])\b[^.;!?]{0,50}"
+                       r"\b(?:solutions?|solve|solves|satisf(?:y|ies)|both)\b|\bsolutions?\s+([a-z])\s+and\s+([a-z])\b", re.I)
+_DIFF_CONSTRUCT = re.compile(r"\bdifference\b|\b[a-z]\s*[-\u2212]\s*[a-z]\b|\bmultiples?\b|\bmidpoint\b|\bthe\s+line\b|\ba\s+line\b|"
+                             r"\b(?:linear|convex|affine)\s+combinations?\b|\baverage\b|\bscal(?:ar|ing|e)\b|\b[a-z]\s*\+\s*t\b|\bt\s*\(|\bevery\s+point\s+on\b", re.I)
+_MANY = re.compile(r"\binfinitely\s+many\b|\binfinite(?:ly)?\b|\bmore\s+than\s+two\b|\bendless", re.I)
+
+
+def two_solution_proof(it: dict[str, Any], reply: str) -> bool:
+    """A finished argument for 'two different solutions mean infinitely many' whatever its opening: two solutions, their
+    difference, a multiple, midpoint or line, and the conclusion of infinitely many, together in the advice-free
+    sentences of the reply. Method advice ('try subtracting the two solutions') carries no step."""
+    body = (it.get("body") or "").lower()
+    if not (re.search(r"\btwo\b[^.]{0,30}\bsolutions?\b", body) and re.search(r"infinitely|more than one", body)):
+        return False
+    text = " ".join(x for x in _proof_sentences(reply) if not _P_ADVICE.search(x))
+    return bool(_TWO_SOLN.search(text) and _DIFF_CONSTRUCT.search(text) and _MANY.search(text))
+
+
 def proof_steps(it: dict[str, Any], reply: str) -> bool:
     """Two or three sentences that CARRY the argument of a graded proof item, whatever their connectives: one opens it
     (Suppose / Let / If ...), one holds a step of the construction or an equation about the item's objects, one states
@@ -1463,6 +1581,8 @@ def proof_steps(it: dict[str, Any], reply: str) -> bool:
     b = _Text(it.get("body") or "")
     if not b.tok:
         return False
+    if two_solution_proof(it, reply):
+        return True
     sents = [x for x in _proof_sentences(reply) if not _P_ADVICE.search(x)]
     shared = [len(content_tokens(x) & b.tok) for x in sents]
     opens = [i for i, x in enumerate(sents) if _P_OPEN_LEAD.search(x) or _P_OPEN.search(x)]
@@ -3126,11 +3246,27 @@ def claims_check(question: str, item: dict[str, Any] | None = None) -> bool:
     return item is None or has_candidate(q, item)
 
 
+def _unrelated_turn(question: str, item: dict[str, Any]) -> bool:
+    """The question brings its own data (its own matrix rows or equations, or numbers) and refers to nothing of the item:
+    it does not name it, share two of its concept words, name one of its unknowns, ask a check or carry its rows. A sticky
+    chat only touches the item for replies that are about it."""
+    q = _Text(question)
+    if not (q.mrows or q.erows):
+        return False
+    b = _Text(item.get("body") or "")
+    if _row_hits(q, b) or touches(question, item) or question_names(item, question) or is_check_ask(question) \
+            or has_candidate(question, item):
+        return False
+    return not any(b.fm.get(n, {n}) & q.forms for n in b.sig)
+
+
 def reply_ctx(item: dict[str, Any], question: str, reply: str, force_item: dict | None = None) -> dict[str, Any]:
     """The context key_leak needs for a reply in a chat: named, sticky, short, question_refs."""
     forced = bool(force_item and force_item.get("id") == item.get("id"))
     sticky = forced and force_item.get("reason") == "sticky"
     named = names_item(question or "", item) or (forced and not sticky)
+    if sticky and not named and _unrelated_turn(question or "", item):
+        forced = sticky = False  # a new, self-contained problem after the twin: judged on its own, not against the old item
     ctx = {"named": bool(named), "sticky": bool(forced), "short": len(_CITE_STRIP.sub("", reply or "").split()) < 80,
            "question_refs": question_refs(item, question or "")}
     if question and not claims_check(question, item):
@@ -3471,7 +3607,11 @@ _HANDOUT_NAMED = re.compile(r"\b(?:hand-?outs?|lab|labs|pre-?\s?labs?|lab\s+repo
 _HANDOUT_NOISE = frozenset("right wrong correct check checking mine thing things stuff sure okay due late submit".split())
 
 
-def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tuple[list[dict], int]:
+_DEFINITION_Q = re.compile(r"\b(?:what\s+(?:is|are|'s)\b|define\b|definition\b|defined\b|meaning\b|what\s+does\b[^.?!]{0,40}\bmean\b|"
+                           r"used\s+for\b|what\s+do\s+(?:you|we|i)\s+use\b)", re.I)
+
+
+def handout_sources(store, course_id: int, query: str, *, limit: int = 3, listed: "set[Any] | None" = None) -> tuple[list[dict], int]:
     """Passages of a graded material that are not its graded questions (equipment, procedure, settings, safety), found for
     an ordinary question, and how many paragraphs that matched were left out because they hold a graded question.
     Search never returns a graded question: each chunk is cut to its paragraphs that do not belong to one."""
@@ -3499,13 +3639,14 @@ def handout_sources(store, course_id: int, query: str, *, limit: int = 3) -> tup
         # the note is for a left-out paragraph that is about what the student asked: the question names the handout, the
         # lab, the pre-lab or the report, or the paragraph shares two content words with it (never on a content-free or
         # logistics question)
-        n_out = sum(1 for x in paras if x not in keep and ((named and not is_logistics(query)) or len(qwords & content_tokens(x)) >= 2))
+        n_out = sum(1 for x in paras if x not in keep and ((named and not is_logistics(query)) or (
+            not _DEFINITION_Q.search(query) and len(qwords & content_tokens(x)) >= 2)))
         if n_out:
             left_by_mid[src.get("material_id")] = left_by_mid.get(src.get("material_id"), 0) + n_out
         keep = [x for x in keep if len(x.split()) >= 4]  # a bare heading is no passage
         if keep and len(out) < limit:
             out.append(dict(src, text="\n\n".join(keep)))
-    shown = {o.get("material_id") for o in out}  # a handout that has its own "Also searched" row needs no note beside it
+    shown = {o.get("material_id") for o in out} | set(listed or ())  # a handout with a source row on the page needs no note
     return out, sum(v for mid, v in left_by_mid.items() if mid not in shown)
 
 
@@ -3780,12 +3921,55 @@ def finished_answer(body: str, reply: str) -> bool:
     if len(want) < 3:
         return False
     sents = [x for x in _proof_sentences(reply) if len(x.split()) >= 6 and not essay.STRICT_COACH.search(x) and not essay.MODAL.search(x)]
-    if len(sents) < 3:
+    if len(sents) >= 3:
+        covered = set()
+        for x in sents:
+            covered |= content_tokens(x) & want
+        if len(covered) >= 0.6 * len(want):
+            return True
+    return _parts_answered(core or body, reply)
+
+
+_PART_SPLIT = re.compile(r"[;:]|,\s*(?:and\s+|then\s+)?|\band\s+(?=(?:state|give|explain|describe|define|name|list|identify|compare|say|show|"
+                         r"write|include|contrast|relate|tell)\b)|\bthen\b|\([a-d]\)|\bpart\s+\d\b|(?<=[.!?])\s+", re.I)
+_EXAMPLE_MARK = re.compile(r"\bexamples?\b|\bsuch as\b|\be\.g\b|\bfor instance\b|\billustrat", re.I)
+_EXAMPLE_FOUND = re.compile(r"\bfor (?:example|instance)\b|\bsuch as\b|\be\.g\b|\bis an example\b|\b[A-Z][a-z]?\d|\d")
+
+
+_TASK_VERBS = frozenset("state relate name named give say tell include contrast compare identify list define illustrate".split())
+
+
+def _parts_answered(core: str, reply: str) -> bool:
+    """A terse reply that states, in plain sentences, every part the item asks for (each part named by its own concept
+    words, an 'example' part by a further sentence that gives one), even when it does not echo the item's wording.
+    Needs two or more parts."""
+    parts = []
+    for clause in _PART_SPLIT.split(core or ""):
+        if not clause or not clause.strip():
+            continue
+        ex = bool(_EXAMPLE_MARK.search(clause))
+        toks = {t for t in content_tokens(clause) - essay.ESSAY_GENERIC if not t.startswith("exampl") and t not in _TASK_VERBS}
+        if toks or ex:
+            parts.append((toks, ex))
+    if len(parts) < 2 or len(parts) > 8:
         return False
-    covered = set()
-    for x in sents:
-        covered |= content_tokens(x) & want
-    return len(covered) >= 0.6 * len(want)
+    sents = [x for x in _proof_sentences(reply) if len(x.split()) >= 5 and not essay.STRICT_COACH.search(x) and not essay.MODAL.search(x)]
+    if len(sents) < 2:
+        return False
+    sent_tok = [content_tokens(x) for x in sents]
+    used: set[int] = set()
+    for toks, ex in (p for p in parts if not p[1]):
+        hit = [i for i, have in enumerate(sent_tok) if len(toks & have) >= max(1, math.ceil(0.5 * len(toks)))]
+        if not hit:
+            return False
+        used.add(next((i for i in hit if i not in used), hit[0]))
+    for toks, ex in (p for p in parts if p[1]):  # an example part: a sentence of its own that gives one
+        hit = [i for i, have in enumerate(sent_tok) if i not in used and (
+            (toks and len(toks & have) >= max(1, math.ceil(0.5 * len(toks)))) or _EXAMPLE_FOUND.search(sents[i]))]
+        if not hit:
+            return False
+        used.add(hit[0])
+    return len(used) >= 2
 
 
 def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_text: str,
@@ -3837,13 +4021,19 @@ def reworded_note(graded: dict[str, Any]) -> str:
     return f"I reworded this answer to stay clear of your graded {_item_name(graded)}, so it may be less detailed than you asked for."
 
 
-def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = False, has_answer: bool | None = None) -> str:
+def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = False, has_answer: bool | None = None,
+               held: bool = False) -> str:
     """The one sentence the page shows for why this question got a similar problem or concepts help. It never says
     'a similar problem' for a page that shows none, and it blames the reply, not the question, when the reply was
     what the app threw away."""
     name = _item_name(graded)
     if mode == "feedback":
         return f"This looks like your own draft for {name}, so here is feedback, not a rewrite."
+    if held and mode != "twin":  # the page shows the fixed "I can't write this" text, so it never says "concepts and an approach"
+        tail = " The app does not say whether your answer is right." if check else ""
+        if why in _REPLY_WHY:
+            return f"My first answer was too close to your graded {name}, so I held it back. Some steps you can take are below." + tail
+        return f"This looks like your graded {name}, so the app held back an answer. Some steps you can take are below." + tail
     if why in _REPLY_WHY:
         if mode == "twin":
             return (f"My first answer was too close to your graded {name}, so I replaced it with a similar problem with "
@@ -3992,10 +4182,15 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     shown_mode = "twin" if mode == "twin" else "concepts"
     if kind in ("essay", "proof") and not feedback and mode != "twin":
         note = ""  # the routing sentence on the page already says why; one banner, not three
+    if mode != "twin" and not feedback and any(b.md in (SAFE_CONCEPTS, SAFE_CHECK, SAFE_ESSAY, SAFE_SHORT, SAFE_CHECK_WRITTEN) for b in blocks):
+        note = ""  # a fixed "I can't write this" page: no banner above it that says concepts are shown
     blocks = ([Block("text", note, [])] if note else []) + list(blocks)
     answer = grounding.make_answer(blocks, used, sources, twin=(mode == "twin"), not_covered=False)
     answer.mode = shown_mode
-    note_line = route_note(graded, "feedback" if feedback else shown_mode, why or graded.get("reason") or "", check, has_answer)
+    held = mode != "twin" and not feedback and bool(blocks) and any(
+        b.md in (SAFE_CONCEPTS, SAFE_CHECK, SAFE_ESSAY, SAFE_SHORT, SAFE_CHECK_WRITTEN) for b in blocks)
+    note_line = route_note(graded, "feedback" if feedback else shown_mode, why or graded.get("reason") or "", check, has_answer,
+                           held=held)
     answer.routing_note = note_line
     excerpt = " ".join(problem_text.split())
     excerpt = excerpt if len(excerpt) <= 300 else excerpt[:297] + "..."
@@ -4342,6 +4537,23 @@ def _text_key_item(items: list[dict[str, Any]], whole: str, text: str, data: dic
     return best
 
 
+def _copies_plain(text: str, body: str, b: "_Text", r: "_Text") -> bool:
+    """A copy of a graded problem that has no significant numbers of its own (its numbers are small entries of a
+    matrix). Words alone are never enough: 'eigenvalues of the matrix with rows ...' is shared topic vocabulary. The text
+    must carry all the item's own rows, or, when it shows no rows of its own, restate nearly the whole statement."""
+    nrows = len(b.mrows or b.erows or [])
+    if nrows and _row_hits(r, b) >= nrows:
+        return True
+    if nrows and (r.mrows or r.erows):
+        return False  # other rows: a similar problem with different numbers, not a copy
+    bt, qt = set(tokens(body)), set(tokens(text))
+    if not bt or len(bt) < 6:
+        return False
+    both = r.tok & b.tok
+    jac = len(both) / max(1, len(r.tok | b.tok))
+    return jac >= 0.85 and len(bt & qt) / len(bt) >= 0.9
+
+
 def copies_item(text: str, it: dict[str, Any], rows: bool = False) -> bool:
     """The text reproduces a graded question (most of its words and its own numbers), as a card, a guide part or a practice
     question does when it copies the assignment. A twin with other numbers is not a copy."""
@@ -4354,7 +4566,7 @@ def copies_item(text: str, it: dict[str, Any], rows: bool = False) -> bool:
     if _overlap_score(text, body, paste_only=True) < 0.5:
         return False
     if not b.sig:
-        return True
+        return _copies_plain(text, body, b, r)
     hit = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
     return len(hit) >= max(1, math.ceil(0.6 * len(b.sig)))
 
@@ -4530,6 +4742,12 @@ def _scrub_note(names: list[str], n: int) -> str:
     return f"{n} parts of this guide were left out because they matched your graded {who}. Ask for similar problems with different numbers instead."
 
 
+def _held_note(names: list[str]) -> str:
+    who = " and ".join(dict.fromkeys(names)) or "work"
+    return (f"This answer was held back and left out because it was too close to your graded {who}. "
+            "Ask for a similar problem with different numbers instead.")
+
+
 LAST_SCRUB_ITEMS: list[int] = []  # ids of the items the last scrub_parts call matched (for the Practice button)
 
 
@@ -4583,9 +4801,15 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
         else:
             out.append(seg)
     note = ""
+    cleaned = re.sub(r"\n{3,}", "\n\n", "".join(out))
     if n:
-        note = essay.SCRUBBED.strip("_") if all(k == "essay" for k in kinds) else _scrub_note(names, n)
-    return re.sub(r"\n{3,}", "\n\n", "".join(out)), n, note
+        if all(k == "essay" for k in kinds):
+            note = essay.SCRUBBED.strip("_")
+        elif not re.sub(r"^[ \t]*#{1,6}[ \t].*$|<[^>]*>", "", cleaned, flags=re.M).strip():
+            note = _held_note(names)  # nothing is left: say it was held back, once, not that the AI gave no answer
+        else:
+            note = _scrub_note(names, n)
+    return cleaned, n, note
 
 
 def scrub_markdown(store, course_id: int, text: str, question: str = "") -> tuple[str, int]:
