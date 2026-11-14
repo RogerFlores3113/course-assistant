@@ -4401,11 +4401,13 @@ def _trim_reply(graded: dict, kind: str, raw: str, question: str, problem_text: 
     def level(parts: list[str]) -> int:
         return _reply_leak_level(graded, kind, " ".join(parts), question, problem_text, sources)
 
+    collective = False
     for _ in range(len(sents)):
         if level(sents) == 0:
             break
         bad = [i for i, x in enumerate(sents) if len(x.split()) >= 4 and level([x]) > 0]
         if not bad:
+            collective = True
             # only together do the sentences finish the item: the ones the question did not ask about go, most of the
             # item's own words first; a sentence that answers what was asked (a formula) stays
             cands = [(len(content_tokens(x) & want), i) for i, x in enumerate(sents)
@@ -4416,6 +4418,10 @@ def _trim_reply(graded: dict, kind: str, raw: str, question: str, problem_text: 
             bad = [max(cands)[1]]
         sents = [x for i, x in enumerate(sents) if i not in bad]
         if not sents:
+            return ""
+    if collective:  # what stays answers what was asked: a sentence full of the item's words that the question did not ask about goes
+        sents = [x for x in sents if len(content_tokens(x) & qtok) >= 2 or len(content_tokens(x) & want) < 2]
+        if not any(len(content_tokens(x) & qtok) >= 2 for x in sents):
             return ""
     if level(sents) != 0 or not any(len(x.split()) >= 5 for x in sents):
         return ""
