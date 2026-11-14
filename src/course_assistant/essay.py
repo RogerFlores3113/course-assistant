@@ -185,6 +185,18 @@ def cited_restatement(sent: str, sources: list[Any] | None, threshold: float = 0
 
 
 # --------------------------------------------------------------------------- positions on the essay's own question
+def _loosely_covered(sent: str, sources: list[Any] | None) -> bool:
+    """A cited report of a source ('Madison argues in No. 10 that ...') whose cited chunk is about the same thing: it shares at
+    least three content words and 40 percent of the sentence's with the chunk (fx12). A chunk about something else never
+    clears it."""
+    ct = _ct(_CITE_STRIP.sub("", sent or ""))
+    for chunk in _cited_texts(sent, sources):
+        kt = _ct(chunk)
+        if len(ct & kt) >= 3 and ct and len(ct & kt) / len(ct) >= 0.4:
+            return True
+    return False
+
+
 def cited_soft_ok(sent: str, sources: list[Any] | None) -> bool:
     """A sentence with a [n] cite that a sticky chat may keep although it reads as soft essay prose: the cited chunk supports
     the sentence (see supported), or supports its explanatory clause ('X mattered to the debate because it made men of
@@ -466,6 +478,8 @@ def unwrap(sentence: str) -> tuple[str, bool]:
     if s[m.end():].lstrip()[:1] in "\"\u201c\u2018":
         return s, framed  # 'Your thesis: "..." is vague': the quoted words are judged by the quoted-span checks, not as a wrapper
     core = s[m.end():].strip().strip("\"“”'*_ ").rstrip("?").strip()
+    if re.match(r"^(?:what|which|whether|how|why|who|where|when)\b", core, re.I):
+        return s, framed  # 'Once you can say what he predicted, ...': an indirect question is coaching, not a claim (fx12)
     return (core, True) if core else (s, framed)
 
 
@@ -764,6 +778,9 @@ def labelled_core(sentence: str) -> str:
     mb = _TL_BE.match(s)  # 'You might say that X' is also a coaching frame: read the cue before the frame is stripped
     if mb and not _SPEAKER.match(s):
         return mb.group("rest").strip()
+    mo = _OPEN_LEAD.match(s)  # 'One way to begin: X', "If I were you I'd open with: X" (fx12)
+    if mo and not _OPEN_IMP.match(mo.group("rest")):
+        return mo.group("rest").strip()
     s = strip_frames(s)[0]
     m = _TL.match(s)
     if m:
@@ -995,6 +1012,10 @@ def _position_level(s: str, topic: set[str], ents: set[str] | None, source: str 
     lab = labelled_core(s)
     if lab and _labelled_position(lab, topic, ents, own):
         return 2, "position"  # 'Thesis idea: X', 'Your claim: X': a labelled thesis, even when every word is the draft's or the prompt's
+    if pick_position(s, topic, ents, own):
+        return 2, "position"  # 'Go with X as your thesis', 'You could argue for X': a pick and a named idea (fx12)
+    if contrast_verdict(s, topic, ents, own):
+        return 2, "position"  # 'X was right about A but wrong about B': a two-sided verdict on the essay's own question (fx12)
     if _BARE_VERDICT.match(_CITE_STRIP.sub("", s).strip().strip("\"“”'*_ ")):
         return 2, "verdict"  # 'Verdict: partly right.' answers the essay's own question in two words
     if not wrapped and not attributed(s) and not STRICT_COACH.search(s) and is_position(s, topic, ents):
@@ -1004,6 +1025,115 @@ def _position_level(s: str, topic: set[str], ents: set[str] | None, source: str 
     if foreign and _foreign_claim(s, topic, ents, source):
         return 2, "non-English essay prose"
     return 0, ""
+
+
+# --------------------------------------------------------------------------- fx12: opening lead-ins, picks, contrast verdicts
+# 'One way to begin: X', 'Your opening line could read: X', "I'd open with: X", "If I were you I'd open with: X": the clause after
+# the lead-in is the essay's own opening claim, so it is judged like a labelled thesis. An instruction after it ('ask yourself
+# which idea ...', 'list what each reading argues') is coaching.
+_OPEN_LEAD = re.compile(
+    r"^\W*(?:(?:and|but|so|now|okay|ok)[,\s]+)?(?:if\s+i\s+were\s+(?:you|in\s+your\s+(?:place|shoes))[,\s]+)?(?:"
+    r"(?:one|a|another|a\s+good|a\s+possible|a\s+simple|an\s+easy)\s+way\s+(?:to\s+)?(?:begin|open|start)(?:\s+(?:is|would\s+be|could\s+be|might\s+be))?|"
+    r"(?:your|the|a|my)\s+(?:possible\s+|sample\s+|first\s+|working\s+)?(?:opening|first|introductory|opener)(?:\s+(?:line|sentence|move))?"
+    r"\s+(?:could|might|would|can|may|should)\s+(?:read|be|say|go)|"
+    r"(?:i(?:'d|\s+would|'ll|\s+will)|you\s+(?:could|might|can|may))\s+(?:also\s+)?(?:open|begin|start)(?:\s+(?:with|by\s+saying))?|"
+    r"(?:sample|possible|example)\s+(?:opening|opener|introduction)(?:\s+(?:line|sentence))?)"
+    r"\s*(?::|\s[-–—]+\s|[–—])\s*(?P<rest>\S.*)$", re.I)
+_OPEN_IMP = re.compile(r"^\W*(?:ask|list|summari[sz]e|outline|sketch|read|re-?read|look|note|underline|identify|find|compare|review|"
+                       r"brainstorm|jot|write\s+down|name|decide|think|consider|try|check|pick\s+(?:two|three|one)|"
+                       r"with\s+(?:a|the)\s+(?:question|quote|summary|reading))\b", re.I)
+
+_GENERIC_IDEA = frozenset("change changes idea ideas option options choice choices side topic topics one reading readings evidence "
+                          "address take early widen ordinary read reader thing things way ways claim point answer".split())
+# a cue that hands over a pick or a thesis candidate: 'Go with X', 'Pick X', "I'd defend X", 'You could argue for X',
+# 'How about saying X', 'My pick would be X', 'Your thesis could be X', 'A reader might expect you to claim X'
+_PICK_CUE = re.compile(
+    r"^\W*(?:(?:so|and|well|okay|ok|honestly|maybe|perhaps|personally|then|now)[,\s]+)*(?:"
+    r"(?:i(?:'d|\s+would|'ll|\s+will)|you\s+(?:could|might|may|can|should)|let(?:'s|\s+us)|why\s+not|how\s+about|what\s+about)\s+)?"
+    r"(?:also\s+)?(?P<verb>go\s+with|going\s+with|pick|picking|choose|choosing|select|defend|defending|back|backing|"
+    r"argue\s+for|arguing\s+for|argue\s+in\s+favou?r\s+of|stick\s+with|run\s+with|bet\s+on|adopt|say(?:ing)?|claim(?:ing)?|argu(?:e|ing))"
+    r"\s+(?P<obj>\S.*)$|"
+    r"^\W*(?:my|our)\s+(?:pick|choice|vote|bet|call)\s+(?:would\s+be|is|will\s+be)\s+(?P<obj2>\S.*)$|"
+    r"^\W*(?:the\s+|a\s+)?(?:your|my|the|a)\s+(?:main\s+|central\s+|working\s+|best\s+)?(?:thesis|claim|position|argument|pick|answer)"
+    r"\s+(?:could|might|would|can|should|may|will|is)\s+be\s+(?P<obj3>\S.*)$|"
+    r"^\W*(?:a|the)\s+reader\s+(?:might|may|could)\s+expect\s+you\s+to\s+(?:claim|argue|say|conclude|pick|choose)\s+(?P<obj4>\S.*)$|"
+    r"^\W*(?:your|my|the|a)\s+(?:main\s+|central\s+|working\s+)?(?:thesis|claim|position|pick|answer)\s*(?::|[–—])\s*(?P<obj5>\S.*)$",
+    re.I)
+_PICK_REJECT = re.compile(r"^(?:(?:the|a|an)\s+)?(?:one|two|three|any|whichever|whatever|each|every|both|something|someone|your|you|it|"
+                          r"this|that|what|which|whether|how|why|more|at\s+least|a\s+side|a\s+position|a\s+claim|an\s+idea|"
+                          r"the\s+(?:idea|change|side|option|one|position)|yourself|with\s+(?:a|your))\b", re.I)
+
+
+def pick_position(sentence: str, topic: set[str], ents: set[str] | None, own: str = "") -> bool:
+    """A sentence that hands the student a pick: a pick or thesis cue plus a named candidate idea of the essay ('Go with
+    libraries as your thesis', 'You could argue for paperbacks', 'Your thesis could be X, because ...', 'Pick X.', 'How about
+    saying X?'). A cue plus no named idea ('Pick the idea you can defend'), a list of options ('Pick libraries, paperbacks or
+    night schools, whichever you can defend') and an honest question are not positions."""
+    s = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
+    s = re.sub(r"\*\*|__", "", s)
+    m = _ROLE_LABEL.match(s)
+    if m:
+        s = m.group("rest").strip()
+    s = strip_frames(s)[0]
+    if not s or honest_question(s) and not re.match(r"^\W*(?:why\s+not|how\s+about|what\s+about)\b", s, re.I):
+        return False
+    m = _PICK_CUE.match(s)
+    if not m:
+        return False
+    obj = next((m.group(k) for k in ("obj", "obj2", "obj3", "obj4", "obj5") if m.group(k)), "")
+    claimy = bool(m.group("verb") and re.match(r"(?:say|claim|argu)", m.group("verb"), re.I)) or bool(m.group("obj4")) or bool(m.group("obj3"))
+    o = re.sub(r"^(?:that|for|in\s+favou?r\s+of|on|with|as)\s+", "", obj.strip().strip("\"“”'*_ "), flags=re.I)
+    o = re.sub(r"^(?:saying|arguing|claiming|going\s+with|that)\s+", "", o, flags=re.I)
+    if not o or _PICK_REJECT.match(o):
+        return False
+    head = re.split(r"[,;.!?:—]|\s+(?:because|since|as|so|which|while|for|then|but|and|if|when)\s+", o, maxsplit=1, flags=re.I)[0].strip()
+    if not head or len(head.split()) > (8 if claimy else 5) or _PICK_REJECT.match(head):
+        return False
+    if _about_writing(head) or _META.search(head) and not _ct(head) & (topic | (ents or set())) - _GENERIC_IDEA:
+        return False
+    pool = (topic | (ents or set())) - _GENERIC_IDEA - _NAMED_STOP
+    named = {t for w in re.findall(r"[\w'’-]+", head) if not _META.search(w) for t in (_ct(w) & pool)}
+    if not named:
+        return False
+    if re.search(r"\bor\b", o, re.I):  # 'Pick libraries, paperbacks or night schools': a list of the options, not a pick
+        listed = {t for w in re.findall(r"[\w'’-]+", o) if not _META.search(w) for t in (_ct(w) & pool)}
+        if len(listed) >= 2:
+            return False
+    if own and len(head.split()) >= 7 and quote_ratio(head, own) >= 0.5:
+        return False
+    return True
+
+
+# 'X was right about A but wrong about B', 'worked on paper but not in practice', 'only partly right': a verdict on the essay's own
+# question that gives both sides. It is the essay's position whether or not a cue comes before it.
+_CONTRAST = re.compile(
+    r"\b(?:right|correct|accurate|sound|true|valid|successful|succeeded|worked|works|held|holds|fit|fits|predicted|diagnosed|"
+    r"anticipated|foresaw|controlled|solved|mattered|helped)\b[^.?!]{0,70}\b(?:but|yet|though|although|whereas|while)\b[^.?!]{0,70}"
+    r"\b(?:wrong|incorrect|mistaken|inaccurate|failed|fails|missed|misjudged|fell\s+short|not|never|didn't|did\s+not|couldn't|"
+    r"could\s+not|still|no\s+longer)\b|"
+    r"\b(?:on\s+paper|in\s+theory|in\s+principle)\b[^.?!]{0,50}\b(?:but|yet)\b[^.?!]{0,50}\b(?:not|never|failed|fell|still|no)\b|"
+    r"\bworked\s+(?:on\s+paper|in\s+theory|in\s+principle)\b|"
+    r"\b(?:only\s+)?(?:partly|partially|half|mostly|largely|somewhat|in\s+part)\s+(?:right|wrong|correct|true|mistaken|successful|"
+    r"accurate)\b|\bhalf[- ](?:right|wrong)\b|"
+    r"\b(?:right|correct)\s+about\b[^.?!]{0,60}\b(?:wrong|mistaken|incorrect)\s+about\b", re.I)
+
+
+def contrast_verdict(sentence: str, topic: set[str], ents: set[str] | None, own: str = "") -> bool:
+    """One declarative sentence about the essay's subject that gives a two-sided verdict ('Libraries were right about access
+    but wrong about cost', 'worked on paper but not in practice', 'only partly right'). A report of a source ('Madison
+    argues ...'), a question, a sentence about the writing and an instruction are not positions."""
+    c = _CITE_STRIP.sub("", sentence or "").strip().strip("\"“”'*_ ")
+    c = strip_frames(c)[0].rstrip("?!. ").strip()
+    if len(c.split()) < 4 or "?" in sentence or not _CONTRAST.search(c):
+        return False
+    if re.search(r"\bwhether\b|\bright\s+or\s+wrong\b|\bwrong\s+or\s+right\b", c, re.I):
+        return False
+    if STRICT_COACH.search(c) or _about_writing(c) or _talks_about_writing(c, topic, ents) or imperative_coaching(c, topic, ents) \
+            or _COACH_IMP.search(c) or attributed(c) or not_covered(c) or restates_task(c):
+        return False
+    if own and len(c.split()) >= 7 and quote_ratio(c, own) >= 0.5:
+        return False
+    return bool(_ct(c) & ((topic | (ents or set())) - _GENERIC_IDEA - _NAMED_STOP))
 
 
 def _claims_before_modal(s: str) -> bool:
@@ -1051,9 +1181,13 @@ def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, s
     if not_covered(s) or restates_task(s):  # "The materials I searched do not show this term's style"; "The prompt asks how far ..."
         return 0, ""
     if ents is not None and span == "plain":
-        lab = labelled_core(trim_tail(_CITE_STRIP.sub("", sent).strip()))
-        if lab and _role_note(sent, sources) is False and _labelled_position(lab, topic, ents, own):
+        bare = trim_tail(_CITE_STRIP.sub("", sent).strip())
+        lab = labelled_core(bare)
+        if lab and _labelled_position(lab, topic, ents, own) and (
+                _role_note(sent, sources) is False or contrast_verdict(lab, topic, ents, own)):
             return 2, "position"  # a thesis label or a hedged cue ('Try framing it as: X'): a cite never excuses it
+        if pick_position(bare, topic, ents, own):
+            return 2, "position"  # a pick cue and a named idea ('Go with X as your thesis'): a cite never excuses it (fx12)
     if imperative_coaching(s, topic, ents):  # "Then pick two examples and ask what each one shows"
         return 0, ""
     if cited and attributed(s):  # "Madison argues ..." with a cite: fine when the cited passage says it
@@ -1088,9 +1222,10 @@ def _classify(sent: str, span: str, topic: set[str], source: str, asked: bool, s
         return 2, "essay prose"
     if span in ("quoted", "colon") and shared >= 2 and (ARGUE.search(s) or EVAL.search(s)):
         return 2, "quoted sentence"
-    if plain and not cited and attributed(s) and not _VERDICT_WORDS.search(s) and not THESIS_CUE.search(s):
+    if plain and attributed(s) and not _VERDICT_WORDS.search(s) and not THESIS_CUE.search(s) and (
+            not cited or sources is None or _loosely_covered(sent, sources)):
         return soft  # 'Federalist No. 10 argues that a large republic can control faction': background on the reading, no verdict
-    if plain and shared >= 2 and (ARGUE.search(s) if asked else EVAL.search(s)):
+    if plain and shared >= 2 and (_ARGUE_NB.search(s) if asked else EVAL.search(s)):
         return 1, "argument"
     if plain and loose and shared >= 3:
         return 1, "answer"
@@ -1136,8 +1271,8 @@ def _dialogue_hit(text: str, topic: set[str], ents: set[str] | None, source: str
     return ("transcript position", hit) if hit else ("", "")
 
 
-def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = False,
-         sources: list[Any] | None = None, loose: bool | None = None) -> tuple[int, str, str]:
+def _find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = False,
+          sources: list[Any] | None = None, loose: bool | None = None) -> tuple[int, str, str]:
     """(level, reason, sentence). 0 fine, 1 soft (an argumentative on-topic sentence or paragraph), 2 hard (a thesis or
     conclusion cue, a labelled body paragraph, a quoted or colon-introduced finished sentence). Any tense; no opening
     cue is needed; cited restatements of a source are fine."""
@@ -1214,6 +1349,19 @@ def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = 
         elif asked and shared >= 2 and best[0] < 1 and not is_short_answer(it):  # short answers: short_answer_hit
             best = (1, "body paragraph", trig[:200])
     return best
+
+
+def _tidy(sentence: str) -> str:
+    """A matched sentence as it reads in a refusal: no space left in front of its closing punctuation (a citation marker
+    that sat before the full stop leaves 'example .')."""
+    return re.sub(r"\s+([.!?,;:])", r"\1", sentence or "").strip()
+
+
+def find(it: dict[str, Any], text: str, question: str = "", force_asked: bool = False,
+         sources: list[Any] | None = None, loose: bool | None = None) -> tuple[int, str, str]:
+    """(level, reason, sentence); see _find. The sentence is tidied for a refusal message."""
+    lvl, why, sent = _find(it, text, question, force_asked, sources, loose)
+    return lvl, why, _tidy(sent)
 
 
 # 'because' alone is history, not a verdict ('It was put down by a militia because the state had no money'); the other connectives
@@ -1331,7 +1479,7 @@ _SA_ANSWER = re.compile(r"\b(?:because|since|therefore|thus|rather\s+than|instea
 _PRESCRIBE = re.compile(
     r"\b(?:your|the|a(?:\s+(?:good|full|complete|strong|model))?)\s+(?:answer|response|explanation|reply)\s+"
     r"(?:should|must|needs?\s+to|will|would|could)\s+(?:say|state|explain|mention|note|include|give|argue|be)\b|"
-    r"\b(?:start|begin|open|lead)\s+(?:with|by)\b[^.]{0,40}\b(?:sentence|saying|stating|explaining|noting)\b|"
+    r"\b(?:start|begin|open|lead)\s+(?:with|by)\b[^.]{0,40}\b(?:(?:a|one)\s+sentence\s+(?:saying|stating|explaining|noting|that\s+(?:says|states|explains))|saying|stating|explaining|noting)\b|"
     r"\b(?:a|one)\s+sentence\s+(?:saying|stating|explaining|noting|that\s+says)\b|\bsay(?:ing)?\s+that\b|\bwrite\s+that\b", re.I)
 _SA_STOP = frozenset("explain describe sentences sentence problem started question questions give state answer three two "
                      "one use using each how why what which when would could might should must rather than".split())
@@ -1481,6 +1629,54 @@ def _thesis_card_claim(it: dict[str, Any], front: str, back: str, source_text: s
     return ""
 
 
+# fx12: the gate judges a card's front and back together, whatever the front's wording ('What should Essay 2 argue?', 'Federalist
+# essay: main claim', 'Essay thesis: which idea is most important?') and with or without final punctuation.
+_PAIR_FRONT = re.compile(
+    r"\b(?:essay|paper)\s*#?\s*\d*\b|\b(?:thesis|position|stance|verdict)\b|\bmain\s+(?:claim|argument|point)\b|"
+    r"\bwhich\s+(?:idea|change|option|topic|approach|side)\b[^?]*\b(?:most|best|matters?)\b|\bmost\s+important\b|"
+    r"\bshould\s+(?:i|we|you|the\s+\w+)\s+(?:argue|claim|defend|pick|choose|say)\b", re.I)
+_PAIR_STRONG = re.compile(
+    r"\b(?:thesis|position|stance|verdict|claim|argue|defend|pick|choose)\b|\bmain\s+(?:claim|argument|point)\b|"
+    r"\bmost\s+important\b|\bwhich\s+(?:idea|change|option|topic|approach|side)\b[^?]*\b(?:most|best|matters?)\b|\bbest\s+(?:idea|answer)\b", re.I)
+_PAIR_REQ = re.compile(r"\b(?:need|needs|require|requires|required|requirements?|rubric|worth|points|graded|grading|due|length|"
+                       r"criteria|criterion|look\s+like)\b", re.I)
+_ENUM = re.compile(r"^[\w'’ -]{1,30}(?:,\s*[\w'’ -]{1,30}){1,}(?:,?\s+(?:and|or)\s+[\w'’ -]{1,30})?$|^[\w'’ -]{1,30}\s+(?:and|or)\s+[\w'’ -]{1,30}$", re.I)
+_CONCEPT_FRONT = re.compile(r"^\W*(?:what|how|why|when|who)\b[^?]*\b(?:an?|the)\s+(?:\w+\s+){0,2}(?:thesis|claim|position|stance|"
+                            r"argument|essay)\b(?![^?]*\b(?:my|our|your|essay\s*#?\d+)\b)", re.I)
+
+
+def _pair_card_claim(it: dict[str, Any], front: str, back: str, source_text: str = "") -> str:
+    """The back of a card whose front and back together hand over the essay's position: a front about the essay (or its
+    thesis, claim, pick) and a back that is a claim about the subject, or, under a front that asks for the thesis or the most
+    important idea, a bare candidate idea ('Elimination.'). Requirement cards and cards about what a thesis is never match."""
+    if not _PAIR_FRONT.search(front or "") or _PAIR_REQ.search(front or "") or _CONCEPT_FRONT.match(front or ""):
+        return ""
+    strong = bool(_PAIR_STRONG.search(front or ""))
+    if not strong:
+        return ""
+    topic, ents = topic_tokens(it), entities(it)
+    own = f"{it.get('body', '')} {it.get('title', '')}"
+    pool = (topic | ents) - _GENERIC_IDEA - _NAMED_STOP
+    for line in re.split(r"\n+", back or ""):
+        for sent in _split_sentences(line):
+            s = trim_tail(_CITE_STRIP.sub("", sent).strip().strip("\"“”'*_ "))
+            s = re.sub(r"^(?:that|this)\s+", "", strip_frames(s)[0], flags=re.I).rstrip("?!. ").strip()
+            words = len(s.split())
+            if words < 1 or "?" in sent or _about_writing(s) or not_covered(s) or _REQ_BACK.search(s) or attributed(s):
+                continue
+            if quote_ratio(s, own) >= 0.5 or (source_text and (quote_ratio(s, source_text) >= 0.5 or supported(s, source_text))):
+                continue
+            if _ENUM.match(s) and not re.search(r"\b(?:was|were|is|are|did|do|does|had|has)\b", s, re.I):
+                continue  # a list of the options ('Libraries, paperbacks, night schools') names no pick
+            if words <= 4 and not _META.search(s):
+                named = {t for w in re.findall(r"[\w'’-]+", s) for t in (_ct(w) & pool)}
+                if named and len(re.findall(r"\bor\b|,", s)) == 0:
+                    return s  # a bare candidate idea under a thesis front ('Elimination.')
+            if words >= 2 and (_labelled_position(s, topic, ents, own) or contrast_verdict(s, topic, ents, own)):
+                return s
+    return ""
+
+
 _THESIS_NOUN = r"(?:thesis|position|claim|stance|main\s+argument|central\s+argument|conclusion)"
 _OWNED_THESIS_FRONT = re.compile(
     rf"\b(?:my|our|your)\s+(?:[\w'-]+\s+){{0,2}}{_THESIS_NOUN}\b|\b(?:essay|paper)\s*#?\d*(?:'s)?\s+{_THESIS_NOUN}\b|"
@@ -1537,7 +1733,7 @@ def card_hit(store, course_id: int, front: str, back: str, source_text: str = ""
                 break
             if not short:
                 sent = _card_claim(it, back, source_text) or _thesis_card_claim(it, front, back, source_text) \
-                    or _thesis_named_card(it, front, back, source_text)
+                    or _thesis_named_card(it, front, back, source_text) or _pair_card_claim(it, front, back, source_text)
                 if sent:  # a position on an open prompt ('Which idea matters most? X, because ...')
                     hits.append((len(_ct(sent) & topic_tokens(it)) + 1, dict(integrity._hit(it, "card"), sentence=sent)))
                     break
@@ -2041,3 +2237,15 @@ def guide_kind_label(guide: dict[str, Any] | None, default: str) -> str:
 
 SCRUBBED = ("_A part of this guide was left out because it read like finished writing for your graded work. Ask what the "
             "assignment and rubric reward, or paste your own draft for feedback._")
+
+
+def graded_notice_tail(items: list[dict[str, Any]]) -> str:
+    """The last sentence of the 'Marked as graded' notice. An essay is explained and coached, never written, and gets no twin;
+    problems get practice problems with different numbers; with nothing found yet the wording fits either."""
+    from . import integrity
+    kinds = {integrity._item_kind(i) for i in items or []}
+    if kinds and kinds <= {"essay"}:
+        return "The app will explain and coach, never write it for you."
+    if kinds and "essay" in kinds:
+        return "The app will explain and coach on essays and write practice problems for the rest, never solve or write it for you."
+    return "The app will explain and write practice problems, never solve it."

@@ -71,6 +71,11 @@ def _mod(name: str):
         raise _Missing(name) from e
 
 
+def _graded_tail(items: list[dict[str, Any]]) -> str:
+    from . import essay
+    return essay.graded_notice_tail(items)
+
+
 def health_proof(key: str, nonce: str, port: int) -> str:
     """HMAC-SHA256 proof for /api/health, same scheme as Talent Search with this app's labels:
     subkey = HMAC(key, "course-assistant:health"); proof = hex HMAC(subkey, "course-assistant-health:<port>:" + nonce)."""
@@ -878,9 +883,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
                 more = f" and {len(items) - 8} more" if len(items) > 8 else ""
                 note = (f"Marked {m['title']} as graded work. The app found {len(items)} graded "
                         f"item{'s' if len(items) != 1 else ''} to protect: {labels}{more}. Check the list below the "
-                        "materials and fix anything it got wrong. The app will explain and write twin problems, never solve it.")
+                        "materials and fix anything it got wrong. " + _graded_tail(items))
             else:
-                note = (f"Marked {m['title']} as graded work. The app will explain and write twin problems, never solve it.")
+                note = f"Marked {m['title']} as graded work. {_graded_tail([])}"
         else:
             store.update_material(material_id, graded=0)
             removed = 0

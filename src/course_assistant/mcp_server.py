@@ -648,6 +648,7 @@ def add_flashcards(course_id: int, cards: list[dict[str, Any]], deck: str = "") 
         card_src.append(src)
     gate = getattr(_integrity(), "check_card", None)
     from . import essay
+    refused: list[tuple[int, dict]] = []
     for i, (front, back, cid, _) in enumerate(clean, 1):
         hit = (gate(st, c["id"], front, back, source=card_src[i - 1]) if card_src[i - 1] else gate(st, c["id"], front, back)) if gate else None
         if not hit:  # an essay thesis or conclusion, or a finished answer to a short-answer item
@@ -655,10 +656,15 @@ def add_flashcards(course_id: int, cards: list[dict[str, Any]], deck: str = "") 
             hit = essay.card_hit(st, c["id"], front, back, src)
         if hit:
             _log("add_flashcards_refused", {"course_id": c["id"], "card": i}, f"graded: {hit.get('title')}")
+            refused.append((i, hit))
+    if refused:  # every refused card is named, so the AI app fixes them in one call
+        parts = []
+        for i, hit in refused:
             what = ("a thesis, position, conclusion or finished answer" if hit.get("kind") == "essay"
                     else "its final answer or its own numbers")
-            return (f"NOT ADDED: card {i} gives away graded item '{hit.get('label') or hit.get('title')}' ({what}). "
-                    "No cards were added. Make cards about the concepts instead, then call add_flashcards again.")
+            parts.append(f"card {i} gives away graded item '{hit.get('label') or hit.get('title')}' ({what})")
+        return ("NOT ADDED: " + "; ".join(parts) + ". No cards were added. "
+                "Make cards about the concepts instead, then call add_flashcards again.")
     ids = [st.add_flashcard(c["id"], f, b, deck=d, chunk_id=cid, source_label=lab, created_by="ai_app")
            for f, b, cid, lab in clean]
     result = f"Added {len(ids)} flashcard(s). Review them: {_link('/flashcards/' + str(c['id']))}"

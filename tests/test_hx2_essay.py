@@ -156,7 +156,8 @@ def test_the_same_sentences_with_cites_the_chunks_do_not_back_are_still_held():
     assert integrity.check_reply(s, c, Q, wrong, force_item=it, sources=SRC)
     wrong2 = "Madison's remedy for faction was only partly successful because the parties of the 1790s formed anyway [1]."
     assert integrity.check_reply(s, c, Q, wrong2, force_item=it, sources=SRC)
-    uncited = HONEST_STICKY[0].replace(" [1]", "")
+    # fx12: an uncited causal closer ('... mattered because ...') is history, not a verdict; an uncited verdict is still held
+    uncited = "Shays' Rebellion proved that the Articles had failed, because it made men of property fear anarchy."
     assert integrity.check_reply(s, c, Q, uncited, force_item=it, sources=SRC)
 
 
