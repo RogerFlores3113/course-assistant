@@ -301,3 +301,39 @@ def test_d9_triangular_system_look_alikes_pass(r):
     st = dict(s.graded_item(ia), kind="problem", reason="sticky", source="item", score=1.0)
     assert integrity.check_reply(s, c, "how does elimination end?", r, force_item=st) is None
     assert integrity.check_guide(s, c, "Notes", r) is None
+
+
+# ------------------------------------------------------------------ decision 9: part references
+NEW_PART_FORMS = ["hw 3a", "HW3a", "hw3 b", "3 b what is x", "3-b", "homework 3b", "pset 3 b", "Problem three b", "problem 3 b"]
+
+
+@pytest.mark.parametrize("q", NEW_PART_FORMS)
+def test_d9_part_forms_with_spaces_hyphens_and_hw_prefixes_resolve(q):
+    s, c, ids = w9b(essay=False)
+    s.add_graded_item(c, "Problem Set 4: Problem 3(b)", "Problem 3(b). Say what a pivot is.", None, kind="problem", label="Problem 3(b)")
+    pairs = integrity._prob_pairs(q)
+    want = "a" if q.lower().replace(" ", "").endswith("3a") else "b"
+    assert ("3", want) in pairs, (q, pairs)
+
+
+@pytest.mark.parametrize("q,num", [("number 1", "1"), ("the third problem", "3"), ("What is the fourth question about?", "4"),
+                                   ("Problem set 2 number 3", "3"), ("ps2 1", "1"), ("pset 2 2", "2")])
+def test_d9_number_ordinal_and_set_forms_name_a_problem(q, num):
+    assert num in integrity._prob_refs(q), q
+
+
+@pytest.mark.parametrize("q", ["I need 5g of salt for 3d printing", "hw 3 is due Friday", "ps2 10 points late", "pset 2 3 hours",
+                               "She has a 3 a.m. shift", "the third term of the series",
+                               "phone number five", "Homework 2 is hard"])
+def test_d9_part_form_look_alikes_name_no_problem(q):
+    pairs = integrity._prob_pairs(q)
+    assert not [x for x in pairs if x[1]] and not pairs, (q, pairs)
+
+
+def test_d9_ps2_1_resolves_to_the_item_with_a_label(tmp_path):
+    s, c = set_world(tmp_path)
+    for t in s.graded_items(c):
+        pass
+    m = integrity.match_graded(s, c, "ps3 1")
+    assert m and m.get("id") and "NaCl" in m["body"]
+    assert m.get("label") or m.get("title")

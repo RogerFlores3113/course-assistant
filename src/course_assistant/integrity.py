@@ -964,17 +964,54 @@ def score_text(q: _Text, b: _Text) -> float:
     return max(score, ov)
 
 
+# 'hw 3a', 'HW3a', 'hw3 b', 'pset 3 b': problem 3 part b of the homework, not homework number 3
+_DOC_PART = re.compile(r"\b(?:hw|homework|pset|ps|p-set|problem set|assignment)\s*#?\s*(\d{1,2})\s*[-.]?\s*\(?([a-h])\)?(?![A-Za-z0-9])", re.I)
+# 'ps2 1', 'hw 2 number 3': the set, then a problem number that is no quantity
+_DOC_THEN_NUM = re.compile(r"\b(?:hw|homework|pset|ps|p-set|problem set)\s*#?\s*\d{1,2}\s+#?(\d{1,2})\b(?![\d.]|\s*(?:points?|pts|%|hours?|hrs?|days?|weeks?|pages?|"
+                           r"words?|minutes?|mins?|[ap]\.?m\b|st\b|nd\b|rd\b|th\b|[:/]\d|-\d))", re.I)
+_NUMBER_REF = re.compile(r"\b(?:number|no\.?|num)\s*#?\s*(\d{1,2})(?:\s*\(?([a-d])\)?(?![A-Za-z0-9]))?(?![\d.])", re.I)
+_ORD_NUM = {"first": "1", "1st": "1", "second": "2", "2nd": "2", "third": "3", "3rd": "3", "fourth": "4", "4th": "4", "fifth": "5",
+             "5th": "5", "sixth": "6", "6th": "6", "seventh": "7", "7th": "7", "eighth": "8", "8th": "8", "ninth": "9", "9th": "9",
+             "tenth": "10", "10th": "10"}
+_ORD_REF = re.compile(r"\b(?:the\s+)?(" + "|".join(_ORD_NUM) + r")\s+(?:problem|question|exercise)\b", re.I)
+_NUM_WORD = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10"}
+_NUM_WORD_REF = re.compile(r"\b(problem|question|exercise|prob)\s+(" + "|".join(_NUM_WORD) + r")\b", re.I)
+_HYPHEN_PART = re.compile(r"(?<![\w.#/\-])(\d{1,2})-([a-d])\b(?![\w-])", re.I)
+_SPACED_PART = re.compile(r"\b(?:problem|question|exercise|prob|q)\s*\.?\s*#?\s*(\d{1,2})\s+([b-d])\b(?![\w'])", re.I)
+_START_PART = re.compile(r"^\W*(\d{1,2})\s+([b-d])\b(?![\w'])", re.I)
+
+
 def _doc_refs(text: str) -> set[tuple[str, str]]:
-    text = re.sub(r"[-_]+", " ", text or "")
+    text = _DOC_PART.sub(" ", text or "")
+    text = re.sub(r"[-_]+", " ", text)
     return {(DOC_GROUPS[m.group(1).lower()], m.group(2).lstrip("0") or "0") for m in _DOC_REF.finditer(text)}
 
 
 def _prob_pairs(text: str) -> set[tuple[str, str]]:
     """(problem number, part letter or '') for every problem reference: 'Problem 3', '3b', '3(b)', 'q3b', '#3b', '3.b'."""
-    text = re.sub(r"[-_]+", " ", text or "")
+    raw = text or ""
+    out: set[tuple[str, str]] = set()
+    for m in _HYPHEN_PART.finditer(raw):
+        if not _NOT_PART_CTX.search(raw[max(0, m.start() - 14):m.start()]):
+            out.add((m.group(1), m.group(2).lower()))
+    for m in _DOC_PART.finditer(raw):
+        out.add((m.group(1), m.group(2).lower()))
+    for m in _DOC_THEN_NUM.finditer(raw):
+        out.add((m.group(1), ""))
+    for m in _SPACED_PART.finditer(_NUM_WORD_REF.sub(lambda k: f"{k.group(1)} {_NUM_WORD[k.group(2).lower()]}", raw)):
+        out.add((m.group(1), m.group(2).lower()))
+    m = _START_PART.match(raw)
+    if m:
+        out.add((m.group(1), m.group(2).lower()))
+    for m in _ORD_REF.finditer(raw):
+        out.add((_ORD_NUM[m.group(1).lower()], ""))
+    stripped = _DOC_REF.sub(" ", _DOC_PART.sub(" ", raw))  # 'problem set 2 number 3': the 2 names the set, the 3 the problem
+    for m in _NUMBER_REF.finditer(_NUM_WORD_REF.sub(lambda k: f"{k.group(1)} {_NUM_WORD[k.group(2).lower()]}", stripped)):
+        out.add((m.group(1), (m.group(2) or "").lower()))
+    text = _NUM_WORD_REF.sub(lambda k: f"{k.group(1)} {_NUM_WORD[k.group(2).lower()]}", raw)
+    text = re.sub(r"[-_]+", " ", text)
     # drop "problem set 2" style phrases so the 2 is not read as a problem number
     text = re.sub(r"\bproblem set\s*\d+", " ", text, flags=re.I)
-    out: set[tuple[str, str]] = set()
     for m in _PROB_REF.finditer(text):
         g = m.groups()
         if g[0]:
