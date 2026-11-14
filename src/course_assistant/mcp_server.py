@@ -570,9 +570,15 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
         from . import essay
         hit = essay.guide_hit(st, c["id"], t, b, quote_sources)
         if hit:
+            try:
+                _it0 = next((i for i in _integrity().graded_view(st, c["id"]) if i.get("id") == hit.get("id")), None)
+                _all = essay.matched_sentences(_it0, b, t, quote_sources) if _it0 else []
+            except Exception:  # noqa: BLE001
+                _all = []
+            _named = "; ".join(f"\"{x.strip()[:200]}\"" for x in (_all or [hit.get("sentence") or ""]))
             return (f"NOT SAVED: this guide writes part of graded item '{hit.get('label') or hit.get('title')}' "
-                    f"(a thesis, position, outline, paragraph or finished answer). The sentence that matched: "
-                    f"\"{(hit.get('sentence') or '')[:200]}\". Write concepts, what the assignment and rubric ask for, "
+                    f"(a thesis, position, outline, paragraph or finished answer). The sentence{'s' if len(_all) > 1 else ''} that matched: "
+                    f"{_named}. Write concepts, what the assignment and rubric ask for, "
                     "and questions the student can ask themselves, citing the materials; no sentence the student could "
                     "submit. Then call save_guide again.")
     if hit and hit.get("kind") == "essay":  # name the sentence that judges, not the background that shares words with the prompt
@@ -586,6 +592,18 @@ def save_guide(course_id: int, kind: str, title: str, body: str, cited_chunk_ids
             hit = dict(hit, sentence=_sent)
     if hit:
         _log("save_guide_refused", {"course_id": c["id"], "kind": kind, "title": t}, f"graded: {hit.get('title')}")
+        if hit.get("kind") == "essay":  # an essay has no numbers to change: name every sentence that matched, never a 'twin'
+            try:
+                _it = next((i for i in _integrity().graded_view(st, c["id"]) if i.get("id") == hit.get("id")), None)
+                sents = _essay.matched_sentences(_it, b, t, quote_sources) if _it else []
+            except Exception:  # noqa: BLE001
+                sents = []
+            sents = sents or ([hit["sentence"]] if hit.get("sentence") else [])
+            named = "; ".join(f"\"{x.strip()[:200]}\"" for x in sents)
+            return (f"NOT SAVED: this guide gives away part of graded essay '{hit.get('label') or hit.get('title')}'"
+                    + (f". The sentence{'s' if len(sents) > 1 else ''} that matched: {named}" if named else "")
+                    + ". Remove or rewrite them: write concepts, what the assignment and rubric ask for, and questions the "
+                    "student can ask themselves, citing the materials. Then call save_guide again.")
         sent = (hit.get("sentence") or "").strip()
         sent = (sent[:200] + "...") if len(sent) > 200 else sent
         return (f"NOT SAVED: this guide gives away graded item '{hit.get('label') or hit.get('title')}'"
