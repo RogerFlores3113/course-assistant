@@ -131,7 +131,7 @@ def test_concept_map_page_p4(ready):
     t = ready.client.get(f"/guides/{gid}").text
     assert 'role="img"' in t and "aria-hidden" not in t.split("<svg")[1].split(">")[0] and "text list above" in t
     assert 'marker-end="url(#arrow)"' in t and "<marker" in t and "implies" in t
-    tree = t.split('<ul class="tree">')[1].split('<div class="mapwrap">')[0]
+    tree = t.split('<ul class="tree">')[1].split('<div class="mapwrap"')[0]
     assert tree.count("Not from your materials") == 2  # the uncited tree edge and the uncited back link
     assert 'aria-label="Source 2: Notes, p. 2"' in tree and 'aria-label="Source 3: Notes, p. 3"' in tree
     assert "Other links between concepts" in tree and tree.count("cross link") == 1

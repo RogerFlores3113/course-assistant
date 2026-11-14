@@ -580,7 +580,7 @@ def answer_view(body_md: str, sources: list[dict[str, Any]] | None, *, blocks: l
           for b in raw]
     any_cited = any(b.cites for b in gb)
     # the saved flag counts only when nothing is cited; a cited answer that ends "your materials don't list more" is covered
-    not_covered = bool(raw) and not data.get("held_back") and (grounding.is_not_covered(gb, len(sources)) or (bool(data.get("not_covered")) and not any_cited))
+    not_covered = bool(raw) and not data.get("held_back") and not any_cited and (grounding.is_not_covered(gb, len(sources)) or bool(data.get("not_covered")))  # cited content is never "not covered"
     has_outside = any(b["kind"] == "outside" for b in raw)
     partly = any_cited and any(b["kind"] == "text" and (grounding.has_uncited_gap(b["md"])
                                                          or (not grounding.cited_numbers(b["md"]) and grounding.says_gap(b["md"])))

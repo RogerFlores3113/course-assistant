@@ -978,8 +978,8 @@ _CAUTION = re.compile(
     r"\b(?:check|confirm|verify|look)\b", re.I)
 # two facts already cited, set side by side ("That is one fewer exam than Fall 2018")
 _COMPARISON = re.compile(
-    r"^\W*(?:that|this|it|so|which|these|those|both|the\s+two)\b[^.!?]*\b(?:fewer|more|less|earlier|later|longer|"
-    r"shorter|higher|lower|bigger|smaller|larger|than|same\s+as|different\s+from|differs?|compared|unlike|similar)\b", re.I)
+    r"^\W*(?:that|this|it|so|which|these|those|both|the\s+two)\b[^.!?]*\b(?:than|same\s+as|different\s+from|"
+    r"differs?|compared|unlike|similar)\b", re.I)  # a bare "larger" or "more" is a claim, not a comparison
 # feedback on the student's own draft or proof, and what the assignment asks of it
 _ABOUT_DRAFT = re.compile(
     r"^\W*(?:you|your|you're|you've)\b|^\W*(?:the|this)\s+draft\b|"

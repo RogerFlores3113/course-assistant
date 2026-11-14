@@ -28,7 +28,7 @@ MAP = {"nodes": [{"id": "p", "label": "Matrix powers", "cites": [1]}, {"id": "f"
 
 def tree_html(ready, data):
     gid = ready.store.add_guide(ready.cid, "concept_map", "Map", "", sources=sources(4), data=data)
-    return ready.client.get(f"/guides/{gid}").text.split('<ul class="tree">')[1].split('<div class="mapwrap">')[0]
+    return ready.client.get(f"/guides/{gid}").text.split('<ul class="tree">')[1].split('<div class="mapwrap"')[0]
 
 
 def test_chain_lines_name_the_parent_concept(ready):
