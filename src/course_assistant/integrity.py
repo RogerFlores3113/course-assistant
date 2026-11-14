@@ -2106,10 +2106,29 @@ def _toks(seg: str) -> list[str]:
     return [t for t in re.split(r"[,;&\s]+", seg.strip()) if t]
 
 
+_GREEK_NAMES = {"\u03bb": "lambda", "\u03bc": "mu", "\u03c3": "sigma", "\u03c1": "rho", "\u03b1": "alpha", "\u03b2": "beta"}
+_ORD_INDEX = {"first": "1", "second": "2", "third": "3", "fourth": "4", "1st": "1", "2nd": "2", "3rd": "3", "4th": "4"}
+_KEY_NAME = re.compile(r"^\s*(?:(?P<ord>first|second|third|fourth|1st|2nd|3rd|4th)\s+)?(?:the\s+)?"
+                       r"(?P<w>[A-Za-z\u03bb\u03bc\u03c3\u03c1\u03b1\u03b2]{1,14})(?:\s*_?\{?\s*(?P<i>\d{1,2})\}?)?\s*(?=[=:\u2248])")
+
+
+def _canon_key_name(t: str) -> str:
+    """The key entry with its name in one shape: 'lambda 1 = 3', '\u03bb1 = 3', 'x_1 = 3', 'eigenvalue 1 = 3' and 'first
+    eigenvalue = 3' all read as 'lambda1 = 3', 'x1 = 3', 'eigenvalue1 = 3' (the index belongs to the name, never to the value)."""
+    m = _KEY_NAME.match(t)
+    if not m:
+        return t
+    word = "".join(_GREEK_NAMES.get(ch, ch) for ch in m.group("w")).lower()
+    idx = m.group("i") or _ORD_INDEX.get((m.group("ord") or "").lower(), "")
+    if m.group("ord") and m.group("i"):
+        return t
+    return word + idx + " " + t[m.end():]
+
+
 class _KeyVal:
     def __init__(self, raw: str):
         self.raw = raw
-        t = _norm_hay(raw).strip()
+        t = _canon_key_name(_norm_hay(raw).strip())
         m = re.match(r"^([A-Za-z][A-Za-z]*\d*(?:\([^)]*\))?)\s*(?:=|:|\u2248)\s*(.+)$", t, re.S)
         self.name = (re.sub(r"\(.*", "", m.group(1)).lower() if m else "")
         body = (m.group(2) if m else t).strip().rstrip(".")
@@ -2648,10 +2667,48 @@ def _build_index(raws: tuple[str, ...], body: str) -> _Index:
              for i in range(1, n + 1) if i in cval and all((i, j) in ucell for j in range(i, n + 1))]
     if n >= 3 and srows:  # the triangular system [U | c]: its rows are answer rows even when one is a given
         ix.comps.append(_Comp("system", "sys", srows))
+    _family_entries(ix, raws, body)
     for fm in forms_map(body).values():
         ix.given |= fm
     ix.given |= set(numbers(body)) | given_constants(body)
     return ix
+
+
+# the family a problem asks for, by the word its text uses, and the short names a key may give its members
+_FAMILY_IN_TEXT = (("eigenvalue", re.compile(r"eigen\s*-?\s*values?|characteristic\s+(?:roots?|polynomial)|\u03bb|\blambda\b", re.I)),
+                   ("root", re.compile(r"\broots?\b|\bzeros?\s+of\b", re.I)),
+                   ("pivot", re.compile(r"\bpivots?\b", re.I)),
+                   ("multiplier", re.compile(r"\bmultipliers?\b", re.I)))
+_FAMILY_SHORT = {"eigenvalue": r"(?:l|e|lam|lamb|ev|eig|eigval|x|lambda|mu)", "root": r"(?:r|x|z|root|rt)", "pivot": r"(?:p|d|piv|pivot)",
+                 "multiplier": r"(?:m|mult|multiplier)"}
+
+
+def _family_entries(ix: "_Index", raws: tuple[str, ...], body: str) -> None:
+    """A key that names its values 'l1 = 3', 'e1 = 3', 'x1 = 3' or not at all ('3', '-7', '3, -7') still belongs to the family the
+    problem asks for ('Find the eigenvalues ...'): each such value also becomes 'eigenvalue1', 'eigenvalue2' ..., so 'The
+    eigenvalues are 3 and -7' reads against it exactly as against 'lambda1 = 3'."""
+    fams = [f for f, rx in _FAMILY_IN_TEXT if rx.search(body or "")]
+    if not fams:
+        return
+    nameless = 0
+    pairs: list[tuple[str, str, str]] = []  # (fam, index, value)
+    for raw in raws:
+        kv = _KeyVal(raw)
+        if kv.kind not in ("num", "seq") or (kv.kind == "num" and kv.unit):
+            continue
+        nm = kv.name
+        if not nm or kv.kind == "seq" and not nm.rstrip("0123456789"):
+            for v in kv.nums:
+                nameless += 1
+                pairs += [(f, str(nameless), v) for f in fams[:2]]
+            continue
+        mm = re.fullmatch(r"([a-z]+)(\d{1,2})", nm)
+        if kv.kind == "num" and mm:
+            pairs += [(f, mm.group(2), kv.nums[0]) for f in fams if re.fullmatch(_FAMILY_SHORT[f], mm.group(1))]
+    have = {(e.name, e.val) for e in ix.entries}
+    for f, i, v in pairs:
+        if (f + i, v) not in have:
+            ix.entries.append(_Entry(f + i, v, "", True))
 
 
 @lru_cache(maxsize=256)
@@ -2877,6 +2934,11 @@ def _bound_names(h: "_Hay", ix: _Index, data: frozenset | set = frozenset()) -> 
     return list(dict.fromkeys(out))
 
 
+_OTHER_UNITS = {"pound", "pounds", "lb", "lbs", "ounce", "ounces", "oz", "past", "minute", "minutes", "min", "second", "seconds", "hour", "hours",
+                "day", "days", "percent", "degrees", "degree", "meter", "meters", "metre", "metres", "cm", "mm", "km", "feet", "foot", "inch", "inches",
+                "mile", "miles", "dollar", "dollars", "cents", "points", "people", "students", "items", "pieces", "kelvin", "joules", "watts", "volts"}
+
+
 def _entry_in(h: "_Hay", e: _Entry) -> bool:
     """The reply holds the entry's value. An entry with a unit is unit-aware: '100 g' is not 100.0 mL and '0.10 M' is not
     0.1000 L; a bare number matches it only when it is a precise decimal or bound to the entry's own name."""
@@ -2893,6 +2955,8 @@ def _entry_in(h: "_Hay", e: _Entry) -> bool:
             if unit == e.unit:
                 return True
             continue
+        if m and m.group(1).lower() in _OTHER_UNITS:
+            continue  # '132.6 pounds' or '11.27 past nine' is another quantity than the key's 132.6 g
         if "." in e.val and _sig(e.val) >= 3 or (e.name and h.named(e.name, e.val)):
             return True
     return False
@@ -2939,7 +3003,7 @@ def _family_bound(h: "_Hay", ix: _Index, data: frozenset | set = frozenset()) ->
         head = _ORD_WORD + r"(?:" + words + r")(?![a-z])(?:\s+of\s+(?:the\s+)?(?:(?:matrix\s+)?[a-z]\w{0,2}(?![a-z])|matrix))?\s*\d{0,2}\s*\??\s*"
         item = r"(-?\d[\d./]*)"
         # 'W = 5', 'W is 5 and 2', 'W: 5, 2'; the plural words also read 'eigenvalues 5 and 2' with nothing between
-        pat = re.compile(head + r"(?:" + _CONNECT + r"|(?<=\?)|(?<=\?\s)" + (r"|" if plural else r"") + r")\s*(?:about\s+|approximately\s+)?" + item
+        pat = re.compile(head + r"(?:" + _CONNECT + r"|(?<=\?)(?:\s*(?:a|ans|answer)\s*[:.)\-]|(?=\s))?|(?<=\?\s)" + (r"|" if plural else r"") + r")\s*(?:about\s+|approximately\s+)?" + item
                          + r"((?:\s*(?:,|;|\band\b|\bor\b|\bthen\b)\s*(?:(?:" + words + r")\s*\d{0,2}\s*(?:" + _CONNECT + r")\s*)?-?\d[\d./]*)*)")
         for m in pat.finditer(h.low):
             nums = [_canon(x.rstrip("./")) for x in re.findall(r"-?\d[\d./]*", m.group(1) + " " + m.group(2))]
@@ -2969,7 +3033,7 @@ def _rounded_unit_bound(h: "_Hay", ix: _Index, data: "frozenset | set" = frozens
         if kv is None:
             continue
         for st, c, en in h.nums:
-            if "." not in c or _sig(c) < 2 or any(num_eq(a, c) for a in asked):
+            if _sig(c) < (2 if "." in c else 3) or any(num_eq(a, c) for a in asked):  # 'about 5.1 g', 'roughly 133 g'
                 continue
             m = re.match(r"\s*([A-Za-z]+)", h.t[en:])
             if not (m and _UNIT_ALIASES.get(m.group(1).lower()) == e.unit):
@@ -2982,6 +3046,7 @@ def _rounded_unit_bound(h: "_Hay", ix: _Index, data: "frozenset | set" = frozens
 
 
 _EIGEN_CUE = re.compile(r"eigen|characteristic|\u03bb|lambda|\bv\d\b", re.I)
+_VECTORS_CUE = re.compile(r"\bvectors\b", re.I)  # 'The vectors are (1, 1) and (1, -2)': two of the key's vectors together
 _FOR_VALUE = re.compile(r"^\s*[,.;]?\s*(?:for|with|when|at|corresponding\s+to|belongs?\s+to|goes\s+with)\s+(?:the\s+)?(?:\u03bb|lambda|eigenvalue|root|value)?\s*"
                         r"(?:=|is|of)?\s*(-?\d[\d./]*)", re.I)
 
@@ -3022,7 +3087,11 @@ def _pair_vec_bound(h: "_Hay", ix: _Index, given: set[tuple[str, ...]], asked=()
                 # 'the eigenvector for 5 is (1, 1)', 'For Problem 5, the eigenvector is (1, 1)', 'Eigenvector for Problem 5: (1,1)'
                 found[i] = "strong"
                 break
-            if _EIGEN_CUE.search(before):
+            tab = re.search(r"(?:^|[\s|>])(-?\d[\d./]*)\s*(?:\||->|-->|=>|\u2192|:)\s*$", h.t[max(0, pos - 30):pos])
+            if tab and any(num_eq(_canon(tab.group(1).rstrip("./")), v) for v in key_vals):
+                found[i] = "strong"  # a table row '5 | (1, 1)' or an arrow row '5 -> (1, 1)': a key value and its vector
+                break
+            if _EIGEN_CUE.search(before) or _VECTORS_CUE.search(lead):
                 found.setdefault(i, "cue")
     for i, how in found.items():
         weak = all(x in ("0", "1", "-1") for x in pairs[i].rows[0])
@@ -3030,6 +3099,211 @@ def _pair_vec_bound(h: "_Hay", ix: _Index, given: set[tuple[str, ...]], asked=()
         if how == "strong" or not weak or len(found) >= 2:
             out.append(pairs[i].name or "vector")
     return out
+
+
+# --------------------------------------------------------------------------- shapes of a finished answer (cycle 13)
+def _square_of(item: dict[str, Any] | None) -> list[list[Fraction]]:
+    """The item's own square matrix (2 by 2 to 4 by 4) as Fractions, read from its statement; [] when it states none."""
+    rows = _Text((item or {}).get("body") or "").mrows
+    for st in range(len(rows)):
+        n = len(rows[st])
+        if 2 <= n <= 4 and st + n <= len(rows) and all(len(r) == n for r in rows[st:st + n]):
+            vals = [[_val(x) for x in r] for r in rows[st:st + n]]
+            if all(v is not None for r in vals for v in r):
+                return vals
+    return []
+
+
+def _fstr(v: Fraction) -> str:
+    return str(v.numerator) if v.denominator == 1 else f"{v.numerator}/{v.denominator}"
+
+
+def _char_poly(m: list[list[Fraction]]) -> tuple[Fraction, ...]:
+    """Coefficients of det(xI - M), highest degree first (Faddeev-LeVerrier)."""
+    n = len(m)
+    ident = [[Fraction(int(i == j)) for j in range(n)] for i in range(n)]
+    cs = [Fraction(1)]
+    mk = [[Fraction(0)] * n for _ in range(n)]
+    for k in range(1, n + 1):
+        mk = [[sum(m[i][t] * mk[t][j] for t in range(n)) + cs[-1] * ident[i][j] for j in range(n)] for i in range(n)]
+        am = [[sum(m[i][t] * mk[t][j] for t in range(n)) for j in range(n)] for i in range(n)]
+        cs.append(-sum(am[i][i] for i in range(n)) / k)
+    return tuple(cs)
+
+
+def _roots_poly(roots: list[Fraction]) -> tuple[Fraction, ...]:
+    co = [Fraction(1)]
+    for r in roots:
+        co = [a - r * b for a, b in zip(co + [Fraction(0)], [Fraction(0)] + co)]
+    return tuple(co)
+
+
+def _key_roots(ix: "_Index") -> list[Fraction]:
+    """The key's own eigenvalues or roots, when it holds two or more of them."""
+    out: dict[str, Fraction] = {}
+    for e in ix.entries:
+        if re.fullmatch(r"(?:eigenvalue|root|lambda)\d{1,2}", e.name or "") and not e.unit:
+            v = _val(e.val)
+            if v is not None:
+                out.setdefault(e.name, v)
+    return list(out.values()) if len(out) >= 2 else []
+
+
+_POLY_VAR = r"(?:lambda|[a-z])"
+_POLY_TERM = r"(?:\d+(?:\.\d+)?)?\s*" + _POLY_VAR + r"(?:\^\d)?|\d+(?:\.\d+)?"
+_POLY_SPAN = re.compile(r"(?<![a-z0-9.^])[+-]?\s*(?:" + _POLY_TERM + r")(?:\s*[+-]\s*(?:" + _POLY_TERM + r"))+(?![a-z\d.^])")
+_POLY_PARSE = re.compile(r"([+-]?)\s*(\d+(?:\.\d+)?)?\s*(" + _POLY_VAR + r")?(?:\^(\d))?")
+_FACTOR = re.compile(r"\(\s*(?:(" + _POLY_VAR + r")\s*([+-])\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*-\s*(" + _POLY_VAR + r"))\s*\)")
+
+
+def _poly_text(text: str) -> str:
+    t = _norm_hay(text or "").lower().replace("\u03bb", "lambda").replace("\u00b2", "^2").replace("\u00b3", "^3")
+    t = re.sub(r"\\(lambda)", r"\1", t)
+    t = re.sub(r"\^\{(\d)\}", r"^\1", t).replace("**", "^")
+    t = re.sub(r"\\(?:cdot|times)|[*\u00b7]", " ", t)
+    t = re.sub(r"\b(?:lambda)\s*\^\s*", "lambda^", t)
+    return t.replace("\\", " ")
+
+
+def _poly_forms(t: str) -> list[tuple[Fraction, ...]]:
+    """Polynomials written out in text (any variable: lambda, x, t), as coefficients highest degree first."""
+    out = []
+    for m in _POLY_SPAN.finditer(t):
+        co: dict[int, Fraction] = {}
+        for tm in re.finditer(r"([+-]?)\s*((?:" + _POLY_TERM + r"))", m.group(0)):
+            sign = -1 if tm.group(1) == "-" else 1
+            pm = _POLY_PARSE.fullmatch(tm.group(2).strip())
+            if not pm:
+                continue
+            num, var, exp = pm.group(2), pm.group(3), pm.group(4)
+            c = (Fraction(Decimal(num)) if num else Fraction(1)) * sign
+            d = (int(exp) if exp else 1) if var else 0
+            co[d] = co.get(d, Fraction(0)) + c
+        top = max(co) if co else 0
+        if top >= 2:
+            out.append(tuple(co.get(d, Fraction(0)) for d in range(top, -1, -1)))
+    return out
+
+
+def _factored_roots(t: str) -> list[list[Fraction]]:
+    """Runs of adjacent linear factors, '(lambda - 5)(lambda - 2)', as the roots each run names."""
+    out: list[list[Fraction]] = []
+    run: list[Fraction] = []
+    last = -1
+    for m in _FACTOR.finditer(t):
+        if m.group(1):
+            v = Fraction(Decimal(m.group(3)))
+            r = v if m.group(2) == "-" else -v
+        else:
+            r = Fraction(Decimal(m.group(4)))
+        if run and re.sub(r"[\s*]", "", t[last:m.start()]):
+            out.append(run)
+            run = []
+        run.append(r)
+        last = m.end()
+    if run:
+        out.append(run)
+    return [r for r in out if len(r) >= 2]
+
+
+def _poly_hit(reply: str, item: dict[str, Any] | None, ix: "_Index") -> list[str]:
+    """The characteristic polynomial of the item's matrix, expanded ('lambda^2 - 7 lambda + 10 = 0') or factored
+    ('(lambda - 5)(lambda - 2) = 0'), in any variable and spacing, as the working of an eigenvalue problem."""
+    if not (item and reply.strip()):
+        return []
+    roots = _key_roots(ix)
+    mat = _square_of(item)
+    cands: list[tuple[Fraction, ...]] = []
+    if mat:
+        cands.append(_char_poly(mat))
+    if roots:
+        cands.append(_roots_poly(roots))
+    if not cands:
+        return []
+    t = _poly_text(reply)
+    want = {tuple(c) for c in cands} | {tuple(-x for x in c) for c in cands}
+    for co in _poly_forms(t):
+        if co in want and any(x not in (0, 1, -1) for x in co[1:]):
+            return ["characteristic polynomial"]
+    rs = sorted(roots) if roots else []
+    for run in _factored_roots(t):
+        if rs and len(run) == len(rs) and sorted(run) == rs:
+            return ["factored polynomial"]
+        if mat and len(run) == len(mat) and tuple(_roots_poly(run)) in want:
+            return ["factored polynomial"]
+    return []
+
+
+def _elimination_rows(mat: list[list[Fraction]]) -> list[tuple[str, ...]]:
+    """Every new row that Gaussian elimination of the matrix writes down (after each pivot, after a row exchange)."""
+    a = [list(r) for r in mat]
+    n = len(a)
+    out: list[tuple[str, ...]] = []
+    for k in range(n - 1):
+        if a[k][k] == 0:
+            sw = next((i for i in range(k + 1, n) if a[i][k] != 0), None)
+            if sw is None:
+                continue
+            a[k], a[sw] = a[sw], a[k]
+            out += [tuple(_fstr(x) for x in a[k]), tuple(_fstr(x) for x in a[sw])]
+        for i in range(k + 1, n):
+            f = a[i][k] / a[k][k]
+            a[i] = [x - f * y for x, y in zip(a[i], a[k])]
+            out.append(tuple(_fstr(x) for x in a[i]))
+    return out
+
+
+_ROW_CUE = re.compile(r"\b(?:rows?|r\d)\b", re.I)
+# the words of a step ('becomes', 'after subtracting', an arrow); the masked text of a reply has lost 'row 2', so these alone count
+_STEP_VERB = re.compile(r"becomes?|\bnew\b|replac|subtract|minus|eliminat|\u2192|->|=>|\bgives?\b|\bresult|\bafter\b", re.I)
+_ROW_VERB = re.compile(r"=|:|\bis\b|\bgot\b|\bget\b", re.I)
+
+
+def _row_step_hit(h: "_Hay", item: dict[str, Any] | None, ix: "_Index", given: set[tuple[str, ...]]) -> list[str]:
+    """An elimination step of the item's matrix: 'Row 2 becomes (0, -8, -2)'. The row is one of the rows of the key's U or one
+    that elimination of the item's own matrix writes down, stated as a row (the sentence names a row and says what it
+    becomes) and not one the problem itself gives."""
+    cands: set[tuple[str, ...]] = set()
+    for comp in ix.comps:
+        if comp.kind == "mat" and comp.name == "u" and len(comp.rows) >= 2:
+            cands |= {tuple(r) for r in comp.rows}
+    mat = _square_of(item)
+    if len(mat) >= 3:
+        cands |= set(_elimination_rows(mat))
+    cands = {r for r in cands if len(r) >= 3 and not _stated(list(r), given) and any(x not in ("0", "1", "-1") for x in r)}
+    if not cands:
+        return []
+    for pos, seq in h.seqs:
+        if len(seq) < 3 or not any(len(seq) == len(r) and all(num_eq(a, b) for a, b in zip(seq, r)) for r in cands):
+            continue
+        sent = re.split(r"[.!?\n]", h.t[:pos])[-1] + h.t[pos:pos + 120].split("\n")[0]
+        if _STEP_VERB.search(sent) or (_ROW_CUE.search(sent) and _ROW_VERB.search(sent)):
+            return ["row step"]
+    return []
+
+
+def _product_hit(text: str, ix: "_Index", data: "frozenset | set" = frozenset()) -> list[str]:
+    """A multiplication line whose product is a key value: 'Compute 0.350 x 0.2500 x 58.44' for 5.11 g. The operands are the
+    problem's own given values; the line is the whole solution in one step."""
+    t = _norm_hay(text or "")
+    t = re.sub(r"\\(?:cdot|times)", " x ", t)
+    keys = [e for e in ix.entries if e.val not in ix.given and _distinct_val(e.val) and _val(e.val) is not None and _sig(e.val) >= 2]
+    if not keys:
+        return []
+    unit = r"(?:\s*(?!(?:x|times|by)\b)[A-Za-z/]{1,6})?"
+    for m in re.finditer(r"(?<![\w.])" + _NUM.pattern + unit + r"(?:\s*(?:x|\u00d7|\*|\u00b7|times|multiplied\s+by|by)\s*" + _NUM.pattern +
+                         unit + r")+", t, re.I):
+        nums = [_val(_canon(x)) for x in re.findall(_NUM.pattern, m.group(0))]
+        if len(nums) < 2 or any(n is None for n in nums):
+            continue
+        prod = Fraction(1)
+        for n in nums:
+            prod *= n
+        for e in keys:
+            kv = _val(e.val)
+            if kv and _round_sig(prod, _sig(e.val)) == kv or (kv and prod == kv):
+                return [e.name or "product"]
+    return []
 
 
 def _echoed(vec, asked) -> bool:
@@ -3119,6 +3393,9 @@ def _key_leak_core(reply, item=None, ctx=None):
         fam = _family_bound(h, ix, data)  # 'lambda = 5', 'the eigenvalues are 5 and 2'
         if fam:
             return fam
+        for shape in (_poly_hit(reply, item, ix), _row_step_hit(h, item, ix, _given_seqs(item)), _product_hit(reply, ix, data)):
+            if shape:  # the working of a finished answer: the characteristic polynomial, an elimination row, a one-line product
+                return shape
     if gate or named:
         b = _bound_small(h, ix, reply, data)
         if b and (gate or len(b) >= 2):  # a text not clearly about the item needs two of its names bound to its values
@@ -4369,7 +4646,7 @@ def _seq_in(seq: list[str], h: "_Hay") -> list[int]:
 _JOIN_AND = re.compile(r"\)\s*,?\s*and\s*\(")
 _FAMILY_CLAIM = re.compile(r"(?<![a-z0-9])((?:eigen\s*)?values?|eigenvalues?|(?:characteristic\s+)?roots?|singular\s+values?|lambda\d*|\u03bb\d*)(?![a-z])"
                            r"(?:\s+of\s+(?:(?:the|that|this|our|a)\s+)?(?:[a-z][a-z-]*\s+){0,2}[a-z][a-z-]*)?\s*\??"
-                           r"\s*(?:,|:|=|\bare\b|\bis\b|\bequals?\b|\bbeing\b)?\s*((?:-?\d[\d./]*)(?:\s*(?:,|;|\band\b|\bor\b)\s*-?\d[\d./]*)*)")
+                           r"\s*(?:,|:|=|\bare\b|\bis\b|\bequals?\b|\bbeing\b|\bcomes?\s+out\s+(?:to|as)\b|\bturns?\s+out\s+to\s+be\b|\bworks?\s+out\s+to\b)?\s*((?:-?\d[\d./]*)(?:\s*(?:,|;|\band\b|\bor\b)\s*-?\d[\d./]*)*)")
 
 
 def _family_claims(text: str) -> list[set[str]]:
@@ -4382,6 +4659,29 @@ def _family_claims(text: str) -> list[set[str]]:
             continue
         out.append({_canon(x.rstrip("./")) for x in re.findall(r"-?\d[\d./]*", m.group(2))})
     return [c for c in out if c]
+
+
+_UNIT_AFTER = re.compile(r"\s{0,2}([A-Za-z]+)(?:\s{0,2}/\s{0,2}([A-Za-z]+))?")
+
+
+def _unit_after(t: str, end: int) -> str:
+    """The canonical unit the number that ends at `end` carries ('g', 'mol', 'm' for mol/L), or '' when the next word is
+    not a known unit."""
+    m = _UNIT_AFTER.match(t, end)
+    if not m:
+        return ""
+    a = _UNIT_ALIASES.get(m.group(1).lower(), "")
+    if a and m.group(2):
+        b = _UNIT_ALIASES.get(m.group(2).lower(), "")
+        if a == "mol" and b == "l":
+            return "m"
+        return a + "/" + b if b else a
+    return a
+
+
+def _unit_ok(want: str, got: str) -> bool:
+    """The chunk's unit agrees with the reply's ('g' also agrees with the 'g' of 'g/mol')."""
+    return want == got or ("/" not in want and got.split("/")[0] == want)
 
 
 def shown_in(text: str, source_texts: list[str], own: "set[str] | frozenset[str]" = frozenset()) -> bool:
@@ -4428,10 +4728,16 @@ def shown_in(text: str, source_texts: list[str], own: "set[str] | frozenset[str]
             return False
         anchored = True
     printed = [c for h in srcs for _, c, _ in h.nums]
-    for _, c, _ in hs.nums:
+    for _, c, en in hs.nums:
         if _plain_small(c) or c in own:
             continue
         if not any(c == t or num_eq(c, t) or num_eq(t, c) for t in printed):
+            return False
+        # a number the reply gives with a unit must be printed with that same unit: '5.11 pounds' or '0.0875 past nine' never
+        # license '5.11 g' or '0.0875 mol', and a unitless chunk number never licenses a value with a unit
+        u = _unit_after(hs.t, en)
+        if u and not any(_unit_ok(u, _unit_after(h.t, e2)) for h in srcs for _, t, e2 in h.nums
+                         if c == t or num_eq(c, t) or num_eq(t, c)):
             return False
         anchored = True
     return anchored
