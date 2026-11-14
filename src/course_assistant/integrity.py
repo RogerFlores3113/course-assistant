@@ -341,6 +341,8 @@ homework assignment exam quiz points point student class course lecture one two 
 
 
 def _stem(w: str) -> str:
+    if len(w) > 5 and w.endswith("sses"):
+        return w[:-2]  # masses -> mass
     if len(w) > 4 and w.endswith("ies"):
         return w[:-3] + "y"
     if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
@@ -1248,6 +1250,22 @@ def is_logistics(text: str) -> bool:
     return bool(_LOGISTICS.search(t) or _SIZE_ASK.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t)
 
 
+_COVERAGE = re.compile(
+    r"\b(?:which|what)\s+(?:lecture|lectures|chapter|chapters|reading|readings|section|sections|week|weeks|video|videos|slides?|notes?|"
+    r"page|pages|topic|topics|unit|module)\b[^.?!]{0,40}?\b(?:covers?|covered|teach(?:es)?|explains?|discuss(?:es)?|introduc(?:es?|ed)|"
+    r"go(?:es)?\s+over|has|have|is\s+(?:about|on|relevant|for)|are\s+(?:about|on|relevant|for)|help(?:s|ful)?|before|prepare[sd]?|"
+    r"should\s+i\s+(?:read|watch|review))\b|\bwhere\s+(?:in\s+the\s+\w+\s+)?(?:is|are|can\s+i\s+(?:find|read|review)|do\s+(?:we|you)\s+"
+    r"(?:cover|learn|discuss))\b", re.I)
+
+
+def is_coverage_ask(text: str) -> bool:
+    """'Problem 3: which lecture covers LU?': where to read about something, not graded work (a value or a draft in the
+    message, or a request to solve, makes it work again)."""
+    t = text or ""
+    return bool(_COVERAGE.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t) \
+        and not _states_value(t)
+
+
 def draft_text(question: str) -> str:
     return essay.draft_request(question) or ""
 
@@ -1278,6 +1296,12 @@ def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[
     question = drop_negated_sets(question)
     if not _SET_WORD.search(question) or is_logistics(question):
         return None
+    named = topic_named_item(items, question)  # 'the one with L and U' is the LU item, whatever the set's overall subject
+    if named is not None:
+        one = dict(named)
+        one["source"] = "material" if one.get("material_id") else "item"
+        one["score"] = 0.7
+        return one
     stripped = _SET_WORD.sub(" ", question)
     groups: dict[Any, list[dict[str, Any]]] = {}
     for it in items:
@@ -1312,6 +1336,85 @@ def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[
     return None
 
 
+_REF_PHRASES = (
+    _TOPIC_PHRASE,  # 'the NaCl problem', 'the row exchange problem'
+    re.compile(r"\b(?:the|that|this|my|our)\s+(?:one|problem|question|exercise|part|task|item)\s+(?:with|about|on|involving|using|"
+               r"where|that\s+(?:has|uses|asks|involves)|for|asking\s+for|containing)\s+([^,.?!;:]{2,60})", re.I),
+)
+_NAME_REF = re.compile(r"(?<![a-z0-9_])[a-z]\d{1,3}(?![a-z0-9_])")
+
+
+def _ref_words(phrase: str) -> tuple[set[str], set[str]]:
+    """(content-word stems, acronyms) a topic phrase carries. 'L and U' is the acronym 'lu'; a lone letter is no word."""
+    words = {_stem(w) for w in re.findall(r"[a-z]{3,}", _words_to_digits(phrase).lower())
+             if w not in retrieval.STOPWORDS and w not in GENERIC and w not in _SET_WORDS_FULL}
+    acr = {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", phrase)}
+    letters = [w for w in re.findall(r"\b[A-Za-z]\b", phrase) if w.lower() not in ("a", "i")]
+    if 2 <= len(letters) <= 3:
+        acr.add("".join(letters).lower())
+    return words, acr
+
+
+_ASK_WORDS = frozenset("gram kilogram liter litre many much amount total final answer".split())
+_SET_WORDS_FULL = frozenset({"set", "pset", "homework", "worksheet", "sheet", "assignment", "hw"})
+
+
+def topic_named_item(items: list[dict[str, Any]], question: str) -> dict[str, Any] | None:
+    """The graded item a question names by its distinctive content, with no 'problem set' word and no number: 'the NaCl
+    problem', 'the row exchange problem', 'the one with L and U', or a key name only this item has ('what's l31 for the problem set?'). It is
+    the item only when it is the one item carrying those words (a tie names nothing, and a question that names no item,
+    'how do I find the mass of NaCl in general?', names none)."""
+    q = drop_negated_sets(question or "")
+    if not q.strip() or is_logistics(q):
+        return None
+    cands = [i for i in items if i["kind"] in ("problem", "proof") and (i.get("body") or "").strip()]
+    if not cands:
+        return None
+    score: dict[int, float] = {}
+    refs = [m for rx in _REF_PHRASES for m in rx.finditer(q)]
+    for rx in _REF_PHRASES:
+        for m in rx.finditer(q):
+            phrase = m.group(1)
+            if rx is _TOPIC_PHRASE:  # 'the mass for the NaCl problem': only what follows the last article or preposition
+                phrase = re.split(r"\b(?:the|that|this|my|our|for|of|in|on|about|with)\s", phrase + " ", flags=re.I)[-1] or phrase
+            words, acr = _ref_words(phrase)
+            if not words and not acr:
+                continue
+            for it in cands:
+                text = f"{it.get('title', '')} {it.get('body', '')}"
+                have = content_tokens(text)
+                lows = {w.lower() for w in re.findall(r"[A-Za-z]{2,4}", text)}
+                hit = sum(1 for w in words if w in have) + sum(1.5 for a in acr if a in lows)
+                if hit:
+                    score[it["id"]] = max(score.get(it["id"], 0.0), hit)
+    ranked = sorted(score.items(), key=lambda kv: -kv[1])
+    if ranked and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+        return next(i for i in cands if i["id"] == ranked[0][0])
+    if refs and not ranked:
+        # 'how many grams of NaCl for the molarity problem?': the phrase names no item, the rest of the question does
+        words, acr = _ref_words(q)
+        words = {w for w in words if w not in METHOD_WORDS}
+        for it in cands:
+            text = f"{it.get('title', '')} {it.get('body', '')}"
+            have = content_tokens(text)
+            hit = sum(1 for w in words if w in have and w not in _ASK_WORDS) + sum(1.5 for a in acr if a in {w.lower() for w in re.findall(r"[A-Za-z]{2,4}", text)})
+            if hit:
+                score[it["id"]] = hit
+        ranked = sorted(score.items(), key=lambda kv: -kv[1])
+        if ranked and (len(ranked) == 1 or ranked[0][1] > ranked[1][1]):
+            return next(i for i in cands if i["id"] == ranked[0][0])
+    owners: dict[str, set[int]] = {}
+    for it in cands:
+        for nm in key_names(it):
+            owners.setdefault(nm, set()).add(it["id"])
+    # a key name only one item has ('what's l31 for the problem set?'); with no problem-set word it is a plain question
+    asked = {n for n in _NAME_REF.findall(_norm_hay(q).lower())} if _SET_WORD.search(q) else set()
+    ids = {next(iter(owners[n])) for n in asked if len(owners.get(n, ())) == 1}
+    if len(ids) == 1:
+        return next(i for i in cands if i["id"] == next(iter(ids)))
+    return None
+
+
 def _proof_markers(question: str) -> bool:
     """The message names a proof item ('Problem 4') or carries proof wording: 'prove', 'suppose ... then', QED."""
     q = question or ""
@@ -1334,7 +1437,7 @@ def match_graded(store, course_id: int, question: str) -> dict | None:
     check = is_check_ask(question)
     if check and _GENERIC_CHECK.search(question) and not any(has_candidate(question, i) for i in items):
         check = False  # "how do I check an LU factorization in general" is a method question, not an answer to check
-    logi = is_logistics(question)
+    logi = is_logistics(question) or is_coverage_ask(question)
     scored: list[tuple[float, dict[str, Any]]] = []
     keyed = key_leak_any(store, course_id, question, items, {"lone": True})  # the message carries a final value: a check ask
     refs: list[dict[str, Any]] = []
@@ -1556,22 +1659,69 @@ def _proof_sentences(reply: str) -> list[str]:
     return [x for x in re.split(r"(?<=[.!?])\s+|\n+", _CITE_STRIP.sub("", reply or "")) if x.strip() and "?" not in x]
 
 
-_TWO_SOLN = re.compile(r"\btwo\s+(?:different\s+|distinct\s+|given\s+)?(?:solutions?|vectors?|points?)\b|\b([a-z])\s+and\s+([a-z])\b[^.;!?]{0,50}"
-                       r"\b(?:solutions?|solve|solves|satisf(?:y|ies)|both)\b|\bsolutions?\s+([a-z])\s+and\s+([a-z])\b", re.I)
-_DIFF_CONSTRUCT = re.compile(r"\bdifference\b|\b[a-z]\s*[-\u2212]\s*[a-z]\b|\bmultiples?\b|\bmidpoint\b|\bthe\s+line\b|\ba\s+line\b|"
-                             r"\b(?:linear|convex|affine)\s+combinations?\b|\baverage\b|\bscal(?:ar|ing|e)\b|\b[a-z]\s*\+\s*t\b|\bt\s*\(|\bevery\s+point\s+on\b", re.I)
-_MANY = re.compile(r"\binfinitely\s+many\b|\binfinite(?:ly)?\b|\bmore\s+than\s+two\b|\bendless", re.I)
+_VAR = r"[a-z]\d?"
+_TWO_SOLN = re.compile(r"\btwo\s+(?:different\s+|distinct\s+|given\s+)?(?:solutions?|vectors?|points?)\b|\b(" + _VAR + r")\s+and\s+(" + _VAR + r")\b[^.;!?]{0,50}"
+                       r"\b(?:solutions?|solve|solves|satisf(?:y|ies)|both)\b|\bsolutions?\s+(" + _VAR + r")\s+and\s+(" + _VAR + r")\b|"
+                       r"\bA\s*\(\s*(" + _VAR + r")\s*\)\s*=\s*b\b[^.;!?]{0,25}\bA\s*\(\s*(" + _VAR + r")\s*\)\s*=\s*b\b", re.I)
+_AFFINE = (r"\b" + _VAR + r"\s*[+\u2212-]\s*[a-z]\s*\(\s*" + _VAR + r"\s*[-\u2212]\s*" + _VAR + r"\s*\)|"
+           r"\(\s*1\s*[-\u2212]\s*[a-z]\s*\)\s*" + _VAR + r"\s*\+\s*[a-z]\s*" + _VAR + r"|\(\s*" + _VAR + r"\s*\+\s*" + _VAR + r"\s*\)\s*/\s*2|"
+           r"\b" + _VAR + r"\s*\+\s*\d*\s*\*?\s*\(\s*" + _VAR + r"\s*[-\u2212]\s*" + _VAR + r"\s*\)")
+_DIFF_CONSTRUCT = re.compile(r"\bdifference\b|\b" + _VAR + r"\s*[-\u2212]\s*" + _VAR + r"\b|\bmultiples?\b|\bmidpoint\b|\bthe\s+line\b|\ba\s+line\b|"
+                             r"\b(?:linear|convex|affine)\s+combinations?\b|\baverage\b|\bscal(?:ar|ing|e)\b|\b[a-z]\s*\+\s*t\b|\bt\s*\(|"
+                             r"\bevery\s+point\s+on\b|\bfor\s+(?:every|all|any)\s+(?:real\s+)?(?:number\s+)?[a-z]\b|" + _AFFINE, re.I)
+_AFFINE_RX = re.compile(_AFFINE, re.I)
+_MANY = re.compile(r"\binfinitely\s+many\b|\binfinite(?:ly)?\b|\bmore\s+than\s+two\b|\bendless|\bmore\s+than\s+one\b|\bunique(?:ly)?\b|"
+                   r"\bexactly\s+one\b|\bonly\s+one\b|\bat\s+most\s+one\b|\b(" + _VAR + r")\s*=\s*(" + _VAR + r")\b|\bthe\s+same\s+solution\b", re.I)
+_COUNT_ITEM = re.compile(r"\b(?:two|more\s+than\s+one|infinitely|unique(?:ly)?|exactly|number\s+of|at\s+most|only\s+one|never|cannot|can't|"
+                         r"can\s+not|third|another|many)\b", re.I)
+# a sentence that states the proof's pivot, advice or not: two solutions give a third / infinitely many ones
+_IDEA_TWO = re.compile(r"\b(?:two|both|first\s+two|given|these|any\s+two|a\s+pair\s+of)\b[^.;!?]{0,40}\bsolutions?\b|\bfrom\s+(?:two|them|these|those|both)\b", re.I)
+_IDEA_GOAL = re.compile(r"\b(?:goal|aim|want|wants|need|needs|trying|try|tries|show|shows|prove|proving|demonstrate|asks?|claim|statement|"
+                        r"suppose|assume|start|begin)\b", re.I)
+_IDEA_MAKES = re.compile(r"\b(?:produce[sd]?|gives?|yield[s]?|build|construct(?:s|ed)?|makes?|generate[sd]?|create[sd]?|impl(?:y|ies)|"
+                         r"lead(?:s|ing)?\s+to|forces?|forms?|means?|follows?|get|obtain|always|can|must|will|so)\b|\bfrom\s+(?:two|them|these|those|both)\b", re.I)
+_IDEA_NEW = re.compile(r"\b(?:third|another|new|additional|further|fresh|more)\b[^.;!?]{0,25}\b(?:solutions?|ones?)\b|\binfinitely\s+many\b|"
+                       r"\ba\s+whole\s+line\s+of\b|"
+                       r"\bsolutions?\b[^.;!?]{0,12}\b(?:never|cannot|can't)\b[^.;!?]{0,12}\bexactly\b", re.I)
+
+
+def count_proof_item(it: dict[str, Any]) -> bool:
+    """A graded proof about HOW MANY solutions a system has, whatever its wording ('never exactly two', 'cannot have exactly
+    two', 'more than one', 'infinitely many', 'unique')."""
+    body = (it.get("body") or "").lower()
+    return bool(re.search(r"\bsolutions?\b", body) and _COUNT_ITEM.search(body)
+                and re.search(r"\bprove|\bshow\b|\bargue|\bjustify|\bexplain\s+why|\bdemonstrate|\bestablish", body))
 
 
 def two_solution_proof(it: dict[str, Any], reply: str) -> bool:
-    """A finished argument for 'two different solutions mean infinitely many' whatever its opening: two solutions, their
-    difference, a multiple, midpoint or line, and the conclusion of infinitely many, together in the advice-free
-    sentences of the reply. Method advice ('try subtracting the two solutions') carries no step."""
-    body = (it.get("body") or "").lower()
-    if not (re.search(r"\btwo\b[^.]{0,30}\bsolutions?\b", body) and re.search(r"infinitely|more than one", body)):
+    """A finished argument for a count-of-solutions proof, whatever the item's wording and the reply's opening: two solutions
+    (or an affine family of one), their difference, a multiple, midpoint or line, and the conclusion (infinitely many, unique),
+    together in the advice-free sentences of the reply. Method advice ('try subtracting the two solutions') carries no step,
+    nor does the lemma alone ('the difference of two solutions solves Ax = 0')."""
+    if not count_proof_item(it):
         return False
     text = " ".join(x for x in _proof_sentences(reply) if not _P_ADVICE.search(x))
+    if _AFFINE_RX.search(text) and _MANY.search(text):
+        return True  # 'x + t(y - x) solves it for every t, giving infinitely many'
     return bool(_TWO_SOLN.search(text) and _DIFF_CONSTRUCT.search(text) and _MANY.search(text))
+
+
+def proof_idea_sentence(it: dict[str, Any], text: str) -> str:
+    """The sentence of text that states the pivot of a count-of-solutions proof, advice or not ('from two solutions you can
+    always build a third'), quoted as written; '' when none does. A premise ('Suppose Ax = b has two solutions') and a bare
+    method hint ('try subtracting the two solutions') state no pivot."""
+    if not count_proof_item(it):
+        return ""
+    for sn in _sentences_of(text or ""):
+        c = _CITE_STRIP.sub("", sn)
+        if "?" in c and not re.search(r"\bbecause\b", c, re.I):
+            continue
+        if _IDEA_TWO.search(c) and _IDEA_NEW.search(c) and _IDEA_MAKES.search(c) and not _P_OPEN_LEAD.search(c) \
+                and not _IDEA_GOAL.search(c):
+            return sn
+        if _AFFINE_RX.search(c) and _MANY.search(c):
+            return sn
+    return ""
 
 
 def proof_steps(it: dict[str, Any], reply: str) -> bool:
@@ -1605,7 +1755,7 @@ def _leaks_proof(it: dict[str, Any], reply: str, question: str) -> bool:
     # an end marker (QED, the tombstone) is evidence of a finished proof, never an exemption
     if proof_shaped(reply, short=True) and share >= 0.3:
         return True
-    if proof_steps(it, reply):
+    if proof_steps(it, reply) or proof_idea_sentence(it, reply):
         return True
     return bool(_PROOF_END.search(reply)) and (share >= 0.5 or score_text(_Text(question), b) >= 0.5)
 
@@ -1634,6 +1784,8 @@ def _leaks_forced(it: dict[str, Any], reply: str, question: str, sources: list[A
     kind = it.get("kind") or _item_kind(it)
     body = (it.get("body") or "").strip()
     if kind == "problem" and body:
+        if written_short(it) and (finished_answer(body, reply) or asked_sentence(it, reply, question)):
+            return True
         b, r = _Text(body), _Text(reply)
         if item_key(it):  # a key judges the reply (key_leak, with the chat's context); given data is never a key value
             return False
@@ -1685,10 +1837,10 @@ def force_map(items: list[dict[str, Any]], force_item: dict | None) -> dict[int,
 
 def _reply_key_item(items: list[dict[str, Any]], question: str, reply: str, with_cites: str,
                     force_item: dict | None, n_cites: int | None = None,
-                    data: dict[Any, set[str]] | None = None) -> dict[str, Any] | None:
+                    data: dict[Any, set[str]] | None = None, forced: dict[int, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """The item whose key the reply gives away (most matches), judged with each item's own chat context."""
     best, top = None, 0
-    forced = force_map(items, force_item)
+    forced = force_map(items, force_item) if forced is None else forced
     for it in items:
         if not item_key(it):
             continue
@@ -1720,6 +1872,38 @@ def _mask_asked(reply: str, question: str) -> str:
     return out
 
 
+_FILLER = frozenset("is are was were be been the a an of to by from for and then so that this it as at in on with gives give "
+                    "becomes become equals equal".split())
+_NUM_TOK = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _num_contexts(sentence: str) -> list[tuple[str, str]]:
+    """(the word right before each number, the number) of a sentence: 'subtract 2 times row 1' gives (subtract, 2), (row, 1)."""
+    t = _words_to_digits(sentence).lower().replace(",", " ")
+    out = []
+    for m in _NUM_TOK.finditer(t):
+        words = [w for w in re.findall(r"[a-z]+", t[:m.start()]) if w not in _FILLER]
+        out.append((words[-1] if words else "", _canon(m.group(0))))
+    return out
+
+
+def echoes_sources(reply: str, source_texts: list[str], own: "set[str] | frozenset[str]" = frozenset()) -> bool:
+    """Every sentence of the reply that carries a number says what a cited passage says: each of its numbers sits right after
+    the same word there ('subtract 2 times row 1', 'the multiplier is 2'). A small number a passage prints beside the same
+    quantity word is the passage's, not a key value; the same digit beside another word shows nothing."""
+    held = [set(_num_contexts(sn)) for t in source_texts for sn in re.split(r"(?<=[.!?;])\s+|\n+|,\s+(?=and\b)", t or "") if sn.strip()]
+    seen = False
+    for sn in _sentences_of(reply):
+        ctxs = [c for c in _num_contexts(_CITE_STRIP.sub("", sn)) if c[1] not in own]
+        if not ctxs:
+            continue
+        for w, n in ctxs:
+            if not w or not any((w, n) in h for h in held):
+                return False
+            seen = True
+    return seen
+
+
 def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str, reply: str,
                     sources: list[Any] | None, force_item: dict | None) -> bool:
     """A worked example the reply takes from the cited course sources: every number it states is in the cited
@@ -1745,7 +1929,7 @@ def _quoted_example(items: list[dict[str, Any]], question: str, with_cites: str,
             if it["kind"] == "problem" and (_row_hits(_Text(t), b) >= 2 or copies_item(t, it, rows=True)):
                 return False
     own = set(_reply_numbers(question or ""))
-    return shown_in(reply, texts, own)  # the chunk itself must show each binding: bare small digits never qualify
+    return shown_in(reply, texts, own) or echoes_sources(reply, texts, own)  # the chunk must show each binding
 
 
 def check_reply(store, course_id: int, question: str, raw_reply: str, force_item: dict | None = None, *,
@@ -1772,16 +1956,26 @@ def check_reply(store, course_id: int, question: str, raw_reply: str, force_item
         data = _data_map(store, items, sources)  # molar masses the item, its handout or the cited sources print
     if _quoted_example(items, question or "", with_cites, reply, sources, force_item):
         return None
-    k = _reply_key_item(items, question or "", reply, with_cites, force_item, n_cites, data)
+    forced = force_map(items, force_item)
+    named = topic_named_item(items, question or "") if question else None
+    if named is not None and named["id"] not in forced:
+        # decision 1: the question names an item by its distinctive content ('the NaCl problem'): the reply is judged as
+        # in a chat about that item, with no 'problem set' word needed
+        forced = {**forced, named["id"]: dict(named, source="material" if named.get("material_id") else "item",
+                                              score=1.0, reason="topic")}
+    for fi in forced.values():  # a finished proof in a chat about a proof is blamed on that proof, not on a number it shares
+        if (fi.get("kind") or _item_kind(fi)) == "proof" and (fi.get("body") or "").strip() and _leaks_proof(fi, reply, question or ""):
+            return _hit(fi, "sticky")
+    k = _reply_key_item(items, question or "", reply, with_cites, force_item, n_cites, data, forced)
     if k:
         return _hit(k, "key")
     if keys_only:
         return None
-    for fi in force_map(items, force_item).values():
+    for fi in forced.values():
         # an essay reply is judged WITH its cites: a cited restatement of a source is only excused when its [n] is present
         if _leaks_forced(fi, with_cites if (fi.get("kind") or _item_kind(fi)) == "essay" else reply, question or "", sources):
             return _hit(fi, "sticky")
-    for fi in force_map(items, force_item).values():
+    for fi in forced.values():
         if question and is_check_ask(question) and confirms_answer(reply) \
                 and (fi.get("kind") or _item_kind(fi)) in ("problem", "proof"):
             return _hit(fi, "sticky")
@@ -1851,6 +2045,11 @@ def _guide_item(store, course_id: int, guide_id: int | None) -> dict[str, Any] |
     return dict(it, kind=_item_kind(it)) if it and it.get("course_id") == course_id else None
 
 
+def _topic_found(store, course_id: int, text: str) -> dict[str, Any] | None:
+    it = topic_named_item(graded_view(store, course_id), text)
+    return dict(it, source="material" if it.get("material_id") else "item", score=0.9) if it else None
+
+
 def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_TURNS) -> dict[str, Any] | None:
     """The graded item this chat touched: it stays touched for `turns` turns after the last student turn that matched
     or named it, or whose reply was caught, whatever words the later questions share with it. It never routes a
@@ -1863,7 +2062,7 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_T
     for m in msgs:
         if m.get("role") == "user":
             text = m.get("content") or ""
-            found = match_graded(store, course_id, text)
+            found = match_graded(store, course_id, text) or _topic_found(store, course_id, text)
             if found and found.get("members"):  # a whole set was named or described: every item in it is touched
                 found = dict(found, kind="problem")
             if found and (found.get("id") or found.get("members")):
@@ -1879,6 +2078,8 @@ def sticky_item(store, course_id: int, question: str = "", turns: int = STICKY_T
             caught = _guide_item(store, course_id, m.get("guide_id"))
             if caught:
                 item, since, last = caught, 0, caught
+    if item is None and question:
+        item = _topic_found(store, course_id, question)  # 'what is d for the row exchange problem?' touches that item
     if item is None and last is not None and last.get("kind") != "essay" and question \
             and any(re.fullmatch(r"[a-z]\d{1,3}", n) or len(n) >= 4 for n in question_names(last, question)):
         item = last  # a question that names one of its key entries ('l31', 'x3', 'ratio') touches the item again
@@ -3531,7 +3732,9 @@ def _unrelated_turn(question: str, item: dict[str, Any]) -> bool:
     if not (q.mrows or q.erows):
         return False
     b = _Text(item.get("body") or "")
-    if _row_hits(q, b) or touches(question, item) or question_names(item, question) or is_check_ask(question) \
+    # x1, x2, y, z, b are the unknowns of any system: a question that brings its own system and asks for them is about its own
+    own_names = {n for n in question_names(item, question) if not re.fullmatch(r"[xyzb]\d?", n)}
+    if _row_hits(q, b) or touches(question, item) or own_names or is_check_ask(question) \
             or has_candidate(question, item):
         return False
     return not any(b.fm.get(n, {n}) & q.forms for n in b.sig)
@@ -4174,7 +4377,55 @@ def _concepts_reply(provider, store, course_id: int, graded: dict, kind: str, sr
         user += ("\n\nYour last reply contained a worked solution or finished writing for the graded task. Write only "
                  "concepts, requirements and an approach, with no finished sentences the student could submit and no "
                  "results of the task.")
+    kept = _trim_reply(graded, kind, raw, question, problem_text, sources)
+    if kept:  # the honest part of the reply stays (a formula, a definition); only the sentences that leak go
+        blocks, used = grounding.parse_blocks(kept, n_sources)
+        if blocks:
+            return [Block("text", f"Part of this answer was left out because it was too close to your graded {_item_name(graded)}.",
+                          [])] + list(blocks), used
     return [Block("text", fallback_text(graded, kind, check_q, problem_text), [])], []
+
+
+def _trim_reply(graded: dict, kind: str, raw: str, question: str, problem_text: str, sources: list[Any] | None) -> str:
+    """The reply with the sentences that leak removed, or '' when nothing honest is left. A sentence that leaks on its own
+    goes first; when only the sentences together finish the item (a written answer), the ones that carry the most of
+    the item's own concept words go until it no longer does."""
+    sents = [x for x in _sentences_of(raw or "") if x.strip()]
+    if len(sents) < 2:
+        return ""
+    want = content_tokens(graded.get("body") or problem_text) - essay.ESSAY_GENERIC
+    qtok = content_tokens(question) - essay.ESSAY_GENERIC
+    if want and len(qtok & want) >= 0.8 * len(want):
+        return ""  # the request restates the whole item: nothing of the reply is separable from it
+
+    def level(parts: list[str]) -> int:
+        return _reply_leak_level(graded, kind, " ".join(parts), question, problem_text, sources)
+
+    collective = False
+    for _ in range(len(sents)):
+        if level(sents) == 0:
+            break
+        bad = [i for i, x in enumerate(sents) if len(x.split()) >= 4 and level([x]) > 0]
+        if not bad:
+            collective = True
+            # only together do the sentences finish the item: the ones the question did not ask about go, most of the
+            # item's own words first; a sentence that answers what was asked (a formula) stays
+            cands = [(len(content_tokens(x) & want), i) for i, x in enumerate(sents)
+                     if len(x.split()) >= 6 and not essay.STRICT_COACH.search(x) and not essay.MODAL.search(x)
+                     and len(content_tokens(x) & want) >= 1 and len(content_tokens(x) & qtok) < 2]
+            if not cands:
+                return ""
+            bad = [max(cands)[1]]
+        sents = [x for i, x in enumerate(sents) if i not in bad]
+        if not sents:
+            return ""
+    if collective:  # what stays answers what was asked: a sentence full of the item's words that the question did not ask about goes
+        sents = [x for x in sents if len(content_tokens(x) & qtok) >= 2 or len(content_tokens(x) & want) < 2]
+        if not any(len(content_tokens(x) & qtok) >= 2 for x in sents):
+            return ""
+    if level(sents) != 0 or not any(len(x.split()) >= 5 for x in sents):
+        return ""
+    return " ".join(sents)
 
 
 _ESSAYISH = re.compile(r"\b(?:essays?|papers?|thesis|paragraphs?|argue|argument|arguments|position|drafts?|\d+\s*words)\b", re.I)
@@ -4207,6 +4458,54 @@ def finished_answer(body: str, reply: str) -> bool:
     return _parts_answered(core or body, reply)
 
 
+_FORMULA = re.compile(r"\b(?:[A-Z][a-z]?\d*){2,}\b|\b[A-Z][a-z]?\d+\b|\([A-Za-z0-9]+\)\d*")
+_ITEM_LABEL = re.compile(r"\b(?:problem|pre-?lab(?:\s+question)?|report(?:\s+question)?|question|exercise|part|item|task)\s*#?\d+\w?\b", re.I)
+
+
+def written_short(it: dict[str, Any] | None) -> bool:
+    """A short written graded item whose answer is sentences, not values: no answer key, up to 400 words with no essay
+    words, and no number beyond its label, its points and the formulas it names ('Explain how the empirical
+    formula CH2O relates to C6H12O6 ...')."""
+    body = ((it or {}).get("body") or "").strip()
+    if not body or item_key(it) or not (essay.is_short_answer({"body": body}) or written_item(body)):
+        return False
+    core = _blank_logistics(_FORMULA.sub(" ", _ITEM_LABEL.sub(" ", body)))
+    return not numbers(core)
+
+
+def _names_written(it: dict[str, Any], text: str) -> bool:
+    """The text names this short written item: its number or label, three of its own words, or 'the <topic> problem'."""
+    return names_item(text, it) or (topic_named_item([it], text) or {}).get("id") == it.get("id") and it.get("id") is not None
+
+
+def _states_item_sentence(it: dict[str, Any], text: str) -> bool:
+    """One plain declarative sentence (no advice, no question) that carries two of the item's own concept words: the
+    sentence a student could write down for the item."""
+    want = content_tokens(it.get("body") or "") - essay.ESSAY_GENERIC
+    for sn in _proof_sentences(text):
+        if len(sn.split()) >= 6 and not essay.STRICT_COACH.search(sn) and not essay.MODAL.search(sn) \
+                and len(content_tokens(sn) & want) >= 2:
+            return True
+    return False
+
+
+_WRITE_SENT = re.compile(r"\b(?:write|draft|compose|word|phrase|give\s+me|say|put)\b[^.?!]{0,40}\b(?:sentences?|answers?|explanations?|"
+                         r"responses?|lines?|reply|paragraph|definitions?|description)\b|\b(?:write|draft)\s+(?:it|this|that)\b", re.I)
+
+
+def asked_sentence(it: dict[str, Any], reply: str, question: str) -> bool:
+    """'Write the sentence about the molar masses for me': the student asks for the writing of a short written item and the
+    reply states it, in one plain sentence that carries two of the item's own concept words."""
+    if not question or not (writing_request(question) or _WRITE_SENT.search(question)) or not written_short(it):
+        return False
+    want = content_tokens(it.get("body") or "") - essay.ESSAY_GENERIC
+    for sn in _proof_sentences(reply):
+        if len(sn.split()) >= 6 and not essay.STRICT_COACH.search(sn) and not essay.MODAL.search(sn) \
+                and len(content_tokens(sn) & want) >= 2:
+            return True
+    return False
+
+
 _PART_SPLIT = re.compile(r"[;:]|,\s*(?:and\s+|then\s+)?|\band\s+(?=(?:state|give|explain|describe|define|name|list|identify|compare|say|show|"
                          r"write|include|contrast|relate|tell)\b)|\bthen\b|\([a-d]\)|\bpart\s+\d\b|(?<=[.!?])\s+", re.I)
 _EXAMPLE_MARK = re.compile(r"\bexamples?\b|\bsuch as\b|\be\.g\b|\bfor instance\b|\billustrat", re.I)
@@ -4228,6 +4527,11 @@ def _parts_answered(core: str, reply: str) -> bool:
         toks = {t for t in content_tokens(clause) - essay.ESSAY_GENERIC if not t.startswith("exampl") and t not in _TASK_VERBS}
         if toks or ex:
             parts.append((toks, ex))
+    # every 'example' part ('give a named example', 'such as CH2O and C6H12O6') asks for the same one sentence
+    ex_parts = [p for p in parts if p[1]]
+    if len(ex_parts) > 1:
+        merged = (set().union(*(p[0] for p in ex_parts)), True)
+        parts = [p for p in parts if not p[1]] + [merged]
     if len(parts) < 2 or len(parts) > 8:
         return False
     sents = [x for x in _proof_sentences(reply) if len(x.split()) >= 5 and not essay.STRICT_COACH.search(x) and not essay.MODAL.search(x)]
@@ -4260,12 +4564,13 @@ def _reply_leak_level(graded: dict, kind: str, raw: str, question: str, problem_
                                                       "question_refs": question_refs(graded, question)}):
         return 2
     if kind == "problem" and body:
-        if not numbers(body) and essay.is_short_answer({"body": body}) and finished_answer(body, reply):
-            return 2  # a written 'explain why' item with no numbers: a finished answer is never shown as coaching
+        if written_short(graded) and (finished_answer(body, reply) or asked_sentence(graded, reply, question)):
+            return 2  # a written 'explain why' item: a finished answer is never shown as coaching, with points or formulas in it
         return 2 if _leaks_problem(_Text(reply), _Text(body), reply, True) else 0
     if kind == "essay":
         it = {"title": graded.get("title", ""), "body": body or problem_text}
-        if (essay.is_short_answer(it) or written_item(it["body"])) and finished_answer(it["body"], reply):
+        if (essay.is_short_answer(it) or written_item(it["body"])) and (finished_answer(it["body"], reply)
+                                                                        or asked_sentence(it, reply, question)):
             return 2  # a finished answer is never shown under the 'concepts and an approach' banner
         return essay_leak_level(it, raw or "", question, True, sources)
     if kind == "proof":
@@ -4392,7 +4697,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     if feedback:
         blocks, used = _feedback_reply(provider, store, course_id, graded, src_block, question, depth_rule,
                                        len(sources), sources, kind)
-    elif kind == "problem" and numbers(problem_text):
+    elif kind == "problem" and numbers(problem_text) and not written_short(graded):
         system = TWIN_SYSTEM.format(depth_rule=depth_rule)
         user = f"{src_block}\n\nTHE STUDENT'S GRADED PROBLEM (do not solve it):\n{problem_text}"
         if check:
@@ -4569,6 +4874,12 @@ def colliding_sentence(it: dict[str, Any], text: str) -> str:
     unknowns, else one with the most of its distinctive numbers or matrix rows. Quoted as written (matrix brackets
     intact); used in refusal messages, never prints the key."""
     sents = _sentences_of(text or "")
+    if (it.get("kind") or _item_kind(it)) == "proof":
+        # a proof is quoted at the sentence that carries its step (the construction or the conclusion), never its premise
+        carrier = proof_idea_sentence(it, text or "") or next(
+            (sn for sn in sents if (_P_CONSTRUCT.search(sn) or _P_CLAIM.search(sn) or _AFFINE_RX.search(sn)) and "?" not in sn), "")
+        if carrier:
+            return carrier
     key = item_key(it)
     ctx = {"named": True, "small": True}
     for sn in sents:
@@ -4936,6 +5247,13 @@ def check_guide(store, course_id: int, title: str, body: str, n_cites: int | Non
     hit = check_reply(store, course_id, title, body, n_cites=n_cites, data=data)
     if hit:
         return out(hit, hit.get("reason", "reply"))
+    for it in items:  # the pivot of a count-of-solutions proof, even as one question-and-answer sentence: it names the proof
+        if it["kind"] == "proof" and proof_idea_sentence(it, clean):
+            return out(it, "proof")
+    for it in items:  # a terse cited finished answer to a short written item the guide names (decision 9)
+        if it["kind"] in ("problem", "essay") and written_short(it) and _names_written(it, f"{title}\n{clean}") \
+                and (finished_answer(it["body"], clean) or _states_item_sentence(it, clean)):
+            return out(it, "finished")
     r = _Text(clean)
     problems = [i for i in items if i["kind"] in ("problem", "proof") and (i.get("body") or "").strip()]
     essays = [i for i in items if i["kind"] == "essay" and (i.get("body") or "").strip()]
@@ -5020,6 +5338,9 @@ def check_card(store, course_id: int, front: str, back: str, source: dict[str, A
     hit = check_reply(store, course_id, front, text, data=data)
     if hit:
         return hit
+    for it in items:  # 'Thesis for the empirical vs molecular formula problem?' with the finished sentence on the back
+        if it["kind"] in ("problem", "essay") and written_short(it) and _names_written(it, front) and _states_item_sentence(it, back):
+            return _hit(it, "card")
     for it in items:
         if it["kind"] == "problem" and copies_item(back, it):
             return _hit(it, "card")
@@ -5052,6 +5373,24 @@ def _held_note(names: list[str]) -> str:
     who = " and ".join(dict.fromkeys(names)) or "work"
     return (f"This answer was held back and left out because it was too close to your graded {who}. "
             "Ask for a similar problem with different numbers instead.")
+
+
+_LIST_MARK = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+
+
+def _list_units(seg: str) -> list[str]:
+    """The lines of a block that holds two or more list items, each item with its continuation lines ([] for any other
+    block): the heading or lead-in lines stay single units."""
+    lines = seg.splitlines()
+    if sum(1 for ln in lines if _LIST_MARK.match(ln)) < 2:
+        return []
+    units: list[str] = []
+    for ln in lines:
+        if not _LIST_MARK.match(ln) and units and _LIST_MARK.match(units[-1]) and ln.startswith((" ", "\t")):
+            units[-1] += "\n" + ln
+        else:
+            units.append(ln)
+    return units
 
 
 LAST_SCRUB_ITEMS: list[int] = []  # ids of the items the last scrub_parts call matched (for the Practice button)
@@ -5091,12 +5430,27 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
             n += 1
             continue
         hit = hit_of(seg)
-        if not hit:
-            for line in seg.splitlines():
-                if re.match(r"^\s*(?:[-*+]|\d+[.)])\s", line):
-                    hit = hit_of(line)
-                    if hit:
-                        break
+        units = _list_units(seg)
+        if units:
+            # a list: only the offending item goes, never its siblings (nor the heading or lead-in line above them)
+            hits = [(u, hit_of(u)) for u in units if _LIST_MARK.match(u)]
+            bad = [(u, h) for u, h in hits if h]
+            kept = [u for u in units if not any(u is b for b, _ in bad)]
+            rest = "\n".join(kept)
+            if bad and rest.strip() and not hit_of(rest):
+                drop_details = any(h.get("reason") == "copy" for _, h in bad)
+                for _, h in bad:
+                    n += 1
+                    names.append(_item_name(h))
+                    kinds.append(h.get("kind"))
+                    if h.get("id") and h["id"] not in LAST_SCRUB_ITEMS:
+                        LAST_SCRUB_ITEMS.append(h["id"])
+                out.append(rest)
+                continue
+            if not bad and not hit:
+                out.append(seg)
+                continue
+            hit = hit or bad[0][1]
         if hit:
             n += 1
             drop_details = hit.get("reason") == "copy" and not seg.lower().startswith("<details>")
