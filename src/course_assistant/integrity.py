@@ -1152,10 +1152,16 @@ _SOLVE_ASK = re.compile(r"\b(solve|compute|calculate|work\s+out|the\s+answer|sol
                         r"give\s+me|show\s+me|do\s+(?:it|this|my))\b", re.I)
 
 
+# 'Is Problem 2 hard?', 'How long will Problem 2 take?': a question about the assignment's size, not its content
+_SIZE_ASK = re.compile(r"^\W*(?:is|are|was|will|would|does|should)\b[^.!?\n]{0,60}\b(?:hard|harder|difficult|easy|easier|tricky|long|longer|"
+                       r"short|doable|time[- ]consuming|take\s+long|a\s+lot\s+of\s+work)\b[^.!?\n]{0,30}\??\s*$|"
+                       r"^\W*how\s+(?:hard|difficult|long|much\s+work|much\s+time)\b[^.!?\n]{0,60}\??\s*$", re.I)
+
+
 def is_logistics(text: str) -> bool:
     """A question about the assignment itself (due date, points, length, late policy, collaboration), not its content."""
     t = text or ""
-    return bool(_LOGISTICS.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t)
+    return bool(_LOGISTICS.search(t) or _SIZE_ASK.search(t)) and not _SOLVE_ASK.search(t) and not writing_request(t) and not is_check_ask(t)
 
 
 def draft_text(question: str) -> str:
@@ -1206,6 +1212,16 @@ def _set_topic_match(store, items: list[dict[str, Any]], question: str) -> dict[
         if n > top:
             best, top = its, n
     if best and top >= 1:
+        # 'the NaCl problem on the problem set': when exactly one item's own text carries the topic words, it is that item
+        gone = _SET_WORDS_PFX | {w[:5] for w in GENERIC}
+        wset = (_pfx_set(stripped) | {a.lower() for a in re.findall(r"\b[A-Z]{2,4}\b", stripped)}) - gone
+        per = [(len(wset & (_pfx_set(f"{i.get('title', '')} {i.get('body', '')}") - gone)), i) for i in best]
+        per.sort(key=lambda x: -x[0])
+        if per[0][0] >= 1 and per[0][0] > per[1][0]:
+            one = dict(per[0][1])
+            one["source"] = "material" if one.get("material_id") else "item"
+            one["score"] = 0.7
+            return one
         out = _combined(store, best)
         out.update(score=0.7)
         return out
@@ -3126,11 +3142,27 @@ def claims_check(question: str, item: dict[str, Any] | None = None) -> bool:
     return item is None or has_candidate(q, item)
 
 
+def _unrelated_turn(question: str, item: dict[str, Any]) -> bool:
+    """The question brings its own data (its own matrix rows or equations, or numbers) and refers to nothing of the item:
+    it does not name it, share two of its concept words, name one of its unknowns, ask a check or carry its rows. A sticky
+    chat only touches the item for replies that are about it."""
+    q = _Text(question)
+    if not (q.mrows or q.erows):
+        return False
+    b = _Text(item.get("body") or "")
+    if _row_hits(q, b) or touches(question, item) or question_names(item, question) or is_check_ask(question) \
+            or has_candidate(question, item):
+        return False
+    return not any(b.fm.get(n, {n}) & q.forms for n in b.sig)
+
+
 def reply_ctx(item: dict[str, Any], question: str, reply: str, force_item: dict | None = None) -> dict[str, Any]:
     """The context key_leak needs for a reply in a chat: named, sticky, short, question_refs."""
     forced = bool(force_item and force_item.get("id") == item.get("id"))
     sticky = forced and force_item.get("reason") == "sticky"
     named = names_item(question or "", item) or (forced and not sticky)
+    if sticky and not named and _unrelated_turn(question or "", item):
+        forced = sticky = False  # a new, self-contained problem after the twin: judged on its own, not against the old item
     ctx = {"named": bool(named), "sticky": bool(forced), "short": len(_CITE_STRIP.sub("", reply or "").split()) < 80,
            "question_refs": question_refs(item, question or "")}
     if question and not claims_check(question, item):

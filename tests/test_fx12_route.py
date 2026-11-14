@@ -81,3 +81,86 @@ def test_d1_a_fully_held_back_answer_says_so_once_and_truthfully(tmp_path):
     assert "did not return an answer" not in text.lower()
     assert text.lower().count("held back") == 1
     assert "Problem 5" in text
+
+
+# ------------------------------------------------------------------ decision 8 (context half)
+from fx9_world import world as w9
+
+
+def _sticky(s, ids, label="Problem 1"):
+    return dict(s.graded_item(ids[label]), kind="problem", reason="sticky", source="item", score=1.0)
+
+
+OWN = "Solve A x = b for A = [[1,1],[0,2]] and b = (3, 4) using back substitution"
+
+
+def test_d8_unrelated_self_contained_problem_after_a_twin_is_not_judged_against_it():
+    s, c, ids = w9(essay=False)
+    assert not integrity.check_reply(s, c, OWN, "x2 = 2 and x1 = 1 [1]", force_item=_sticky(s, ids))
+
+
+@pytest.mark.parametrize("q,r", [
+    ("what is x1?", "x1 = 1 [1]"),                       # names one of the item's unknowns
+    ("Problem 1: what is x1?", "x1 = 1 [1]"),
+    (OWN, "The solution is x = (1, 1, 2) [1]."),         # the item's own whole answer is a leak in any context
+])
+def test_d8_a_question_that_refers_to_the_item_is_still_judged(q, r):
+    s, c, ids = w9(essay=False)
+    assert integrity.check_reply(s, c, q, r, force_item=_sticky(s, ids))
+
+
+# ------------------------------------------------------------------ decision 9: routing precision
+from fx9_world import world as w9b  # noqa: E402
+
+SET3 = """# Problem Set 3
+
+## Problem 1
+
+How many grams of NaCl are needed to make 0.350 mol of solution?
+
+## Problem 2
+
+Find the empirical formula of a compound that is 40.0% carbon, 6.7% hydrogen and 53.3% oxygen.
+
+## Problem 3
+
+Explain why a limiting reagent stops a reaction.
+"""
+
+
+def set_world(tmp_path):
+    s = Store(":memory:")
+    c = s.add_course("Chem")
+    f = tmp_path / "problem-set-3.md"
+    f.write_text(SET3)
+    mid = importers.import_file(s, c, f)
+    integrity.mark_material_graded(s, mid)
+    return s, c
+
+
+@pytest.mark.parametrize("q", ["Is Problem 2 hard?", "How long is Problem 2?", "Is problem 2 harder than problem 1?",
+                               "How long will Problem 2 take?", "Is Problem 2 doable in an hour?"])
+def test_d9_size_questions_are_not_check_asks_and_do_not_route(q):
+    s, c, ids = w9b()
+    assert not integrity.is_check_ask(q)
+    assert integrity.match_graded(s, c, q) is None
+
+
+@pytest.mark.parametrize("q", ["Problem 2 is hard, how do I start?", "Is it hard to solve for d in Problem 2?",
+                               "Is Problem 2 about determinants?"])
+def test_d9_help_with_the_item_still_routes(q):
+    s, c, ids = w9b()
+    m = integrity.match_graded(s, c, q)
+    assert m and m["id"] == ids["Problem 2"]
+
+
+def test_d9_the_nacl_problem_is_one_item_not_the_set(tmp_path):
+    s, c = set_world(tmp_path)
+    m = integrity.match_graded(s, c, "Walk me through the NaCl problem on the problem set")
+    assert m and m.get("id") and "NaCl" in m["body"] and not m.get("members")
+
+
+def test_d9_a_set_ask_that_two_items_share_still_touches_the_whole_set(tmp_path):
+    s, c = set_world(tmp_path)
+    m = integrity.match_graded(s, c, "I'm stuck on the problem set about NaCl and carbon")
+    assert m and len(m.get("members") or []) == 2
