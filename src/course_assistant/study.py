@@ -449,6 +449,10 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
         scrub_ids = list(getattr(integ, "LAST_SCRUB_ITEMS", []) or []) if scrubbed else []
     elif getattr(integ, "scrub_markdown", None):
         raw, scrubbed = integ.scrub_markdown(store, course_id, raw, question or task[:300])
+    held = bool(scrubbed) and not re.sub(r"^[ \t]*#{1,6}[ \t].*$|<[^>]*>", "", raw, flags=re.M).strip()
+    if held:  # every part was held back: the page says so (once); it never says the AI gave no answer
+        return {"routed": None, "blocks": [], "body": "", "used": [], "outside": False, "not_covered": False,
+                "sources": sources, "scrubbed": scrubbed, "scrub_note": scrub_note, "scrub_items": scrub_ids, "held": True}
     # the banners (not covered, no passages cited) are worked out from what remains, never from the note
     ans = _mod("grounding").parse_answer(normalize_details(raw), sources)
     return {"routed": None, "blocks": _block_dicts(ans.blocks), "body": _clean_body(ans.body_md),
@@ -472,6 +476,8 @@ def _generate(store: Store, course_id: int, provider, kind: str, title: str, tas
     d = dict(data or {})
     d.update({"outside": r["outside"], "not_covered": r["not_covered"], "mode": "answer", "blocks": blocks,
               "scrubbed": r.get("scrubbed", 0)})
+    if r.get("held"):
+        d["held_back"] = True
     if r.get("scrub_items") and _scrub_offer(store, r):
         d["graded_offers"] = _scrub_offer(store, r)  # the button names the item the note names
     return store.add_guide(course_id, kind, title, body, sources=_guide_sources(r["sources"], r["used"]), data=d,
@@ -1525,6 +1531,7 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
         body = f"{normal['body']}\n\n{disclaimer.FOOTER}"
         data = {"twin": False, "count": count, "mode": "answer", "blocks": normal["blocks"],
                 "outside": normal["outside"], "not_covered": normal["not_covered"], "twins": [],
+                "held_back": bool(normal.get("held")),
                 "graded_offers": _scrub_offer(store, normal) or _graded_offers(store, course_id, topic)}
         return store.add_guide(course_id, "practice", f"Practice: {topic}", body,
                                sources=_guide_sources(normal["sources"], normal["used"]), data=data, question=topic,

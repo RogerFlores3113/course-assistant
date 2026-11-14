@@ -4342,6 +4342,23 @@ def _text_key_item(items: list[dict[str, Any]], whole: str, text: str, data: dic
     return best
 
 
+def _copies_plain(text: str, body: str, b: "_Text", r: "_Text") -> bool:
+    """A copy of a graded problem that has no significant numbers of its own (its numbers are small entries of a
+    matrix). Words alone are never enough: 'eigenvalues of the matrix with rows ...' is shared topic vocabulary. The text
+    must carry all the item's own rows, or, when it shows no rows of its own, restate nearly the whole statement."""
+    nrows = len(b.mrows or b.erows or [])
+    if nrows and _row_hits(r, b) >= nrows:
+        return True
+    if nrows and (r.mrows or r.erows):
+        return False  # other rows: a similar problem with different numbers, not a copy
+    bt, qt = set(tokens(body)), set(tokens(text))
+    if not bt or len(bt) < 6:
+        return False
+    both = r.tok & b.tok
+    jac = len(both) / max(1, len(r.tok | b.tok))
+    return jac >= 0.85 and len(bt & qt) / len(bt) >= 0.9
+
+
 def copies_item(text: str, it: dict[str, Any], rows: bool = False) -> bool:
     """The text reproduces a graded question (most of its words and its own numbers), as a card, a guide part or a practice
     question does when it copies the assignment. A twin with other numbers is not a copy."""
@@ -4354,7 +4371,7 @@ def copies_item(text: str, it: dict[str, Any], rows: bool = False) -> bool:
     if _overlap_score(text, body, paste_only=True) < 0.5:
         return False
     if not b.sig:
-        return True
+        return _copies_plain(text, body, b, r)
     hit = [n for n in b.sig if b.fm.get(n, {n}) & r.forms]
     return len(hit) >= max(1, math.ceil(0.6 * len(b.sig)))
 
@@ -4530,6 +4547,12 @@ def _scrub_note(names: list[str], n: int) -> str:
     return f"{n} parts of this guide were left out because they matched your graded {who}. Ask for similar problems with different numbers instead."
 
 
+def _held_note(names: list[str]) -> str:
+    who = " and ".join(dict.fromkeys(names)) or "work"
+    return (f"This answer was held back and left out because it was too close to your graded {who}. "
+            "Ask for a similar problem with different numbers instead.")
+
+
 LAST_SCRUB_ITEMS: list[int] = []  # ids of the items the last scrub_parts call matched (for the Practice button)
 
 
@@ -4583,9 +4606,15 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
         else:
             out.append(seg)
     note = ""
+    cleaned = re.sub(r"\n{3,}", "\n\n", "".join(out))
     if n:
-        note = essay.SCRUBBED.strip("_") if all(k == "essay" for k in kinds) else _scrub_note(names, n)
-    return re.sub(r"\n{3,}", "\n\n", "".join(out)), n, note
+        if all(k == "essay" for k in kinds):
+            note = essay.SCRUBBED.strip("_")
+        elif not re.sub(r"^[ \t]*#{1,6}[ \t].*$|<[^>]*>", "", cleaned, flags=re.M).strip():
+            note = _held_note(names)  # nothing is left: say it was held back, once, not that the AI gave no answer
+        else:
+            note = _scrub_note(names, n)
+    return cleaned, n, note
 
 
 def scrub_markdown(store, course_id: int, text: str, question: str = "") -> tuple[str, int]:
