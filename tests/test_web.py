@@ -944,3 +944,29 @@ def test_keep_copy_route_swaps_the_searched_copy(ready):
     ready.store.update_material(b, duplicate_of=a)
     ready.client.post(f"/materials/{b}/keep-copy", follow_redirects=True)
     assert ready.store.material(b)["duplicate_of"] is None and ready.store.material(a)["duplicate_of"] == b
+
+
+def test_a_wholly_held_guide_is_a_notice_not_a_failure(ready, monkeypatch):
+    cid = mkcourse(ready.store)
+
+    class HeldBack(ValueError):
+        pass
+
+    def primer(store, course_id, provider, *, event_id=None):
+        raise HeldBack("Nothing was saved, because every part of it was held back. It was too close to Problem 5.")
+
+    def broken(store, course_id, provider, *, event_id=None):
+        raise RuntimeError("the model timed out")
+
+    monkeypatch.setitem(sys.modules, "course_assistant.study", types.SimpleNamespace(primer=primer, HeldBack=HeldBack))
+    app = web.create_app(ready.store, key=KEY, provider_factory=lambda: SimpleNamespace(name="f", model="m"))
+    c = TestClient(app, base_url="http://127.0.0.1:8766")
+    c.cookies.set(web.COOKIE, KEY)
+    before = len(ready.store.guides(cid)) if hasattr(ready.store, "guides") else 0
+    r = c.post(f"/courses/{cid}/study/primer", data={}, headers={"HX-Request": "true"})
+    assert r.status_code == 200 and "Problem 5" in r.text and "did not work" not in r.text
+    assert (len(ready.store.guides(cid)) if hasattr(ready.store, "guides") else 0) == before
+    # a real failure still says so
+    monkeypatch.setitem(sys.modules, "course_assistant.study", types.SimpleNamespace(primer=broken, HeldBack=HeldBack))
+    r = c.post(f"/courses/{cid}/study/primer", data={}, headers={"HX-Request": "true"})
+    assert r.status_code == 400 and "did not work" in r.text

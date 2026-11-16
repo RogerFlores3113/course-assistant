@@ -1272,6 +1272,9 @@ def create_app(store: Store, *, key: str | None = None, provider_factory=None, s
         except Exception as e:
             if _is_no_provider(e):
                 return after(request, course_id, "study", error="Connect an AI first. See the panel below.")
+            held = getattr(_mod("study"), "HeldBack", None)
+            if held is not None and isinstance(e, held):  # every part was held back: a notice, not a failure
+                return after(request, course_id, "study", notice=_friendly(e))
             return after(request, course_id, "study", error=f"{STUDY_LABELS[action]} did not work: {_friendly(e)}")
         if action == "flashcards":
             n = len(result or [])
