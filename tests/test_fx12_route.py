@@ -72,15 +72,11 @@ def test_d1_explain_on_a_shared_topic_is_kept(tmp_path):
 def test_d1_a_fully_held_back_answer_says_so_once_and_truthfully(tmp_path):
     s, c, ids = eworld(tmp_path)
     copy = "Find the eigenvalues of the matrix with rows (2, 3) and (3, -6)."
-    gid = study.explain(s, c, FakeProvider(copy), "eigenvalues")
-    g = s.guide(gid)
-    assert g["data"].get("held_back") and g["data"].get("scrubbed")
-    view = web_helpers.guide_view(g, store=s)
-    assert not view["not_covered"]
-    text = " ".join(b["html"] for b in view["blocks"])
-    assert "did not return an answer" not in text.lower()
-    assert text.lower().count("held back") == 1
-    assert "Problem 5" in text
+    with pytest.raises(study.HeldBack) as e:  # fx13 glue: a guide that holds only the held note is never saved
+        study.explain(s, c, FakeProvider(copy), "eigenvalues")
+    msg = str(e.value)
+    assert "Problem 5" in msg and msg.lower().count("held back") == 2 and "did not return an answer" not in msg.lower()
+    assert not s.guides(c)
 
 
 # ------------------------------------------------------------------ decision 8 (context half)

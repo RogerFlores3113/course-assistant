@@ -182,9 +182,9 @@ def test_d6_a_page_that_left_an_item_out_never_says_not_covered(w):
 
 def test_d6_a_whole_list_that_is_wholly_offending_is_held_back_once(w):
     s, c, ids = w
-    gid = study.explain(s, c, FakeProvider("## Solutions\n\n- For the NaCl problem the answer is mass = 5.26 g [1].\n"), "the NaCl problem")
-    g = s.guide(gid)
-    assert g["data"].get("held_back") and not g["data"]["not_covered"]
+    with pytest.raises(study.HeldBack) as e:  # fx13 glue: nothing is saved for a wholly held answer
+        study.explain(s, c, FakeProvider("## Solutions\n\n- For the NaCl problem the answer is mass = 5.26 g [1].\n"), "the NaCl problem")
+    assert "Problem 1" in str(e.value) and not s.guides(c)
 
 
 REP = "Calculate the percent error for dilution B and name two sources of error that could explain it."
