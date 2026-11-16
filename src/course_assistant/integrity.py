@@ -4609,6 +4609,8 @@ def route_note(graded: dict[str, Any], mode: str, why: str = "", check: bool = F
     'a similar problem' for a page that shows none, and it blames the reply, not the question, when the reply was
     what the app threw away."""
     name = _item_name(graded)
+    if why in _REPLY_WHY and not (graded.get("label") or graded.get("title")):
+        why = ""  # no item matched: the page never says an answer was "too close" to one (the plain request wording follows)
     if mode == "feedback":
         return f"This looks like your own draft for {name}, so here is feedback, not a rewrite."
     if held and mode != "twin":  # the page shows the fixed "I can't write this" text, so it never says "concepts and an approach"
@@ -4646,6 +4648,19 @@ def _flat(*parts: str) -> str:
 def _feedback_reply(provider, store, course_id: int, graded: dict, src_block: str, question: str, depth_rule: str,
                     n_sources: int, sources: list[Any], kind: str = "essay") -> tuple[list[Block], list[int]]:
     return essay.feedback_reply(provider, graded, kind, src_block, question, depth_rule, n_sources, sources)
+
+
+def _plain(text: str) -> str:
+    """Words only: cites, markup, punctuation and case gone, so two renderings of one sentence compare equal."""
+    return " ".join(re.sub(r"\[\d+(?:\s*[,;-]\s*\d+)*\]|<[^>]*>|[*_`>#]", " ", text or "").lower().split()
+                    ).translate(str.maketrans("", "", ".,;:!?\"'()"))
+
+
+def _not_already_shown(kept: list[str], blocks: list[Any]) -> list[str]:
+    """The kept sentences of a replaced answer that the page does not already show (a sentence the shown answer repeats, or
+    holds inside a longer one, is not given a second time under 'these parts stay close')."""
+    shown = _plain(" ".join(getattr(b, "md", "") or "" for b in blocks))
+    return [k for k in kept if _plain(k) and _plain(k) not in shown]
 
 
 def twin_fallback(name: str, reason: str, check: bool = False, practice_button: bool = False) -> str:
@@ -4738,6 +4753,7 @@ def twin(store, course_id: int, question: str, provider, graded: dict, why: str 
     if keep_text and keep_sources and kind == "essay" and not feedback and mode != "twin" and not fell_back:
         kept = essay.passing_sentences({"title": graded.get("title", ""), "body": body or problem_text}, keep_text, question,
                                        keep_sources[:6])
+        kept = _not_already_shown(kept, blocks)
         if kept and (essay.is_short_answer({"body": body or problem_text}) or written_item(body or problem_text)) and (
                 finished_answer(body or problem_text, keep_text) or finished_answer(body or problem_text, " ".join(kept))):
             kept = []  # a short written item: the cited sentences of a finished answer together ARE the answer, none stays
@@ -5369,10 +5385,46 @@ def _scrub_note(names: list[str], n: int) -> str:
     return f"{n} parts of this guide were left out because they matched your graded {who}. Ask for similar problems with different numbers instead."
 
 
-def _held_note(names: list[str]) -> str:
+def _held_note(names: list[str], essay_wording: bool = False) -> str:
     who = " and ".join(dict.fromkeys(names)) or "work"
-    return (f"This answer was held back and left out because it was too close to your graded {who}. "
-            "Ask for a similar problem with different numbers instead.")
+    tail = ("Ask what the assignment and rubric reward, or paste your own draft for feedback." if essay_wording
+            else "Ask for a similar problem with different numbers instead.")
+    return f"This answer was held back and left out because it was too close to your graded {who}. {tail}"
+
+
+def _essay_scrub_note(names: list[str], n: int) -> str:
+    """The essay-specific note (assignment and rubric advice), naming the essay that matched."""
+    who = " and ".join(dict.fromkeys(names)) or "work"
+    tail = "Ask what the assignment and rubric reward, or paste your own draft for feedback."
+    if n == 1:
+        return f"A part of this guide was left out because it read like finished writing for your graded {who}. {tail}"
+    return f"{n} parts of this guide were left out because they read like finished writing for your graded {who}. {tail}"
+
+
+_HEADING_LINE = re.compile(r"^[ \t]*(#{1,6})[ \t]+\S[^\n]*$")
+
+
+def _drop_emptied_headings(out: list[Any]) -> list[Any]:
+    """Remove a heading whose section lost all its content to a drop (None marks where a part was dropped); a section that
+    keeps any content keeps its heading, and a heading that was already empty before the scrub is left alone."""
+    def level(seg):
+        if not isinstance(seg, str):
+            return 0
+        m = _HEADING_LINE.match(seg.strip())
+        return len(m.group(1)) if m else 0
+
+    out = list(out)
+    for i in range(len(out) - 1, -1, -1):
+        lv = level(out[i])
+        if not lv:
+            continue
+        j = i + 1
+        while j < len(out) and not (level(out[j]) and level(out[j]) <= lv):
+            j += 1
+        span = out[i + 1:j]
+        if any(x is None for x in span) and not any(isinstance(x, str) and x.strip() and not level(x) for x in span):
+            out[i] = ""
+    return out
 
 
 _LIST_MARK = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
@@ -5428,6 +5480,7 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
         if drop_details and seg.lower().startswith("<details>"):
             drop_details = False  # the solution of a copied question goes with it
             n += 1
+            out.append(None)
             continue
         hit = hit_of(seg)
         units = _list_units(seg)
@@ -5456,17 +5509,24 @@ def scrub_parts(store, course_id: int, text: str, question: str = "") -> tuple[s
             drop_details = hit.get("reason") == "copy" and not seg.lower().startswith("<details>")
             names.append(_item_name(hit))
             kinds.append(hit.get("kind"))
+            out.append(None)
             if hit.get("id") and hit["id"] not in LAST_SCRUB_ITEMS:
                 LAST_SCRUB_ITEMS.append(hit["id"])
         else:
             out.append(seg)
     note = ""
-    cleaned = re.sub(r"\n{3,}", "\n\n", "".join(out))
     if n:
-        if all(k == "essay" for k in kinds):
-            note = essay.SCRUBBED.strip("_")
-        elif not re.sub(r"^[ \t]*#{1,6}[ \t].*$|<[^>]*>", "", cleaned, flags=re.M).strip():
-            note = _held_note(names)  # nothing is left: say it was held back, once, not that the AI gave no answer
+        out = _drop_emptied_headings(out)  # a section that lost all its content takes its heading with it
+    cleaned = re.sub(r"\n{3,}", "\n\n", "".join(x for x in out if x is not None))
+    if n:
+        # essay wording (assignments, rubrics, thesis) only where the request is about the essay itself; a concept or
+        # maths request that matched an essay's words gets the neutral note that names the matched item
+        essay_words = all(k == "essay" for k in kinds) and not essay.concept_request(question)
+        empty = not re.sub(r"^[ \t]*#{1,6}[ \t].*$|<[^>]*>", "", cleaned, flags=re.M).strip()
+        if empty:
+            note = _held_note(names, essay_words)  # nothing is left: say it was held back, once, not that the AI gave no answer
+        elif essay_words:
+            note = _essay_scrub_note(names, n)
         else:
             note = _scrub_note(names, n)
     return cleaned, n, note

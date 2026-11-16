@@ -495,12 +495,22 @@ def _compose(store: Store, course_id: int, provider, task: str, sources: list[di
             "scrub_note": scrub_note, "scrub_items": scrub_ids}
 
 
+class HeldBack(ValueError):
+    """Every part of a guide was held back: nothing is saved, and the message (which names the item that matched) is shown."""
+
+
+def _held_message(note: str) -> str:
+    return f"Nothing was saved, because every part of it was held back. {(note or '').strip()}".strip()
+
+
 def _generate(store: Store, course_id: int, provider, kind: str, title: str, task: str, sources: list[dict[str, Any]],
               *, question: str = "", event_id: int | None = None, data: dict[str, Any] | None = None,
               max_tokens: int = 4000, extra_note: str = "") -> int:
     r = _compose(store, course_id, provider, task, sources, question=question, max_tokens=max_tokens)
     if r["routed"]:
         return r["routed"]
+    if r.get("held"):  # a guide that holds only the held note is never saved
+        raise HeldBack(_held_message(r.get("scrub_note", "")))
     body, blocks = r["body"], list(r["blocks"])
     extra_note = " ".join(x for x in (extra_note, r.get("scrub_note", "")) if x)
     if extra_note:
@@ -1657,6 +1667,8 @@ def practice(store: Store, course_id: int, provider, topic: str, *, count: int =
         normal = dict(normal, blocks=[{"kind": "text", "md": note, "cites": []}] + list(normal["blocks"]),
                       body=f"> {note}\n\n{normal['body']}")
     if not twins:
+        if normal.get("held"):
+            raise HeldBack(_held_message(normal.get("scrub_note", "")))
         body = f"{normal['body']}\n\n{disclaimer.FOOTER}"
         data = {"twin": False, "count": count, "mode": "answer", "blocks": normal["blocks"],
                 "outside": normal["outside"], "not_covered": normal["not_covered"], "twins": [],
