@@ -1,0 +1,32 @@
+{% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}Settings - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>Settings</h1>
+<p class="muted">New here? <a href="/setup">Connect an AI</a> walks you through the choices. An API key or a local model turns on the Study and Ask buttons in this app. Claude Desktop or Codex does not: with those you ask in their own window.</p>
+<form method="post" action="/settings" class="form card" data-busy="Working. This can take a few seconds.">
+  <fieldset><legend>AI provider</legend>
+  <label class="check"><input type="radio" name="ai_provider" value="none" {% if ai_kind not in ('anthropic','local') %}checked{% endif %}> None. The Study and Ask buttons stay off. You can still ask in Claude Desktop or Codex; see the Connect an AI page.</label>
+  <label class="check"><input type="radio" name="ai_provider" value="anthropic" {% if ai_kind == 'anthropic' %}checked{% endif %}> Anthropic API key</label>
+  <label class="check"><input type="radio" name="ai_provider" value="local" {% if ai_kind == 'local' %}checked{% endif %}> Local model server (such as LM Studio)</label></fieldset>
+  <fieldset><legend>Anthropic</legend>
+  <label>API key <input type="password" name="anthropic_api_key" autocomplete="off" aria-describedby="key-hint"></label>
+  <p id="key-hint" class="muted small">{{ 'A key is saved on this computer. Type a new one here to replace it.' if has_key else 'Paste your key from console.anthropic.com. It is stored on this computer only.' }}</p>
+  {% if has_key %}<label class="check"><input type="checkbox" name="clear_key" value="1"> Remove the saved key</label>{% endif %}
+  <label>Model <select name="anthropic_model">{% for v, l in models %}<option value="{{ v }}" {% if model == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></label></fieldset>
+  <fieldset><legend>Local server</legend>
+  <label>Server address <input name="local_base_url" value="{{ local_url }}" placeholder="http://127.0.0.1:1234" {{ fa('settings', 'local_base_url') }}></label>{{ fe('settings', 'local_base_url') }}
+  <label>Model name <input name="local_model" value="{{ local_model }}" placeholder="The model loaded in the server"></label></fieldset>
+  <fieldset><legend>Theme</legend>
+  {% for v in ('system', 'light', 'dark') %}<label class="check"><input type="radio" name="theme" value="{{ v }}" {% if (current_theme or 'system') == v %}checked{% endif %}> {{ v | capitalize }}</label>{% endfor %}</fieldset>
+  <div class="row"><button class="btn" type="submit">Save settings</button>
+  <button class="btn ghost" type="submit" formaction="/settings/test">Test connection</button></div>
+  <p class="muted small">Test connection checks the settings you saved most recently, so press Save settings first if you changed anything. It sends one tiny message and tells you whether the AI answered.</p>
+</form>
+<section class="card" aria-labelledby="ac-h"><h2 id="ac-h" class="h3">What Answer check protects</h2>
+<p>When you mark an assignment as graded, Answer check keeps the answer to each problem out of anything the app writes for you, so Ask, guides and flashcards can explain the ideas and write similar problems without handing you the solution. It works only on problems with a worked key, it cannot catch an answer written in an unusual form, and it does not check your own work or stop you from looking the answer up elsewhere.</p></section>
+<form method="post" action="/settings/shortcuts" class="form card">
+  <fieldset><legend>Flashcard keyboard shortcuts</legend>
+  <p id="sc-help" class="muted small">When on, on the flashcards page Space shows the answer and the keys 1 to 4 grade the card. They never work while you type in a field.</p>
+  <input type="hidden" name="next" value="/settings">
+  <label class="check"><input type="radio" name="on" value="1" {% if shortcuts_on %}checked{% endif %} aria-describedby="sc-help"> On</label>
+  <label class="check"><input type="radio" name="on" value="0" {% if not shortcuts_on %}checked{% endif %}> Off</label></fieldset>
+  <div><button class="btn" type="submit">Save shortcut choice</button></div>
+</form></section>{% endblock %}

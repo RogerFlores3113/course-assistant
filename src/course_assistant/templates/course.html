@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block title %}{{ page_title }} - Course Assistant{% endblock %}
+{% block flash %}{% endblock %}
+{% block body %}
+<div class="course-head" style="{{ accent_style(accent) }}">
+  <h1>{{ course.name }}</h1>
+  <p class="muted">{{ [course.code, course.term, course.university, course.instructor] | select | join(', ') }} &middot; <a href="/courses/{{ course.id }}/edit">Edit course</a> &middot; <a href="/flashcards/{{ course.id }}">Review flashcards</a></p>
+</div>
+{% include "course_body.html" %}
+{% endblock %}

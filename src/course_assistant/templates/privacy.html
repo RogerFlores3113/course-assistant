@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block title %}Privacy - Course Assistant{% endblock %}
+{% block body %}<section class="narrow prose"><h1>Privacy</h1>
+<h2>Where your data lives</h2><p>Your courses, files, notes, guides and flashcards are stored in one folder on this computer. There is no account, no sync and no analytics. The app does not phone home.</p>
+<h2>When something leaves your computer</h2>
+<ul><li><strong>If you connect an Anthropic key:</strong> when you ask a question or use a study tool, the passages the app finds in your materials, and your question, are sent to Anthropic to write the answer. Nothing is sent until you ask.</li>
+<li><strong>If you use a local model server</strong> (such as LM Studio), the same text goes only to that server on your own machine.</li>
+<li><strong>If you use Claude Desktop or Codex</strong> through the connection on the Connect page, what that app reads from your materials is governed by that app's own privacy terms.</li>
+<li><strong>Transcribing recordings:</strong> it happens on your computer. The first time you use it, the app downloads a speech model once from the internet; after that it works offline.</li>
+<li><strong>Web pages:</strong> when you save a link, the app downloads that page. It follows each site's robots.txt, goes slowly, never signs in and never sends cookies.</li></ul>
+<h2>Your API key</h2><p>The key is kept in the app's local database and is never shown again after you save it.</p>
+<h2>Deleting</h2><p>You can delete any material, guide, event or whole course from the app, which removes it and its saved files from this computer. Your AI app can add things but cannot delete them.</p>
+<h2>Graded work</h2><p>Mark an assignment or exam as graded and the app will not solve it. It explains the ideas and works a similar problem with different numbers instead.</p></section>{% endblock %}

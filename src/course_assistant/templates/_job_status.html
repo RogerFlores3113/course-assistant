@@ -1,0 +1,5 @@
+{#- The wait status of one recording or photo. Polled while the job is waiting or running; once it ends the polling stops. -#}
+<span id="job-{{ m.id }}" class="job-status"{% if m.job_poll %} data-poll="1" hx-get="/materials/{{ m.id }}/status" hx-trigger="every 4s" hx-swap="outerHTML"{% endif %}>
+{% if m.status == 'error' and not m.job_text %}<br><span class="status-note bad-t">Problem: {{ m.status_note or 'could not be read' }}</span>
+{% elif m.job_text %}<br><span class="status-note">{{ m.job_text }}</span>{% if m.job_next %}<br><span class="muted small">{{ m.job_next }}{% if m.job_poll %} <a href="/courses/{{ m.course_id }}/materials">Check now</a>{% endif %}</span>{% endif %}{% if m.status_note and m.status == 'needs_transcription' %}<br><span class="muted small">{{ m.status_note }}</span>{% endif %}{% endif %}
+</span>

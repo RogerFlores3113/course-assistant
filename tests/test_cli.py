@@ -1,0 +1,289 @@
+import sys
+import types
+
+import httpx
+import pytest
+
+from course_assistant import __version__, cli, paths
+from course_assistant.store import Store
+
+
+@pytest.fixture(autouse=True)
+def data(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_DATA_DIR, str(tmp_path / "data"))
+    return tmp_path
+
+
+def run(*argv):
+    try:
+        cli.main(list(argv))
+    except SystemExit as e:
+        return e.code or 0
+    return 0
+
+
+def test_version(capsys):
+    assert run("version") == 0
+    assert __version__ in capsys.readouterr().out
+
+
+def test_no_args_and_bare_options_mean_serve(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "run_app", lambda port, open_browser: seen.append((port, open_browser)))
+    monkeypatch.setattr(cli, "_setup_logging", lambda: None)
+    run()
+    run("--no-browser", "--port", "9000")
+    run("serve", "--no-browser")
+    assert seen == [(paths.DEFAULT_PORT, True), (9000, False), (paths.DEFAULT_PORT, False)]
+
+
+def test_mcp_dispatches_to_server_main(monkeypatch):
+    called = []
+    monkeypatch.setitem(sys.modules, "course_assistant.mcp_server", types.SimpleNamespace(main=lambda: called.append(1)))
+    monkeypatch.setattr("course_assistant.mcp_server", sys.modules["course_assistant.mcp_server"], raising=False)
+    assert run("mcp") == 0
+    assert called == [1]
+
+
+def test_open_when_not_running(capsys):
+    assert run("open") == 1
+    assert "isn't running" in capsys.readouterr().err
+
+
+def test_open_when_running_uses_launch_code(monkeypatch):
+    paths.port_file().write_text("8123")
+    monkeypatch.setattr(cli, "_answers", lambda port: True)
+    opened = []
+    monkeypatch.setattr(cli.webbrowser, "open", opened.append)
+    assert run("open") == 0
+    assert len(opened) == 1 and opened[0].startswith("http://127.0.0.1:8123/launch?code=")
+    code = opened[0].split("code=")[1]
+    assert paths.use_launch_code(code)
+
+
+def test_stale_port_file_is_dropped(monkeypatch):
+    paths.port_file().write_text("8123")
+    monkeypatch.setattr(cli, "_answers", lambda port: False)
+    assert cli.find_running() is None
+    assert not paths.port_file().exists()
+
+
+def test_serve_starts_uvicorn_and_writes_port_file(monkeypatch):
+    created = {}
+    web = types.ModuleType("course_assistant.web")
+    web.create_app = lambda store, **kw: created.setdefault("app", object())
+    monkeypatch.setitem(sys.modules, "course_assistant.web", web)
+    uv = types.ModuleType("uvicorn")
+    seen = {}
+
+    def fake_run(app, **kw):
+        seen.update(kw, app=app, port_file=paths.port_file().read_text())
+
+    uv.run = fake_run
+    monkeypatch.setitem(sys.modules, "uvicorn", uv)
+    monkeypatch.setattr(cli, "find_running", lambda: None)
+    monkeypatch.setattr(cli, "_pick_port", lambda p: 8999)
+    cli.run_app(port=8766, open_browser=False)
+    assert seen["host"] == "127.0.0.1" and seen["port"] == 8999 and seen["app"] is created["app"]
+    assert seen["port_file"] == "8999"
+    assert not paths.port_file().exists()  # removed on exit
+
+
+def test_serve_when_already_running_only_opens(monkeypatch):
+    monkeypatch.setattr(cli, "find_running", lambda: 8766)
+    opened = []
+    monkeypatch.setattr(cli.webbrowser, "open", opened.append)
+    cli.run_app(open_browser=True)
+    assert opened and "/launch?code=" in opened[0]
+    opened.clear()
+    cli.run_app(open_browser=False)
+    assert not opened
+
+
+@pytest.fixture
+def temp_home(tmp_path, monkeypatch):
+    h = tmp_path / "home"
+    h.mkdir()
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(h))
+    monkeypatch.setenv("APPDATA", str(h / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(h / "Local"))
+    monkeypatch.setenv("CODEX_HOME", str(h / ".codex"))
+    monkeypatch.setenv("PATH", str(tmp_path / "emptybin"))
+    return h
+
+
+def test_connect_dispatch(monkeypatch, capsys, temp_home):
+    from course_assistant import connect
+
+    calls = []
+    monkeypatch.setattr(connect, "connect", lambda target, with_skills=True: calls.append((target, with_skills)) or
+                        [{"app": "Skills", "targets": {}, "message": "none"}])
+    assert run("connect", "--yes") == 0
+    assert run("connect", "codex", "--no-skills") == 0
+    assert calls == [("all", True), ("codex", False)]
+
+
+def test_connect_all_writes_nothing_when_no_app_is_installed(temp_home, capsys):
+    assert run("connect", "all", "--yes") == 1  # Claude Desktop and Codex are reported as not installed
+    out = capsys.readouterr().out
+    assert "doesn't seem to be installed" in out
+    assert not (temp_home / ".claude").exists() and not (temp_home / ".agents").exists()
+    assert not (temp_home / ".codex").exists() and not (temp_home / ".config").exists()
+
+
+def test_connect_says_what_it_writes_and_asks_first(temp_home, monkeypatch, capsys):
+    (temp_home / ".codex").mkdir()
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+    assert run("connect", "codex") == 1
+    out = capsys.readouterr().out
+    assert str(temp_home / ".codex" / "config.toml") in out and str(temp_home / ".agents" / "skills") in out
+    assert "Nothing was changed" in out and not (temp_home / ".codex" / "config.toml").exists()
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    assert run("connect", "codex") == 0
+    assert (temp_home / ".codex" / "config.toml").exists()
+    assert (temp_home / ".agents" / "skills" / "course-assistant").exists()
+
+
+def test_connect_reports_failure(monkeypatch, temp_home):
+    from course_assistant import connect
+
+    monkeypatch.setattr(connect, "connect", lambda *a, **k: [{"app": "Codex", "installed": False, "ok": False, "message": "nope"}])
+    assert run("connect", "codex") == 1
+
+
+def fake_importers(monkeypatch, fail=()):
+    mod = types.ModuleType("course_assistant.importers")
+
+    class ImportError_(Exception):
+        pass
+
+    imported = []
+
+    def import_file(store, course_id, src, **kw):
+        if src.name in fail:
+            raise ImportError_("unreadable")
+        imported.append((course_id, src.name, kw))
+        return 7
+
+    mod.ImportError_, mod.import_file = ImportError_, import_file
+    monkeypatch.setitem(sys.modules, "course_assistant.importers", mod)
+    return imported
+
+
+def test_import_requires_course_or_create(data, monkeypatch, capsys):
+    imported = fake_importers(monkeypatch)
+    f = data / "a.pdf"
+    f.write_text("x")
+    assert run("import", "Calculus", str(f)) == 1
+    assert "--create" in capsys.readouterr().err
+    assert run("import", "Calculus", str(f), "--create", "--kind", "slides") == 0
+    assert imported[0][1] == "a.pdf" and imported[0][2]["kind"] == "slides"
+    store = Store(paths.db_path())
+    assert [c["name"] for c in store.courses()] == ["Calculus"]
+    # second time finds it by a partial, case-insensitive name and by id
+    assert run("import", "calc", str(f)) == 0
+    assert run("import", str(store.courses()[0]["id"]), str(f)) == 0
+    assert len(store.courses()) == 1
+
+
+def test_import_ambiguous_and_errors(data, monkeypatch, capsys):
+    fake_importers(monkeypatch, fail={"bad.pdf"})
+    store = Store(paths.db_path())
+    store.add_course("Calculus I")
+    store.add_course("Calculus II")
+    good, bad = data / "good.pdf", data / "bad.pdf"
+    good.write_text("x")
+    bad.write_text("x")
+    assert run("import", "Calculus", str(good)) == 1
+    assert "More than one course" in capsys.readouterr().err
+    assert run("import", "Calculus I", str(good), str(bad), str(data / "missing.pdf")) == 1
+    err = capsys.readouterr().err
+    assert "Could not import bad.pdf: unreadable" in err and "not a file" in err
+
+
+def test_find_running_verifies_health_proof(monkeypatch):
+    from course_assistant.web import health_proof
+
+    paths.port_file().write_text("8123")
+
+    def fake_get(good):
+        def get(url, params=None, **kw):
+            nonce = params["nonce"]
+            key = paths.app_key() if good else "some-other-key"
+            return httpx.Response(200, json={"ok": True, "proof": health_proof(key, nonce, 8123)})
+        return get
+
+    monkeypatch.setattr(cli.httpx, "get", fake_get(False))  # another program, or another install
+    assert cli.find_running() is None
+    paths.port_file().write_text("8123")
+    monkeypatch.setattr(cli.httpx, "get", lambda *a, **k: httpx.Response(200, text="<html>hi</html>"))
+    assert cli.find_running() is None  # any HTTP answer is not enough
+    paths.port_file().write_text("8123")
+    monkeypatch.setattr(cli.httpx, "get", fake_get(True))
+    assert cli.find_running() == 8123
+
+
+def test_health_check_ignores_proxy_env(monkeypatch):
+    seen = {}
+
+    def fake_get(url, **kw):
+        seen.update(kw)
+        raise httpx.ConnectError("no")
+
+    monkeypatch.setattr(cli.httpx, "get", fake_get)
+    assert cli._answers(8766) is False
+    assert seen["trust_env"] is False
+
+
+def test_import_kind_is_validated(data, monkeypatch, capsys):
+    imported = fake_importers(monkeypatch)
+    f = data / "a.pdf"
+    f.write_text("x")
+    assert run("import", "X", str(f), "--create", "--kind", "bogus") == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err and "slides" in err
+    assert imported == []
+    assert run("import", "X", str(f), "--create", "--kind", "syllabus") == 0
+
+
+def test_repeat_import_says_already_saved(data, monkeypatch, capsys):
+    mod = types.ModuleType("course_assistant.importers")
+    mod.ImportError_ = type("ImportError_", (Exception,), {})
+
+    def import_file(store, course_id, src, **kw):
+        for m in store.materials(course_id):
+            if m["title"] == src.name:
+                return m["id"]
+        return store.add_material(course_id, "notes", src.name)
+
+    mod.import_file = import_file
+    monkeypatch.setitem(sys.modules, "course_assistant.importers", mod)
+    f = data / "syllabus.md"
+    f.write_text("x")
+    assert run("import", "C", str(f), "--create") == 0
+    assert "Saved syllabus.md" in capsys.readouterr().out
+    assert run("import", "C", str(f)) == 0
+    out = capsys.readouterr().out
+    assert "Already saved" in out and "Saved syllabus.md" not in out
+
+
+def test_serve_help_shows_default_port(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["serve", "--help"])
+    out = capsys.readouterr().out
+    assert "--port" in out and str(paths.DEFAULT_PORT) in out and "port to listen on" in out
+
+
+def test_serve_starts_background_jobs(monkeypatch):
+    seen = {}
+    web = types.ModuleType("course_assistant.web")
+    web.create_app = lambda store, **kw: seen.update(kw) or object()
+    monkeypatch.setitem(sys.modules, "course_assistant.web", web)
+    uv = types.ModuleType("uvicorn")
+    uv.run = lambda app, **kw: None
+    monkeypatch.setitem(sys.modules, "uvicorn", uv)
+    monkeypatch.setattr(cli, "find_running", lambda: None)
+    monkeypatch.setattr(cli, "_pick_port", lambda p: 8999)
+    cli.run_app(port=8766, open_browser=False)
+    assert seen.get("start_jobs") is True

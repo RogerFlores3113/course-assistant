@@ -1,0 +1,15 @@
+{% extends "base.html" %}{% from "_fields.html" import fa, fe with context %}{% block title %}{{ 'Edit course' if editing else 'Add a course' }} - Course Assistant{% endblock %}
+{% block body %}<section class="narrow"><h1>{{ 'Edit course' if editing else 'Add a course' }}</h1>
+<form method="post" class="form card" data-busy="Saving the course.">
+  <label>Course name <input name="name" required value="{{ course.name or '' }}" placeholder="Linear Algebra" {{ fa('course', 'name') }}></label>{{ fe('course', 'name') }}
+  <label>Course code (optional) <input name="code" value="{{ course.code or '' }}" placeholder="MATH 2210"></label>
+  <label>University (optional) <input name="university" value="{{ course.university or '' }}"></label>
+  <label>Term (optional) <input name="term" value="{{ course.term or '' }}" placeholder="Fall 2026"></label>
+  <label>Instructor (optional) <input name="instructor" value="{{ course.instructor or '' }}"></label>
+  <label>Course website (optional) <input name="website_url" type="url" value="{{ course.website_url or '' }}"></label>
+  <fieldset><legend>Color</legend><div class="swatches">
+  {% for n, hex in palette.items() %}<label class="swatch" style="{{ accent_style(hex) }}"><input type="radio" name="color" value="{{ n }}" {% if course.color == n %}checked{% endif %}><span class="dot"></span> {{ n | capitalize }}</label>{% endfor %}</div></fieldset>
+  <div class="row"><button class="btn" type="submit">{{ 'Save course' if editing else 'Add course' }}</button>
+  <a class="btn ghost" href="{{ '/courses/' ~ course.id if editing else '/' }}">Cancel</a></div>
+</form>
+{% if editing %}<p><a class="danger-link" href="/courses/{{ course.id }}/delete">Delete this course</a></p>{% endif %}</section>{% endblock %}

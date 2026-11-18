@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}Welcome - Course Assistant{% endblock %}
+{% block body %}<section class="narrow card"><h1>Welcome to Course Assistant</h1>
+<p>Save your slides, readings, notes and lecture recordings, then study from them with answers that point to the exact page, slide or timestamp.</p>
+<h2>Before you start</h2><p>{{ disclaimer_full }}</p>
+<form method="post" action="/welcome"><button class="btn" type="submit">I understand</button></form>
+<p class="muted">Everything stays on this computer. <a href="/privacy">Read how your data is handled.</a></p></section>{% endblock %}
