@@ -69,6 +69,6 @@ if sys.platform == "darwin":
         coll,
         name="Course Assistant.app",
         bundle_identifier="dev.rogerflores.courseassistant",
-        version="0.1.0",
+        version="0.2.0",
         info_plist={"NSHighResolutionCapable": True, "LSUIElement": False},
     )
